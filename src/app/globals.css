@@ -1,0 +1,229 @@
+@import "tailwindcss";
+
+/*
+ * テーマ: ここの CSS 変数を変えるだけで全体の配色を差し替えられる。
+ */
+:root {
+  --night-950: #04050d;
+  --night-900: #070a1a;
+  --night-800: #0b1026;
+  --night-700: #121a3a;
+  --night-600: #1b2550;
+  --gold-50: #faf3df;
+  --gold-200: #ecd9a6;
+  --gold-300: #dfc488;
+  --gold-400: #cfab66;
+  --gold-500: #b8904a;
+  --violet-300: #c3b5ff;
+  --violet-400: #a08cf5;
+  --violet-500: #7c66e0;
+  --violet-700: #3d2d7a;
+  --ink: #eef0fa;
+  --ink-muted: #a7acc8;
+  --ink-faint: #6f7596;
+  --danger: #ff8a8a;
+  --success: #8fe3b8;
+  --glass-bg: rgba(255, 255, 255, 0.055);
+  --glass-border: rgba(255, 255, 255, 0.12);
+}
+
+@theme inline {
+  --color-night-950: var(--night-950);
+  --color-night-900: var(--night-900);
+  --color-night-800: var(--night-800);
+  --color-night-700: var(--night-700);
+  --color-night-600: var(--night-600);
+  --color-gold-50: var(--gold-50);
+  --color-gold-200: var(--gold-200);
+  --color-gold-300: var(--gold-300);
+  --color-gold-400: var(--gold-400);
+  --color-gold-500: var(--gold-500);
+  --color-violet-300: var(--violet-300);
+  --color-violet-400: var(--violet-400);
+  --color-violet-500: var(--violet-500);
+  --color-violet-700: var(--violet-700);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-faint: var(--ink-faint);
+  --color-danger: var(--danger);
+  --color-success: var(--success);
+  --font-sans: var(--font-noto-sans), "Hiragino Sans", "Hiragino Kaku Gothic ProN", system-ui, sans-serif;
+  --font-serif: var(--font-shippori), "Hiragino Mincho ProN", "Yu Mincho", serif;
+  --font-display: var(--font-cormorant), var(--font-shippori), serif;
+}
+
+html {
+  color-scheme: dark;
+  -webkit-text-size-adjust: 100%;
+}
+
+.font-display { font-variant-numeric: lining-nums; }
+
+body {
+  background-color: var(--night-900);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* ---------- 夜空背景 ---------- */
+.sky {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  background:
+    radial-gradient(120% 70% at 85% -10%, rgba(124, 102, 224, 0.28), transparent 60%),
+    radial-gradient(90% 60% at -10% 110%, rgba(207, 171, 102, 0.12), transparent 60%),
+    radial-gradient(140% 100% at 50% 0%, var(--night-800), var(--night-950) 70%);
+}
+.sky::before,
+.sky::after {
+  content: "";
+  position: absolute;
+  inset: -50%;
+  background-repeat: repeat;
+  pointer-events: none;
+}
+.sky::before {
+  background-image:
+    radial-gradient(1px 1px at 20px 30px, rgba(255, 255, 255, 0.9), transparent 60%),
+    radial-gradient(1px 1px at 120px 80px, rgba(255, 255, 255, 0.6), transparent 60%),
+    radial-gradient(1.5px 1.5px at 200px 150px, rgba(236, 217, 166, 0.9), transparent 60%),
+    radial-gradient(1px 1px at 60px 190px, rgba(255, 255, 255, 0.7), transparent 60%),
+    radial-gradient(1px 1px at 260px 40px, rgba(195, 181, 255, 0.8), transparent 60%),
+    radial-gradient(1px 1px at 170px 230px, rgba(255, 255, 255, 0.5), transparent 60%);
+  background-size: 300px 260px;
+  animation: drift 160s linear infinite;
+  opacity: 0.85;
+}
+.sky::after {
+  background-image:
+    radial-gradient(1.5px 1.5px at 50px 60px, rgba(255, 255, 255, 0.95), transparent 60%),
+    radial-gradient(1px 1px at 180px 120px, rgba(236, 217, 166, 0.8), transparent 60%),
+    radial-gradient(1px 1px at 300px 20px, rgba(255, 255, 255, 0.7), transparent 60%),
+    radial-gradient(2px 2px at 90px 280px, rgba(195, 181, 255, 0.7), transparent 60%);
+  background-size: 380px 340px;
+  animation:
+    drift 240s linear infinite reverse,
+    twinkle 6s ease-in-out infinite;
+}
+@keyframes drift {
+  from { transform: translate3d(0, 0, 0); }
+  to { transform: translate3d(-300px, -260px, 0); }
+}
+@keyframes twinkle {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+
+/* ---------- Glass ---------- */
+.glass {
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.085), rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 20px 50px -20px rgba(0, 0, 0, 0.6);
+}
+.glass-strong {
+  background: linear-gradient(160deg, rgba(27, 37, 80, 0.96), rgba(11, 16, 38, 0.97));
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.text-gold-gradient {
+  background: linear-gradient(120deg, var(--gold-50), var(--gold-300) 45%, var(--gold-500));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.hairline {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(223, 196, 136, 0.55), transparent);
+}
+
+/* ---------- Buttons ---------- */
+.btn-gold {
+  background: linear-gradient(135deg, var(--gold-200), var(--gold-400) 55%, var(--gold-500));
+  color: var(--night-900);
+  box-shadow:
+    0 10px 30px -10px rgba(207, 171, 102, 0.65),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  transition: transform 0.15s ease, box-shadow 0.2s ease, filter 0.2s ease;
+}
+.btn-gold:hover { filter: brightness(1.05); }
+.btn-gold:active { transform: scale(0.98); }
+.btn-gold:disabled { filter: grayscale(0.4) brightness(0.75); cursor: not-allowed; transform: none; }
+
+.btn-ghost {
+  border: 1px solid rgba(223, 196, 136, 0.35);
+  color: var(--gold-200);
+  transition: background 0.2s ease, transform 0.15s ease;
+}
+.btn-ghost:hover { background: rgba(223, 196, 136, 0.08); }
+.btn-ghost:active { transform: scale(0.98); }
+
+/* ---------- Motion ---------- */
+.fade-in { animation: fadeIn 0.6s ease both; }
+.fade-up { animation: fadeUp 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.reveal { animation: reveal 0.9s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes fadeUp { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+@keyframes reveal {
+  from { opacity: 0; transform: translateY(24px) scale(0.97); filter: blur(6px); }
+  to { opacity: 1; transform: none; filter: blur(0); }
+}
+@keyframes orbit { to { transform: rotate(360deg); } }
+@keyframes pulseGlow {
+  0%, 100% { box-shadow: 0 0 30px 4px rgba(236, 217, 166, 0.25); }
+  50% { box-shadow: 0 0 60px 12px rgba(236, 217, 166, 0.45); }
+}
+@keyframes shimmer {
+  from { background-position: -200% 0; }
+  to { background-position: 200% 0; }
+}
+.animate-orbit { animation: orbit 6s linear infinite; }
+.animate-orbit-slow { animation: orbit 14s linear infinite reverse; }
+.animate-glow { animation: pulseGlow 3s ease-in-out infinite; }
+.shimmer {
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.08), transparent);
+  background-size: 200% 100%;
+  animation: shimmer 2.2s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ---------- Forms (管理画面) ---------- */
+.field {
+  width: 100%;
+  border-radius: 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(4, 5, 13, 0.55);
+  padding: 0.7rem 0.9rem;
+  font-size: 16px; /* iOS のズーム防止 */
+  color: var(--ink);
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.field:focus {
+  border-color: var(--gold-300);
+  box-shadow: 0 0 0 3px rgba(223, 196, 136, 0.18);
+}
+.field::placeholder { color: var(--ink-faint); }
+select.field { appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--ink-muted) 50%), linear-gradient(135deg, var(--ink-muted) 50%, transparent 50%); background-position: calc(100% - 18px) 55%, calc(100% - 13px) 55%; background-size: 5px 5px; background-repeat: no-repeat; padding-right: 2.2rem; }
+
+@media print {
+  .no-print { display: none !important; }
+  body { background: #fff !important; color: #000 !important; }
+  .sky { display: none; }
+}
