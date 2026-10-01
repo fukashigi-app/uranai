@@ -8,7 +8,8 @@ export function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
   const secure = req.nextUrl.protocol === "https:";
 
-  const qr = /^\/s\/([a-z0-9]{6,32})\/?$/.exec(pathname);
+  // 店舗コード（テスト店舗 "test" も含む）
+  const qr = /^\/s\/([a-z0-9]{4,32})\/?$/.exec(pathname);
   if (qr) {
     const res = NextResponse.next();
     res.cookies.set("qr_store", qr[1], {

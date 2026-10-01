@@ -1,19 +1,36 @@
-import Link from "next/link";
 import { redirect } from "next/navigation";
-import { PublicShell, Notice } from "@/components/public/public-shell";
+import { PublicShell, Notice, RestartButton } from "@/components/public/public-shell";
+import { getTestSession } from "@/lib/services/test-store";
 import { FortuneInputForm } from "@/components/public/fortune-input-form";
 import { getAccessToken } from "@/lib/cookies";
 import { getFortuneSession } from "@/lib/services/fortune";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
 
 export default async function FortuneInputPage() {
+  // テストモード（決済スキップ）で開始した占い
+  const test = await getTestSession();
+  if (test) {
+    if (test.status === "done") redirect("/fortune/result");
+    const item = FORTUNE_CATALOG[test.type];
+    return (
+      <PublicShell storeName={test.storeName} step={3}>
+        <div className="mb-5 flex items-center gap-2 rounded-2xl border border-violet-400/30 bg-violet-500/10 px-4 py-2.5 text-[13px] text-violet-300 fade-up">
+          <span aria-hidden>✓</span> テストモードのため決済をスキップしました
+        </div>
+        <h1 className="mb-1 font-serif text-2xl font-bold tracking-wide">{item.label}</h1>
+        <p className="mb-5 text-[13px] text-ink-muted">{item.inputLabel}を選んで「占ってみる」を押してください。</p>
+        <FortuneInputForm type={test.type} />
+      </PublicShell>
+    );
+  }
+
   const session = await getFortuneSession(await getAccessToken());
   if (session.state === "used") redirect("/fortune/result");
   if (session.state === "none") {
     return (
       <PublicShell>
-        <Notice title="お支払いが確認できません" action={<Link href="/fortune" className="btn-gold inline-block rounded-2xl px-6 py-3 font-bold">占いを選ぶ</Link>}>
-          占いのご利用にはお支払いが必要です。お支払い済みの場合は、お支払いをしたブラウザで開いてください。
+        <Notice title="占いの情報が見つかりません" action={<RestartButton />}>
+          トップページから占いを選んでください。お支払い済みの場合は、お支払いをしたブラウザで開いてください。
         </Notice>
       </PublicShell>
     );
@@ -21,7 +38,9 @@ export default async function FortuneInputPage() {
   if (session.state === "expired") {
     return (
       <PublicShell>
-        <Notice title="有効期限が切れています">お支払いから24時間が経過したため、この占いはご利用いただけません。</Notice>
+        <Notice title="有効期限が切れています" action={<RestartButton />}>
+          お支払いから24時間が経過したため、この占いはご利用いただけません。
+        </Notice>
       </PublicShell>
     );
   }
@@ -32,7 +51,7 @@ export default async function FortuneInputPage() {
         <span aria-hidden>✓</span> お支払いが完了しました
       </div>
       <h1 className="mb-1 font-serif text-2xl font-bold tracking-wide">{item.label}</h1>
-      <p className="mb-5 text-[13px] text-ink-muted">{item.inputLabel}を選んで「占う」を押してください。</p>
+      <p className="mb-5 text-[13px] text-ink-muted">{item.inputLabel}を選んで「占ってみる」を押してください。</p>
       <FortuneInputForm type={session.fortuneType} />
     </PublicShell>
   );

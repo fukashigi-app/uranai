@@ -5,6 +5,7 @@ import { FortuneIcon } from "@/components/public/fortune-icons";
 import { FortuneSelector } from "@/components/public/fortune-selector";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
 import { resolveVisitorStore } from "@/lib/services/test-store";
+import { isTestPaymentEnabled } from "@/lib/env";
 
 // QR Cookie・テストモードで表示が変わるため毎回サーバーで描画
 export const dynamic = "force-dynamic";
@@ -25,7 +26,7 @@ export default async function HomePage() {
           占いを選ぶ
           <span className="hairline flex-1" />
         </h2>
-        <FortuneSelector />
+        <FortuneSelector testMode={isTestPaymentEnabled()} />
       </PublicShell>
     );
   }

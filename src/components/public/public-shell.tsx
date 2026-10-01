@@ -16,7 +16,7 @@ export function PublicShell({
     <div className="mx-auto flex min-h-dvh w-full max-w-md flex-col px-5 pb-[max(1.5rem,env(safe-area-inset-bottom))] pt-[max(1rem,env(safe-area-inset-top))]">
       {isTestPaymentEnabled() ? (
         <p role="note" className="mb-2 rounded-xl border border-violet-400/40 bg-violet-500/15 px-3 py-1.5 text-center text-[11px] text-violet-300">
-          テストモード：実際の決済は行われません（動作確認用）
+          テストモード：現在テストモードのため決済は発生しません
         </p>
       ) : null}
       <header className="flex items-center justify-between py-2">
@@ -70,5 +70,14 @@ export function Notice({ title, children, action }: { title: string; children?: 
       {children ? <div className="mt-3 text-sm leading-relaxed text-ink-muted">{children}</div> : null}
       {action ? <div className="mt-6">{action}</div> : null}
     </div>
+  );
+}
+
+/** エラー・期限切れ時などに表示する「最初からやり直す」ボタン */
+export function RestartButton({ label = "最初からやり直す" }: { label?: string }) {
+  return (
+    <Link href="/" className="btn-gold inline-flex h-12 items-center justify-center rounded-2xl px-6 text-[15px] font-bold">
+      {label}
+    </Link>
   );
 }

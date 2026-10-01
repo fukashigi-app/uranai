@@ -6,8 +6,9 @@ import { z } from "zod";
  * "server-only" により、クライアントコンポーネントから import するとビルドが失敗する。
  *
  * 決済モード:
- *  - ENABLE_TEST_PAYMENT=true … テスト決済（実際の請求なし）。明示的に true の場合のみ有効
- *  - それ以外 …………………… PAYMENT_PROVIDER の本番決済が必須（未設定なら決済を受け付けない）
+ *  - ENABLE_TEST_PAYMENT=true … テストモード。決済をスキップして無料で占える（売上には一切記録しない）
+ *  - それ以外 …………………… 本番決済の成功確認が必須（決済が未設定なら占いは開始できない）
+ *  - PAYMENT_PROVIDER=mock …… 自動テスト用の疑似決済（本番環境では ALLOW_MOCK_PAYMENTS_IN_PRODUCTION=true が無い限り無効）
  */
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -22,12 +23,13 @@ const schema = z.object({
   PAYJP_WEBHOOK_TOKEN: z.string().optional(),
   MOCK_WEBHOOK_SECRET: z.string().optional(),
   CRON_SECRET: z.string().optional(),
+  ALLOW_MOCK_PAYMENTS_IN_PRODUCTION: z.string().optional(),
 });
 
 type RawEnv = z.infer<typeof schema>;
 export type Env = Omit<RawEnv, "APP_URL" | "PAYMENT_PROVIDER" | "MOCK_WEBHOOK_SECRET"> & {
   APP_URL: string;
-  /** 新規決済に使うプロバイダ。null = 決済受付不可（本番決済が未設定） */
+  /** 有料フローの新規決済に使うプロバイダ。null = 決済受付不可（本番決済が未設定） */
   PAYMENT_PROVIDER: "payjp" | "mock" | null;
   TEST_PAYMENT_ENABLED: boolean;
   MOCK_WEBHOOK_SECRET: string;
@@ -51,13 +53,13 @@ export function env(): Env {
     throw new Error(`Invalid environment variables: ${msg}`);
   }
   const e = parsed.data;
-  // テスト決済は明示的に有効化した場合のみ。ローカル開発（NODE_ENV!=production）では PAYMENT_PROVIDER=mock も可
-  const testEnabled = e.ENABLE_TEST_PAYMENT === "true" || (e.PAYMENT_PROVIDER === "mock" && e.NODE_ENV !== "production");
+  const testEnabled = e.ENABLE_TEST_PAYMENT === "true";
+  const mockAllowed = e.NODE_ENV !== "production" || e.ALLOW_MOCK_PAYMENTS_IN_PRODUCTION === "true";
 
   let provider: Env["PAYMENT_PROVIDER"] = null;
-  if (testEnabled) {
-    provider = "mock";
-  } else if ((e.PAYMENT_PROVIDER ?? "payjp") === "payjp") {
+  if (e.PAYMENT_PROVIDER === "mock") {
+    provider = mockAllowed ? "mock" : null;
+  } else {
     const configured = Boolean(e.PAYJP_PUBLIC_KEY && e.PAYJP_SECRET_KEY && e.PAYJP_WEBHOOK_TOKEN);
     if (configured && e.PAYJP_SECRET_KEY!.startsWith("pk_")) throw new Error("PAYJP_SECRET_KEY looks like a public key");
     provider = configured ? "payjp" : null;
@@ -76,9 +78,9 @@ export function env(): Env {
 
 export const isProduction = () => process.env.NODE_ENV === "production";
 
-/** テスト決済モード（ENABLE_TEST_PAYMENT=true）か。DB等が未設定でも落ちないよう個別に判定 */
+/** テストモード（ENABLE_TEST_PAYMENT=true）か。DB等の設定が無くても判定できるよう process.env を直接見る */
 export function isTestPaymentEnabled(): boolean {
-  return process.env.ENABLE_TEST_PAYMENT === "true" || (process.env.PAYMENT_PROVIDER === "mock" && process.env.NODE_ENV !== "production");
+  return process.env.ENABLE_TEST_PAYMENT === "true";
 }
 
 /** 本番(HTTPS)では Secure Cookie を必須にする */

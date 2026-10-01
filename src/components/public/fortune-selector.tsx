@@ -10,7 +10,10 @@ import { Spinner } from "@/components/ui/spinner";
 
 const TYPES: FortuneTypeValue[] = ["BIRTHDAY", "ZODIAC", "BLOOD"];
 
-export function FortuneSelector() {
+/**
+ * @param testMode ENABLE_TEST_PAYMENT=true のとき true（サーバーで判定して渡す）。決済をスキップして無料で占える
+ */
+export function FortuneSelector({ testMode = false }: { testMode?: boolean }) {
   const router = useRouter();
   const [selected, setSelected] = useState<FortuneTypeValue | null>(null);
   const [loading, setLoading] = useState(false);
@@ -21,7 +24,8 @@ export function FortuneSelector() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/checkout", {
+      // テストモードは決済をスキップする専用API、通常は決済セッション作成
+      const res = await fetch(testMode ? "/api/test-fortune" : "/api/checkout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ fortuneType: selected }),
@@ -34,7 +38,7 @@ export function FortuneSelector() {
         setLoading(false);
         return;
       }
-      router.push("/payment");
+      router.push(testMode ? "/fortune/input" : "/payment");
     } catch {
       setError("通信エラーが発生しました。電波の良い場所で、もう一度お試しください。");
       setLoading(false);
@@ -42,7 +46,7 @@ export function FortuneSelector() {
   }
 
   return (
-    <div className="pb-36">
+    <div className={testMode ? "pb-48" : "pb-36"}>
       <div role="radiogroup" aria-label="占いの種類" className="space-y-3.5">
         {TYPES.map((t, i) => {
           const item = FORTUNE_CATALOG[t];
@@ -118,10 +122,18 @@ export function FortuneSelector() {
               <>
                 <Spinner /> 準備しています…
               </>
+            ) : testMode ? (
+              "テストモード：無料で占う"
             ) : (
               `この占いを${DISPLAY_PRICE_JPY}円で始める`
             )}
           </button>
+          {testMode ? (
+            <p className="mt-2 text-center text-[11px] leading-relaxed text-violet-300">
+              現在テストモードのため決済は発生しません
+              <span className="block text-ink-faint">（本番ではここが「この占いを{DISPLAY_PRICE_JPY}円で始める」になります）</span>
+            </p>
+          ) : null}
         </div>
       </div>
     </div>

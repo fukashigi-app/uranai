@@ -6,6 +6,7 @@ import {
   ADVICE,
   BLOOD_TRAITS,
   ELEMENT_LABEL,
+  HEALTH,
   LIFE_PATH_TRAITS,
   LOVE,
   LUCKY_COLORS,
@@ -36,7 +37,7 @@ export type FortuneInput =
 export const fortuneInputSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("BIRTHDAY"),
-    birthDate: z.string().refine((v) => isValidBirthDate(v), "生年月日を正しく入力してください"),
+    birthDate: z.string().refine((v) => isValidBirthDate(v), "生年月日を正しく入力してください（未来の日付や存在しない日付は選べません）"),
   }),
   z.object({ type: z.literal("ZODIAC"), sign: z.enum(ZODIAC_KEYS) }),
   z.object({ type: z.literal("BLOOD"), bloodType: z.enum(BLOOD_TYPES) }),
@@ -93,6 +94,9 @@ export const templateEngine: FortuneEngine = {
     const love = categoryStars(rng, overall);
     const work = categoryStars(rng, overall);
     const money = categoryStars(rng, overall);
+    // 健康運は別系列の乱数で（既存カテゴリの結果を変えないため）
+    const healthRng = seedFor(this.id, date, key, "health");
+    const health = categoryStars(healthRng, overall);
 
     let subject = "";
     let traits = "";
@@ -127,6 +131,7 @@ export const templateEngine: FortuneEngine = {
       love: { stars: love, comment: rng.pick(LOVE[love]) },
       work: { stars: work, comment: rng.pick(WORK[work]) },
       money: { stars: money, comment: rng.pick(MONEY[money]) },
+      health: { stars: health, comment: healthRng.pick(HEALTH[health]) },
       luckyColor: rng.pick(LUCKY_COLORS),
       luckyItem: rng.pick(LUCKY_ITEMS),
       luckyNumber: rng.int(1, 9),

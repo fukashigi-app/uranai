@@ -7,7 +7,6 @@ import { siteConfig } from "@/config/site";
 import { activeProvider, isProviderId, PaymentUnavailableError } from "@/lib/payments";
 import { confirmCharge, markChargeFailed } from "@/lib/payments/confirm";
 import type { PaymentProvider } from "@/lib/payments/types";
-import { isTestPaymentEnabled } from "@/lib/env";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
 import { randomToken, sha256Hex } from "@/lib/security/crypto";
 
@@ -30,7 +29,8 @@ export async function findActiveStoreByCode(storeCode: string) {
   return store ?? null;
 }
 
-const TEST_STORE_CODE = "testmode0001";
+/** テスト店舗では有料決済を受け付けない（テストモードは決済を使わない別フロー） */
+const TEST_STORE_CODES = new Set(["test", "testmode0001"]);
 
 function providerOrThrow(): PaymentProvider {
   try {
@@ -54,7 +54,7 @@ export async function createCheckout(storeCode: string | null, fortuneType: Fort
   }
   const store = await findActiveStoreByCode(storeCode);
   if (!store) throw new CheckoutError("store_not_found", "店舗情報が見つかりません。お店のQRコードをもう一度読み込んでください。", 404);
-  if (store.status !== "ACTIVE" || (store.storeCode === TEST_STORE_CODE && !isTestPaymentEnabled())) {
+  if (store.status !== "ACTIVE" || TEST_STORE_CODES.has(store.storeCode)) {
     throw new CheckoutError("store_suspended", "こちらの店舗では現在ご利用いただけません。", 403);
   }
   const provider = providerOrThrow();

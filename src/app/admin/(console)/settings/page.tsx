@@ -12,8 +12,10 @@ export default async function AdminSettingsPage() {
   const user = await requireOperator();
   const e = env();
   const mode = e.TEST_PAYMENT_ENABLED
-    ? "テストモード（ENABLE_TEST_PAYMENT=true・実際の請求なし）"
-    : !e.PAYMENT_PROVIDER
+    ? "テストモード（ENABLE_TEST_PAYMENT=true・無料で占える・売上には記録しない）"
+    : e.PAYMENT_PROVIDER === "mock"
+      ? "自動テスト用の疑似決済（PAYMENT_PROVIDER=mock）"
+      : !e.PAYMENT_PROVIDER
       ? "未設定（決済を受け付けていません）"
       : e.PAYJP_SECRET_KEY?.startsWith("sk_live_")
         ? "本番（ライブ）"

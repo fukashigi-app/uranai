@@ -11,7 +11,8 @@ export function ResultView({ result }: { result: FortuneResultData }) {
     { key: "love", label: "恋愛運", icon: "♡", data: result.love },
     { key: "work", label: "仕事運", icon: "✦", data: result.work },
     { key: "money", label: "金運", icon: "◎", data: result.money },
-  ] as const;
+    ...(result.health ? [{ key: "health", label: "健康運", icon: "❀", data: result.health }] : []),
+  ];
 
   return (
     <div className="space-y-3.5">
@@ -49,7 +50,7 @@ export function ResultView({ result }: { result: FortuneResultData }) {
         </section>
       ))}
 
-      <section className="glass reveal grid grid-cols-2 gap-px overflow-hidden rounded-3xl bg-white/5 p-0" style={delay(3)}>
+      <section className="glass reveal grid grid-cols-2 gap-px overflow-hidden rounded-3xl bg-white/5 p-0" style={delay(categories.length)}>
         <Lucky label="ラッキーカラー">
           <span className="flex items-center justify-center gap-2">
             <span className="h-4 w-4 rounded-full border border-white/30" style={{ backgroundColor: result.luckyColor.hex }} aria-hidden />
@@ -63,12 +64,12 @@ export function ResultView({ result }: { result: FortuneResultData }) {
         <Lucky label="ラッキータイム">{result.luckyTime}</Lucky>
       </section>
 
-      <section className="reveal rounded-3xl border border-gold-300/25 bg-gold-300/[0.06] px-6 py-6 text-center" style={delay(4)}>
+      <section className="reveal rounded-3xl border border-gold-300/25 bg-gold-300/[0.06] px-6 py-6 text-center" style={delay(categories.length + 1)}>
         <p className="text-[11px] tracking-[0.3em] text-gold-300">今日の一言</p>
         <p className="mt-3 font-serif text-[17px] leading-loose text-gold-50">「{result.message}」</p>
       </section>
 
-      <section className="glass reveal space-y-3 rounded-3xl p-5 text-[13px] leading-relaxed text-ink-muted" style={delay(5)}>
+      <section className="glass reveal space-y-3 rounded-3xl p-5 text-[13px] leading-relaxed text-ink-muted" style={delay(categories.length + 2)}>
         <p className="text-ink">
           <span className="mr-2 rounded-full bg-gold-300/15 px-2 py-0.5 text-[11px] text-gold-200">開運アクション</span>
           {result.advice.replace(/^開運アクション：/, "")}

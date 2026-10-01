@@ -25,5 +25,5 @@ export async function getAccessToken(): Promise<string | null> {
 
 export async function getQrStoreCode(): Promise<string | null> {
   const v = (await cookies()).get(QR_STORE_COOKIE)?.value;
-  return v && /^[a-z0-9]{6,32}$/.test(v) ? v : null;
+  return v && /^[a-z0-9]{4,32}$/.test(v) ? v : null;
 }

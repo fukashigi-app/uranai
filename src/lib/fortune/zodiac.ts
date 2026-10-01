@@ -1,16 +1,16 @@
 export const ZODIAC_SIGNS = [
-  { key: "aries", name: "おひつじ座", symbol: "♈", range: "3/21〜4/19", element: "fire" },
-  { key: "taurus", name: "おうし座", symbol: "♉", range: "4/20〜5/20", element: "earth" },
-  { key: "gemini", name: "ふたご座", symbol: "♊", range: "5/21〜6/21", element: "air" },
-  { key: "cancer", name: "かに座", symbol: "♋", range: "6/22〜7/22", element: "water" },
-  { key: "leo", name: "しし座", symbol: "♌", range: "7/23〜8/22", element: "fire" },
-  { key: "virgo", name: "おとめ座", symbol: "♍", range: "8/23〜9/22", element: "earth" },
-  { key: "libra", name: "てんびん座", symbol: "♎", range: "9/23〜10/23", element: "air" },
-  { key: "scorpio", name: "さそり座", symbol: "♏", range: "10/24〜11/22", element: "water" },
-  { key: "sagittarius", name: "いて座", symbol: "♐", range: "11/23〜12/21", element: "fire" },
-  { key: "capricorn", name: "やぎ座", symbol: "♑", range: "12/22〜1/19", element: "earth" },
-  { key: "aquarius", name: "みずがめ座", symbol: "♒", range: "1/20〜2/18", element: "air" },
-  { key: "pisces", name: "うお座", symbol: "♓", range: "2/19〜3/20", element: "water" },
+  { key: "aries", name: "牡羊座", symbol: "♈", range: "3/21〜4/19", element: "fire" },
+  { key: "taurus", name: "牡牛座", symbol: "♉", range: "4/20〜5/20", element: "earth" },
+  { key: "gemini", name: "双子座", symbol: "♊", range: "5/21〜6/21", element: "air" },
+  { key: "cancer", name: "蟹座", symbol: "♋", range: "6/22〜7/22", element: "water" },
+  { key: "leo", name: "獅子座", symbol: "♌", range: "7/23〜8/22", element: "fire" },
+  { key: "virgo", name: "乙女座", symbol: "♍", range: "8/23〜9/22", element: "earth" },
+  { key: "libra", name: "天秤座", symbol: "♎", range: "9/23〜10/23", element: "air" },
+  { key: "scorpio", name: "蠍座", symbol: "♏", range: "10/24〜11/22", element: "water" },
+  { key: "sagittarius", name: "射手座", symbol: "♐", range: "11/23〜12/21", element: "fire" },
+  { key: "capricorn", name: "山羊座", symbol: "♑", range: "12/22〜1/19", element: "earth" },
+  { key: "aquarius", name: "水瓶座", symbol: "♒", range: "1/20〜2/18", element: "air" },
+  { key: "pisces", name: "魚座", symbol: "♓", range: "2/19〜3/20", element: "water" },
 ] as const;
 
 export type ZodiacKey = (typeof ZODIAC_SIGNS)[number]["key"];

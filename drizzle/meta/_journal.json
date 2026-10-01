@@ -8,6 +8,13 @@
       "when": 1790852360510,
       "tag": "0000_init",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1790882964713,
+      "tag": "0001_test_fortune_logs",
+      "breakpoints": true
     }
   ]
 }

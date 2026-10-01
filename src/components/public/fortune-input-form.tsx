@@ -1,12 +1,24 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { FortuneTypeValue } from "@/lib/db/schema";
 import { BLOOD_TYPES, ZODIAC_SIGNS } from "@/lib/fortune/zodiac";
 import { CelestialLoader } from "@/components/ui/spinner";
 
-const MIN_ANIMATION_MS = 2400;
+/** 演出の長さ（短すぎず、待たせすぎない 1.6 秒） */
+const MIN_ANIMATION_MS = 1600;
+const READING_LABELS = ["あなたの運勢を読み解いています…", "星の導きを確認しています…", "今日のメッセージを受け取っています…"];
+
+function ReadingAnimation() {
+  const [i, setI] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setI((v) => Math.min(v + 1, READING_LABELS.length - 1)), 650);
+    return () => clearInterval(t);
+  }, []);
+  return <CelestialLoader label={READING_LABELS[i]} />;
+}
 
 export function FortuneInputForm({ type }: { type: FortuneTypeValue }) {
   const router = useRouter();
@@ -28,6 +40,13 @@ export function FortuneInputForm({ type }: { type: FortuneTypeValue }) {
     e.preventDefault();
     if (!ready || reading) return;
     setError(null);
+    if (type === "BIRTHDAY") {
+      const picked = new Date(Number(year), Number(month) - 1, Number(day));
+      if (picked.getTime() > Date.now()) {
+        setError("未来の日付は選べません。生年月日を正しく選んでください。");
+        return;
+      }
+    }
     setReading(true);
     const body =
       type === "BIRTHDAY"
@@ -56,7 +75,7 @@ export function FortuneInputForm({ type }: { type: FortuneTypeValue }) {
   if (reading) {
     return (
       <div className="glass mt-6 rounded-3xl px-6 py-10">
-        <CelestialLoader label="星の巡りを読み解いています…" />
+        <ReadingAnimation />
       </div>
     );
   }
@@ -126,12 +145,15 @@ export function FortuneInputForm({ type }: { type: FortuneTypeValue }) {
       ) : null}
 
       {error ? (
-        <p role="alert" className="mt-4 rounded-2xl bg-danger/10 px-4 py-3 text-[13px] text-danger">
+        <div role="alert" className="mt-4 rounded-2xl bg-danger/10 px-4 py-3 text-[13px] text-danger">
           {error}
-        </p>
+          <Link href="/" className="mt-2 block text-[12px] text-ink-muted underline underline-offset-4">
+            最初からやり直す
+          </Link>
+        </div>
       ) : null}
       <button type="submit" disabled={!ready} className="btn-gold mt-6 h-14 w-full rounded-2xl text-base font-bold tracking-widest">
-        占う
+        占ってみる
       </button>
       <p className="mt-2 text-center text-[11px] text-ink-faint">※ 1回のお支払いにつき1回占えます</p>
     </form>

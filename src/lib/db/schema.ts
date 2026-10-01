@@ -221,6 +221,8 @@ export type FortuneResultData = {
   love: { stars: number; comment: string };
   work: { stars: number; comment: string };
   money: { stars: number; comment: string };
+  /** 健康運（後から追加したため古い結果には無い） */
+  health?: { stars: number; comment: string };
   luckyColor: { name: string; hex: string };
   luckyItem: string;
   luckyNumber: number;
@@ -309,6 +311,21 @@ export const auditLogs = pgTable(
     index("audit_logs_store_created_idx").on(t.storeId, t.createdAt),
     index("audit_logs_created_idx").on(t.createdAt),
   ],
+);
+
+/**
+ * テストモード（ENABLE_TEST_PAYMENT=true）での無料占いの利用記録。
+ * 売上（transactions）とは完全に別テーブル。個人情報（生年月日等）は保存しない。
+ */
+export const testFortuneLogs = pgTable(
+  "test_fortune_logs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    storeCode: varchar("store_code", { length: 32 }).notNull(),
+    fortuneType: fortuneType("fortune_type").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("test_fortune_logs_created_idx").on(t.createdAt)],
 );
 
 export const rateLimits = pgTable(

@@ -32,10 +32,11 @@ describe("templateEngine", () => {
   });
   it("星の数は1〜5、必要な項目がそろう", async () => {
     const r = await templateEngine.generate({ type: "ZODIAC", sign: "libra" }, day);
-    for (const k of ["overall", "love", "work", "money"] as const) {
-      expect(r[k].stars).toBeGreaterThanOrEqual(1);
-      expect(r[k].stars).toBeLessThanOrEqual(5);
-      expect(r[k].comment.length).toBeGreaterThan(0);
+    for (const k of ["overall", "love", "work", "money", "health"] as const) {
+      const v = r[k]!;
+      expect(v.stars).toBeGreaterThanOrEqual(1);
+      expect(v.stars).toBeLessThanOrEqual(5);
+      expect(v.comment.length).toBeGreaterThan(0);
     }
     expect(r.luckyColor.hex).toMatch(/^#[0-9a-f]{6}$/);
     expect(r.highlight).toMatch(/^今日の12星座ランキング ([1-9]|1[0-2])位$/);

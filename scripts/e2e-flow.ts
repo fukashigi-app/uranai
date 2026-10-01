@@ -5,7 +5,7 @@
  */
 import "dotenv/config";
 import assert from "node:assert/strict";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { authSessions, checkouts, fortuneResults, fortuneSessions, stores, transactions } from "@/lib/db/schema";
 import { randomToken, sha256Hex } from "@/lib/security/crypto";
@@ -197,23 +197,53 @@ async function main() {
   assert.equal(zeroed.transactionCount, 0);
   step("決済がなくなった店舗の未払い精算は再集計で0円に更新");
 
-  // 13c. テストモード: QRなしでもテスト店舗で 選択→決済→入力→結果 まで通る
+  // 13c. テストモード（ENABLE_TEST_PAYMENT=true）: 決済なしで 3種類すべて 選択→入力→占い→結果
+  const salesBefore = (await db().execute(sql`SELECT (SELECT count(*) FROM transactions)::int AS t, (SELECT count(*) FROM checkouts)::int AS c, (SELECT count(*) FROM fortune_sessions)::int AS f`)).rows[0];
+  const logsBefore = Number((await db().execute(sql`SELECT count(*)::int AS n FROM test_fortune_logs`)).rows[0].n);
   const guest = new Client();
   res = await guest.req("/");
-  assert.match(await res.text(), /テスト店舗（動作確認用）/);
-  res = await guest.req("/test");
-  assert.equal(res.status, 303);
-  assert.equal(guest.jar.get("qr_store"), "testmode0001");
-  const guest2 = new Client(); // QR Cookie なし
-  res = await guest2.req("/api/checkout", { method: "POST", json: { fortuneType: "ZODIAC" } });
-  assert.equal(res.status, 201, await res.clone().text());
-  res = await guest2.req("/api/checkout/pay", { method: "POST", json: { cardToken: "mock_tok_success" } });
-  assert.equal(((await res.json()) as { status: string }).status, "succeeded");
-  res = await guest2.req("/api/fortune", { method: "POST", json: { type: "ZODIAC", sign: "leo" } });
+  let html2 = await res.text();
+  assert.match(html2, /テスト店舗/);
+  assert.match(html2, /現在テストモードのため決済は発生しません/);
+  res = await guest.req("/s/test");
   assert.equal(res.status, 200);
-  res = await guest2.req("/fortune/result");
-  assert.match(await res.text(), /今日の総合運/);
-  step("テストモード: QRなし（テスト店舗）で 選択→テスト決済→入力→占い→結果 まで完了");
+  assert.equal(guest.jar.get("qr_store"), "test");
+  res = await guest.req("/api/test-fortune", { method: "POST", json: { fortuneType: "unknown" } });
+  assert.equal(res.status, 400);
+  const inputs = [
+    { slug: "birthday", body: { type: "BIRTHDAY", birthDate: "1998-06-11" } },
+    { slug: "zodiac", body: { type: "ZODIAC", sign: "leo" } },
+    { slug: "blood", body: { type: "BLOOD", bloodType: "AB" } },
+  ];
+  for (const { slug, body } of inputs) {
+    res = await guest.req("/api/test-fortune", { method: "POST", json: { fortuneType: slug } });
+    assert.equal(res.status, 200, await res.clone().text());
+    res = await guest.req("/fortune/input");
+    assert.equal(res.status, 200);
+    assert.match(await res.text(), /占ってみる/);
+    if (slug === "birthday") {
+      res = await guest.req("/api/fortune", { method: "POST", json: { type: "BIRTHDAY", birthDate: "2999-01-01" } });
+      assert.equal(res.status, 400); // 未来の日付は拒否
+    }
+    res = await guest.req("/api/fortune", { method: "POST", json: { type: "BLOOD", bloodType: "Z" } });
+    assert.equal(res.status, 400); // 不正な入力
+    res = await guest.req("/api/fortune", { method: "POST", json: body });
+    assert.equal(res.status, 200, await res.clone().text());
+    res = await guest.req("/fortune/result");
+    html2 = await res.text();
+    for (const w of ["今日の総合運", "恋愛運", "仕事運", "金運", "健康運", "ラッキーカラー", "ラッキーアイテム", "ラッキーナンバー", "今日の一言"]) assert.match(html2, new RegExp(w), `${slug}: ${w}`);
+    const again = await (await guest.req("/fortune/result")).text(); // 再読み込みでも同じ結果
+    assert.equal(again.match(/今日の一言[\s\S]{0,400}/)?.[0], html2.match(/今日の一言[\s\S]{0,400}/)?.[0]);
+    res = await guest.req("/fortune/input"); // 戻る操作 → 結果へ
+    assert.equal(res.status, 307);
+  }
+  const salesAfter = (await db().execute(sql`SELECT (SELECT count(*) FROM transactions)::int AS t, (SELECT count(*) FROM checkouts)::int AS c, (SELECT count(*) FROM fortune_sessions)::int AS f`)).rows[0];
+  assert.deepEqual(salesAfter, salesBefore, "テストモードは決済・売上テーブルに書き込まない");
+  const logsAfter = Number((await db().execute(sql`SELECT count(*)::int AS n FROM test_fortune_logs`)).rows[0].n);
+  assert.equal(logsAfter - logsBefore, 3);
+  res = await new Client().req("/fortune/result");
+  assert.match(await res.text(), /最初からやり直す/);
+  step("テストモード: 3種類すべて 選択→決済スキップ→入力→占い→結果（売上テーブルへの記録0件・テスト記録3件）");
 
   // 14. 認可: 店舗アカウントは自店舗のみ
   const otherStore = await createStore({ name: `E2E他店舗 ${Date.now()}`, contactName: "", postalCode: "", address: "", phone: "", email: "" }, { userId: null, role: "SYSTEM" });
