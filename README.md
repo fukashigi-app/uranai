@@ -63,13 +63,13 @@ npm run e2e         # 起動中のアプリに対し QR→100円決済→Webhook
 ## デプロイ（例: Vercel + Supabase / Neon）
 
 1. PostgreSQL を用意し `DATABASE_URL` を設定（マネージドDBは `?sslmode=require`）
-2. Vercel の Root Directory を `uranai` に設定し、`.env.example` の変数をすべて登録（`APP_URL` は https）
+2. Vercel でこのリポジトリをインポートし（Root Directory は空欄＝リポジトリ直下、Framework Preset は Next.js）、`.env.example` の変数をすべて登録（`APP_URL` は https）
 3. デプロイ前に `npm run db:migrate` を本番DBへ適用
 4. 運営アカウントを作成
    ```bash
    ADMIN_EMAIL=ops@example.com ADMIN_PASSWORD='強いパスワード123' npm run admin:create
    ```
-5. `vercel.json` の Cron が `/api/cron/maintenance` を毎時実行（`CRON_SECRET` を設定）。
+5. `vercel.json` の Cron が `/api/cron/maintenance` を毎日 03:17（JST）に実行（`CRON_SECRET` を設定。Hobby プランは1日1回まで）。
    期限切れ処理と、占い結果30日・未決済注文7日の自動削除を行います。
 
 ## 運用フロー
