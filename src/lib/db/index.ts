@@ -3,6 +3,7 @@ import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import * as schema from "./schema";
 import { env } from "@/lib/env";
+import { poolConfig } from "./connection";
 
 type DB = NodePgDatabase<typeof schema>;
 
@@ -12,12 +13,7 @@ function create(): DB {
   const url = env().DATABASE_URL;
   const pool =
     globalForDb.__uranaiPool ??
-    new Pool({
-      connectionString: url,
-      max: Number(process.env.DB_POOL_MAX ?? 5),
-      // Supabase/Neon 等のマネージドDBはTLS必須。ローカルは不要
-      ssl: /sslmode=require/.test(url) ? { rejectUnauthorized: false } : undefined,
-    });
+    new Pool(poolConfig(url, Number(process.env.DB_POOL_MAX ?? 5)));
   globalForDb.__uranaiPool = pool;
   return drizzle(pool, { schema });
 }

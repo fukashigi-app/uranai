@@ -260,31 +260,39 @@ function PayjpCardForm({
   );
 }
 
-/** 開発・検証用（PAYMENT_PROVIDER=mock）。実際の請求は発生しない */
+/** テストモード（ENABLE_TEST_PAYMENT=true）。実際の請求は発生しない */
 function MockCardForm({ busy, onToken }: { busy: boolean; onToken: (t: string) => void }) {
-  const [number, setNumber] = useState("4242 4242 4242 4242");
-  function onSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (busy) return;
-    const digits = number.replace(/\D/g, "");
-    onToken(digits === "4242424242424242" ? "mock_tok_success" : digits.endsWith("0002") ? "mock_tok_declined" : "mock_tok_invalid");
-  }
   return (
-    <form onSubmit={onSubmit} className="glass rounded-3xl p-5">
-      <p className="mb-4 rounded-xl border border-violet-400/30 bg-violet-500/10 px-3 py-2 text-[12px] leading-relaxed text-violet-300">
-        テスト決済モードです。実際の請求は発生しません。
+    <div className="glass rounded-3xl p-5">
+      <p className="rounded-xl border border-violet-400/30 bg-violet-500/10 px-3 py-2.5 text-[12px] leading-relaxed text-violet-300">
+        テストモードです。カード情報の入力は不要で、実際の請求は発生しません。
         <br />
-        成功: 4242 4242 4242 4242 ／ 失敗: 4000 0000 0000 0002
+        本番の決済導入後は、ここにカード入力フォームが表示されます。
       </p>
-      <label className="mb-1.5 block text-[12px] text-ink-muted" htmlFor="mock-number">
-        カード番号
-      </label>
-      <input id="mock-number" className="field font-mono tracking-wider" inputMode="numeric" autoComplete="off" value={number} onChange={(e) => setNumber(e.target.value)} />
-      <div className="mt-3 grid grid-cols-2 gap-3">
-        <input className="field" defaultValue="12 / 30" aria-label="有効期限" autoComplete="off" />
-        <input className="field" defaultValue="123" aria-label="セキュリティコード" inputMode="numeric" autoComplete="off" />
-      </div>
-      <PayButton busy={busy} label="処理しています…" />
-    </form>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!busy) onToken("mock_tok_success");
+        }}
+      >
+        <button type="submit" disabled={busy} className="btn-gold mt-5 flex h-14 w-full items-center justify-center gap-2 rounded-2xl text-base font-bold tracking-wide">
+          {busy ? (
+            <>
+              <Spinner /> 処理しています…
+            </>
+          ) : (
+            "テスト決済で進む（無料）"
+          )}
+        </button>
+      </form>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => onToken("mock_tok_declined")}
+        className="mt-3 w-full text-center text-[12px] text-ink-faint underline underline-offset-4"
+      >
+        決済失敗時の表示を確認する
+      </button>
+    </div>
   );
 }

@@ -5,7 +5,7 @@ import { PaymentForm } from "@/components/public/payment-form";
 import { FortuneIcon } from "@/components/public/fortune-icons";
 import { getAccessToken } from "@/lib/cookies";
 import { getCheckoutByToken } from "@/lib/services/checkout";
-import { activeProvider } from "@/lib/payments";
+import { activeProvider, PaymentUnavailableError } from "@/lib/payments";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
 
 export default async function PaymentPage() {
@@ -25,7 +25,18 @@ export default async function PaymentPage() {
     );
   }
 
-  const { provider, publicKey } = activeProvider().publicConfig();
+  let config: ReturnType<ReturnType<typeof activeProvider>["publicConfig"]>;
+  try {
+    config = activeProvider().publicConfig();
+  } catch (e) {
+    if (!(e instanceof PaymentUnavailableError)) throw e;
+    return (
+      <PublicShell storeName={storeName}>
+        <Notice title="ただいまお支払いを受け付けていません">お支払いは行われていません。お手数ですが、お店のスタッフにお知らせください。</Notice>
+      </PublicShell>
+    );
+  }
+  const { provider, publicKey } = config;
   const item = FORTUNE_CATALOG[checkout.fortuneType];
   return (
     <PublicShell storeName={storeName} step={2}>

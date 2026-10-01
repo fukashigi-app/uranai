@@ -22,7 +22,10 @@ export function safeEqual(a: string, b: string): boolean {
 }
 
 function encryptionKey(): Buffer {
-  const key = Buffer.from(env().DATA_ENCRYPTION_KEY, "base64");
+  const raw = env().DATA_ENCRYPTION_KEY;
+  // 口座情報を保存する時にだけ必要（未設定でも占い機能は動く）
+  if (!raw) throw new Error("DATA_ENCRYPTION_KEY is not set (required to store bank account info)");
+  const key = Buffer.from(raw, "base64");
   if (key.length !== 32) throw new Error("DATA_ENCRYPTION_KEY must be base64 of 32 bytes");
   return key;
 }

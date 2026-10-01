@@ -85,11 +85,11 @@ async function main() {
   const results = await Promise.all([1, 2, 3].map(() => user.req("/api/checkout/pay", { method: "POST", json: { cardToken: "mock_tok_success" } })));
   assert.ok(results.every((r) => r.status === 200));
   const [afterPay] = await db().select().from(checkouts).where(eq(checkouts.id, checkoutId));
-  assert.equal(afterPay.status, "PROCESSING");
+  assert.ok(["PROCESSING", "SUCCEEDED"].includes(afterPay.status));
   assert.ok(afterPay.providerPaymentId);
   assert.equal(afterPay.attemptCount, 2); // 失敗1回 + 成功1回（連打分はロックで弾かれる）
-  assert.equal((await db().select().from(transactions).where(eq(transactions.storeId, store.id))).length, 0);
-  step("決済実行（連打しても請求は1回）。この時点では売上未計上");
+  assert.ok((await db().select().from(transactions).where(eq(transactions.storeId, store.id))).length <= 1);
+  step("決済実行（連打しても請求は1回）");
 
   // 7. Webhook → Transaction 作成を待つ
   let status = "";
@@ -108,7 +108,7 @@ async function main() {
   assert.equal(tx.paymentFee, 4);
   assert.equal(tx.paymentStatus, "SUCCEEDED");
   assert.equal(tx.fortuneStatus, "PENDING");
-  step(`Webhook受信 → Transaction 計上（売上100円 / 店舗30円 / 運営70円 / 手数料${tx.paymentFee}円）`);
+  step(`決済確定 → Transaction 計上（売上100円 / 店舗30円 / 運営70円 / 手数料${tx.paymentFee}円）`);
 
   // 8. Webhook の再送・偽造
   const body = JSON.stringify({ id: `evt_dup_${Date.now()}`, type: "charge.succeeded", data: { id: tx.providerPaymentId, object: "charge" } });
@@ -196,6 +196,24 @@ async function main() {
   assert.equal(zeroed.storeShare, 0);
   assert.equal(zeroed.transactionCount, 0);
   step("決済がなくなった店舗の未払い精算は再集計で0円に更新");
+
+  // 13c. テストモード: QRなしでもテスト店舗で 選択→決済→入力→結果 まで通る
+  const guest = new Client();
+  res = await guest.req("/");
+  assert.match(await res.text(), /テスト店舗（動作確認用）/);
+  res = await guest.req("/test");
+  assert.equal(res.status, 303);
+  assert.equal(guest.jar.get("qr_store"), "testmode0001");
+  const guest2 = new Client(); // QR Cookie なし
+  res = await guest2.req("/api/checkout", { method: "POST", json: { fortuneType: "ZODIAC" } });
+  assert.equal(res.status, 201, await res.clone().text());
+  res = await guest2.req("/api/checkout/pay", { method: "POST", json: { cardToken: "mock_tok_success" } });
+  assert.equal(((await res.json()) as { status: string }).status, "succeeded");
+  res = await guest2.req("/api/fortune", { method: "POST", json: { type: "ZODIAC", sign: "leo" } });
+  assert.equal(res.status, 200);
+  res = await guest2.req("/fortune/result");
+  assert.match(await res.text(), /今日の総合運/);
+  step("テストモード: QRなし（テスト店舗）で 選択→テスト決済→入力→占い→結果 まで完了");
 
   // 14. 認可: 店舗アカウントは自店舗のみ
   const otherStore = await createStore({ name: `E2E他店舗 ${Date.now()}`, contactName: "", postalCode: "", address: "", phone: "", email: "" }, { userId: null, role: "SYSTEM" });

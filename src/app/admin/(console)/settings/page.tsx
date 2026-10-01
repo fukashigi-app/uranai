@@ -11,16 +11,22 @@ export const metadata = { title: "設定" };
 export default async function AdminSettingsPage() {
   const user = await requireOperator();
   const e = env();
-  const mode = e.PAYMENT_PROVIDER === "mock" ? "テスト（Mock・実際の請求なし）" : e.PAYJP_SECRET_KEY?.startsWith("sk_live_") ? "本番（ライブ）" : "テスト（PAY.JP テストモード）";
+  const mode = e.TEST_PAYMENT_ENABLED
+    ? "テストモード（ENABLE_TEST_PAYMENT=true・実際の請求なし）"
+    : !e.PAYMENT_PROVIDER
+      ? "未設定（決済を受け付けていません）"
+      : e.PAYJP_SECRET_KEY?.startsWith("sk_live_")
+        ? "本番（ライブ）"
+        : "PAY.JP テストモード";
   const rows: [string, string][] = [
     ["サービス名", siteConfig.name],
     ["公開URL", e.APP_URL],
     ["価格（サーバー固定）", `${PRICE_JPY}円`],
     ["店舗配分率（既定）", `${DEFAULT_STORE_SHARE_BPS / 100}%（運営 ${100 - DEFAULT_STORE_SHARE_BPS / 100}%）`],
     ["決済手数料率（既定）", `${defaultFeeRateBps() / 100}%（PAY.JPは決済ごとの fee_rate を優先）`],
-    ["決済プロバイダ", e.PAYMENT_PROVIDER],
+    ["決済プロバイダ", e.PAYMENT_PROVIDER ?? "—"],
     ["決済モード", mode],
-    ["Webhook URL", `${e.APP_URL}/api/webhooks/${e.PAYMENT_PROVIDER}`],
+    ["Webhook URL", e.PAYMENT_PROVIDER ? `${e.APP_URL}/api/webhooks/${e.PAYMENT_PROVIDER}` : "—"],
     ["定期メンテナンス", e.CRON_SECRET ? "設定済み（/api/cron/maintenance）" : "未設定（CRON_SECRET を設定してください）"],
   ];
   return (

@@ -82,6 +82,7 @@ export default async function AdminTransactionsPage(props: PageProps<"/admin/tra
               <td className="tabular-nums">{t.paymentFee}</td>
               <td>
                 <StatusBadge status={t.paymentStatus} />
+                {t.provider === "mock" ? <span className="ml-1 rounded-full border border-violet-400/40 px-1.5 text-[10px] text-violet-300">テスト</span> : null}
               </td>
               <td>
                 <StatusBadge status={t.fortuneStatus} />

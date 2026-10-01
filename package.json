@@ -13,7 +13,8 @@
     "db:migrate": "tsx scripts/migrate.ts",
     "db:seed": "tsx --conditions=react-server scripts/seed.ts",
     "admin:create": "tsx --conditions=react-server scripts/create-admin.ts",
-    "e2e": "tsx --conditions=react-server scripts/e2e-flow.ts"
+    "e2e": "tsx --conditions=react-server scripts/e2e-flow.ts",
+    "vercel-build": "tsx scripts/migrate.ts && next build"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.3",

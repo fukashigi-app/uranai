@@ -4,6 +4,8 @@ import { Hero } from "@/components/public/hero";
 import { FortuneSelector } from "@/components/public/fortune-selector";
 import { findActiveStoreByCode } from "@/lib/services/checkout";
 import { isPlausibleStoreCode } from "@/lib/security/crypto";
+import { isTestPaymentEnabled } from "@/lib/env";
+import { isTestStoreCode } from "@/lib/services/test-store";
 
 export const metadata: Metadata = { robots: { index: false } };
 
@@ -23,7 +25,7 @@ export default async function StoreTopPage(props: PageProps<"/s/[storeCode]">) {
       </PublicShell>
     );
   }
-  if (store.status !== "ACTIVE") {
+  if (store.status !== "ACTIVE" || (isTestStoreCode(store.storeCode) && !isTestPaymentEnabled())) {
     return (
       <PublicShell storeName={store.name}>
         <Notice title="現在ご利用いただけません">こちらの店舗では、ただいま占いを休止しています。またのご利用をお待ちしております。</Notice>

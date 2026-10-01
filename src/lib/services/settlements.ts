@@ -12,6 +12,7 @@ export const SETTLEMENT_LABEL: Record<SettlementStatus, string> = { UNPAID: "未
 /**
  * 月次精算を作成/更新する（締め済みの月のみ）。
  * 未払い(UNPAID)の行は最新の集計で更新、処理中・支払済の行は変更しない。
+ * テスト決済（payment_provider = 'mock'）は振込対象外。
  */
 export async function generateSettlements(yearMonth: string, actor: Actor): Promise<{ upserted: number; skipped: number }> {
   if (!isValidYearMonth(yearMonth)) throw new Error("invalid yearMonth");
@@ -22,6 +23,8 @@ export async function generateSettlements(yearMonth: string, actor: Actor): Prom
       SELECT store_id, count(*)::int AS cnt, sum(amount)::int AS gross, sum(store_share)::int AS share
       FROM transactions
       WHERE payment_status = 'SUCCEEDED' AND paid_at >= ${start.toISOString()} AND paid_at < ${end.toISOString()}
+        -- テスト決済（請求なし）は店舗への振込対象にしない
+        AND payment_provider <> 'mock'
       GROUP BY store_id`);
     let upserted = 0;
     let skipped = 0;

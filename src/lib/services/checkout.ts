@@ -4,9 +4,10 @@ import { db } from "@/lib/db";
 import { checkouts, stores, type FortuneTypeValue } from "@/lib/db/schema";
 import { CHECKOUT_TTL_MS, CURRENCY, PRICE_JPY } from "@/config/pricing";
 import { siteConfig } from "@/config/site";
-import { activeProvider } from "@/lib/payments";
+import { activeProvider, isProviderId, PaymentUnavailableError } from "@/lib/payments";
 import { confirmCharge, markChargeFailed } from "@/lib/payments/confirm";
-import { isProviderId } from "@/lib/payments";
+import type { PaymentProvider } from "@/lib/payments/types";
+import { isTestPaymentEnabled } from "@/lib/env";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
 import { randomToken, sha256Hex } from "@/lib/security/crypto";
 
@@ -29,6 +30,19 @@ export async function findActiveStoreByCode(storeCode: string) {
   return store ?? null;
 }
 
+const TEST_STORE_CODE = "testmode0001";
+
+function providerOrThrow(): PaymentProvider {
+  try {
+    return activeProvider();
+  } catch (e) {
+    if (e instanceof PaymentUnavailableError) {
+      throw new CheckoutError("payment_unavailable", "ただいまお支払いを受け付けていません。お手数ですがお店のスタッフにお知らせください。", 503);
+    }
+    throw e;
+  }
+}
+
 /**
  * 決済セッション（注文）を作成する。
  * 店舗はクライアントが送る storeId ではなく、QR由来の storeCode を DB で再照会して決定する。
@@ -40,10 +54,10 @@ export async function createCheckout(storeCode: string | null, fortuneType: Fort
   }
   const store = await findActiveStoreByCode(storeCode);
   if (!store) throw new CheckoutError("store_not_found", "店舗情報が見つかりません。お店のQRコードをもう一度読み込んでください。", 404);
-  if (store.status !== "ACTIVE") {
+  if (store.status !== "ACTIVE" || (store.storeCode === TEST_STORE_CODE && !isTestPaymentEnabled())) {
     throw new CheckoutError("store_suspended", "こちらの店舗では現在ご利用いただけません。", 403);
   }
-  const provider = activeProvider();
+  const provider = providerOrThrow();
   const token = randomToken(32);
   const [row] = await db()
     .insert(checkouts)
@@ -117,7 +131,7 @@ export async function payCheckout(token: string | null, cardToken: string): Prom
     throw new CheckoutError("too_many_attempts", "お支払いの試行回数が上限に達しました。占いの選択からやり直してください。", 429);
   }
 
-  const provider = activeProvider();
+  const provider = providerOrThrow();
   if (provider.id !== checkout.provider) {
     throw new CheckoutError("provider_changed", "決済方法が変更されました。占いの選択からやり直してください。", 409);
   }
@@ -158,6 +172,13 @@ export async function payCheckout(token: string | null, cardToken: string): Prom
     .update(checkouts)
     .set({ providerPaymentId: result.charge.id })
     .where(and(eq(checkouts.id, checkout.id), sql`${checkouts.providerPaymentId} IS NULL`));
+
+  if (provider.id === "mock") {
+    // テスト決済は Webhook の到着を待たずにその場で確定する（Vercel のサーバーレスでも確実に完了させるため）。
+    // confirmCharge は署名付き Charge を検証し直すため、クライアント申告は使わない
+    const outcome = await confirmCharge("mock", result.charge.id);
+    if (outcome.status === "confirmed" || outcome.status === "duplicate") return { status: "succeeded" };
+  }
   return { status: "processing" };
 }
 

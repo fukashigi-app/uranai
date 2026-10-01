@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { Logo } from "@/components/ui/logo";
+import { isTestPaymentEnabled } from "@/lib/env";
 
 export function PublicShell({
   children,
@@ -13,6 +14,11 @@ export function PublicShell({
 }) {
   return (
     <div className="mx-auto flex min-h-dvh w-full max-w-md flex-col px-5 pb-[max(1.5rem,env(safe-area-inset-bottom))] pt-[max(1rem,env(safe-area-inset-top))]">
+      {isTestPaymentEnabled() ? (
+        <p role="note" className="mb-2 rounded-xl border border-violet-400/40 bg-violet-500/15 px-3 py-1.5 text-center text-[11px] text-violet-300">
+          テストモード：実際の決済は行われません（動作確認用）
+        </p>
+      ) : null}
       <header className="flex items-center justify-between py-2">
         <Logo />
         {storeName ? (

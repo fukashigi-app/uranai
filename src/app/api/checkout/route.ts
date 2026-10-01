@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { guardPost, jsonError, jsonOk, readJson } from "@/lib/api";
 import { getAccessToken, getQrStoreCode, setAccessCookie } from "@/lib/cookies";
+import { resolveVisitorStore } from "@/lib/services/test-store";
 import { getFortuneSession } from "@/lib/services/fortune";
 import { CheckoutError, createCheckout, getCheckoutByToken } from "@/lib/services/checkout";
 
@@ -28,7 +29,9 @@ export async function POST(req: Request) {
     }
   }
   try {
-    const { checkoutId, accessToken } = await createCheckout(await getQrStoreCode(), body.fortuneType);
+    // QR の店舗コードを優先。QR なしはテストモード時のみテスト店舗（本番では QR 必須）
+    const storeCode = (await getQrStoreCode()) ?? (await resolveVisitorStore())?.storeCode ?? null;
+    const { checkoutId, accessToken } = await createCheckout(storeCode, body.fortuneType);
     await setAccessCookie(accessToken);
     return jsonOk({ checkoutId }, 201);
   } catch (e) {

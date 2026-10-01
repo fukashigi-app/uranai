@@ -28,8 +28,18 @@ seed 後に表示されるQR URL（`/s/xxxxxxxxxxxx`）をスマホ幅で開く�
 | 店舗管理 | `/store/login` | store@example.com / StorePass2026 |
 | 運営管理 | `/admin/login` | admin@example.com / AdminPass2026 |
 
-`PAYMENT_PROVIDER=mock` ではテスト用カード番号 `4242 4242 4242 4242`（成功）/ `4000 0000 0000 0002`（失敗）で決済でき、
-Webhook も自動送信されます。**mock は本番環境では起動を拒否**します。
+## テストモード（決済なしで動作確認）
+
+`ENABLE_TEST_PAYMENT=true` のときだけ有効になります（Vercel でも同じ）。
+
+- トップ `/` からそのまま占いを選べます（QRなしの場合は「テスト店舗（動作確認用）」が自動で使われます）
+- `/test` を開くとテスト店舗を選んだ状態で占い選択に進みます
+- お支払い画面は「テスト決済で進む（無料）」ボタンのみ。実際の請求は発生しません
+- 画面上部に「テストモード」と表示されます。テスト決済は店舗への振込（月次精算）の対象外です
+
+`ENABLE_TEST_PAYMENT=false`（または未設定）にすると、テスト決済・テスト店舗・`/test` はすべて使えなくなり、
+本番決済（`PAYMENT_PROVIDER`）が必須になります。本番決済が未設定の場合は「ただいまお支払いを受け付けていません」と表示され、
+無料で占いが使われることはありません。設定状況は `/api/health` で確認できます（秘密情報は表示しません）。
 
 ## テスト
 
@@ -64,7 +74,7 @@ npm run e2e         # 起動中のアプリに対し QR→100円決済→Webhook
 
 1. PostgreSQL を用意し `DATABASE_URL` を設定（マネージドDBは `?sslmode=require`）
 2. Vercel でこのリポジトリをインポートし（Root Directory は空欄＝リポジトリ直下、Framework Preset は Next.js）、`.env.example` の変数をすべて登録（`APP_URL` は https）
-3. デプロイ前に `npm run db:migrate` を本番DBへ適用
+3. マイグレーションは Vercel のビルド時（`vercel-build`）に自動適用されます（手動なら `npm run db:migrate`）
 4. 運営アカウントを作成
    ```bash
    ADMIN_EMAIL=ops@example.com ADMIN_PASSWORD='強いパスワード123' npm run admin:create

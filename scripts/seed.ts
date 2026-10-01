@@ -49,11 +49,11 @@ async function main() {
         FROM generate_series(1, 260) g
       ), co AS (
         INSERT INTO checkouts (store_id, fortune_type, amount, status, provider, provider_payment_id, access_token_hash, attempt_count, expires_at, created_at)
-        SELECT ${store.id}, ft, 100, 'SUCCEEDED', 'mock', 'seed_' || g, md5('seed' || g || ${store.id}) || md5(g::text), 1, paid_at, paid_at FROM src
+        SELECT ${store.id}, ft, 100, 'SUCCEEDED', 'demo', 'seed_' || g, md5('seed' || g || ${store.id}) || md5(g::text), 1, paid_at, paid_at FROM src
         RETURNING id, provider_payment_id, fortune_type, created_at
       )
       INSERT INTO transactions (checkout_id, payment_provider, provider_payment_id, store_id, fortune_type, amount, store_share, operator_share, payment_fee, store_share_bps, fortune_status, paid_at)
-      SELECT id, 'mock', provider_payment_id, ${store.id}, fortune_type, 100, 30, 70, 4, 3000, 'COMPLETED', created_at FROM co`);
+      SELECT id, 'demo', provider_payment_id, ${store.id}, fortune_type, 100, 30, 70, 4, 3000, 'COMPLETED', created_at FROM co`);
     console.log("  demo history: 260 transactions");
   }
 
