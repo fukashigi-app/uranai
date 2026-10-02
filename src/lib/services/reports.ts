@@ -5,6 +5,15 @@ import { jstMonthRange, jstYearMonth, shiftYearMonth } from "@/lib/time";
 
 /** 集計は payment_status = 'SUCCEEDED'（返金除外）、JST で日/月を区切る */
 
+/**
+ * 本番の売上にテスト用の疑似決済（payment_provider = 'mock'）を含めない条件。
+ * 以前のテストモードが transactions に記録した疑似決済も、ここで売上集計から除外される。
+ * 例外: 自動テスト環境（PAYMENT_PROVIDER=mock を明示設定）では疑似決済が唯一の決済手段なので集計に含める。
+ */
+function realPaymentsOnly() {
+  return process.env.PAYMENT_PROVIDER === "mock" ? sql`` : sql`AND payment_provider <> 'mock'`;
+}
+
 export type Totals = { count: number; gross: number; storeShare: number; operatorShare: number; fee: number };
 
 const num = (v: unknown) => Number(v ?? 0);
@@ -19,7 +28,7 @@ const totalsSelect = sql`count(*)::int AS count, coalesce(sum(amount),0)::int AS
 export async function totalsBetween(start: Date, end: Date, storeId?: string): Promise<Totals> {
   const res = await db().execute(sql`
     SELECT ${totalsSelect} FROM transactions
-    WHERE payment_status = 'SUCCEEDED' AND paid_at >= ${start.toISOString()} AND paid_at < ${end.toISOString()}
+    WHERE payment_status = 'SUCCEEDED' ${realPaymentsOnly()} AND paid_at >= ${start.toISOString()} AND paid_at < ${end.toISOString()}
     ${storeId ? sql`AND store_id = ${storeId}` : sql``}`);
   return toTotals(res.rows[0]);
 }
@@ -35,7 +44,7 @@ export async function dailySeries(yearMonth: string, storeId?: string): Promise<
   const res = await db().execute(sql`
     SELECT extract(day FROM paid_at AT TIME ZONE 'Asia/Tokyo')::int AS day, count(*)::int AS count, coalesce(sum(amount),0)::int AS gross
     FROM transactions
-    WHERE payment_status = 'SUCCEEDED' AND paid_at >= ${start.toISOString()} AND paid_at < ${end.toISOString()}
+    WHERE payment_status = 'SUCCEEDED' ${realPaymentsOnly()} AND paid_at >= ${start.toISOString()} AND paid_at < ${end.toISOString()}
     ${storeId ? sql`AND store_id = ${storeId}` : sql``}
     GROUP BY 1`);
   const days = Math.round((end.getTime() - start.getTime()) / 86400000);
@@ -52,7 +61,7 @@ export async function monthlySeries(months: number, storeId?: string): Promise<(
   const res = await db().execute(sql`
     SELECT to_char(paid_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM') AS ym, ${totalsSelect}
     FROM transactions
-    WHERE payment_status = 'SUCCEEDED' AND paid_at >= ${start.toISOString()} AND paid_at < ${end.toISOString()}
+    WHERE payment_status = 'SUCCEEDED' ${realPaymentsOnly()} AND paid_at >= ${start.toISOString()} AND paid_at < ${end.toISOString()}
     ${storeId ? sql`AND store_id = ${storeId}` : sql``}
     GROUP BY 1`);
   const map = new Map(res.rows.map((r) => [String(r.ym), r]));
@@ -72,24 +81,56 @@ export type StoreListRow = {
   name: string;
   storeCode: string;
   status: "ACTIVE" | "SUSPENDED";
-  monthCount: number;
-  totalGross: number;
-  totalStoreShare: number;
+  /** 以下はすべて同じ集計期間（period）の値。transactions の決済成功分のみ（返金除外） */
+  count: number;
+  gross: number;
+  storeShare: number;
+  operatorShare: number;
+  /** 最終利用日時（期間に関係なく直近の利用） */
   lastUsedAt: Date | null;
 };
 
+export type Range = { start: Date; end: Date } | null;
+
+/** 期間条件（null = 全期間）。t は transactions の別名 */
+function rangeCond(range: Range) {
+  return range ? sql`AND t.paid_at >= ${range.start.toISOString()} AND t.paid_at < ${range.end.toISOString()}` : sql``;
+}
+
+/** 期間内の合計（storeId 指定で1店舗、未指定で全店舗）。null = 全期間 */
+export async function totalsForRange(range: Range, storeId?: string): Promise<Totals> {
+  const res = await db().execute(sql`
+    SELECT ${totalsSelect} FROM transactions t
+    WHERE t.payment_status = 'SUCCEEDED' ${realPaymentsOnly()} ${rangeCond(range)}
+    ${storeId ? sql`AND t.store_id = ${storeId}` : sql``}`);
+  return toTotals(res.rows[0]);
+}
+
 const SORTS = {
   name: sql`s.name`,
-  monthCount: sql`month_count`,
-  totalGross: sql`total_gross`,
+  count: sql`cnt`,
+  gross: sql`gross`,
+  storeShare: sql`store_share`,
+  operatorShare: sql`operator_share`,
   lastUsedAt: sql`last_used_at`,
   createdAt: sql`s.created_at`,
 } as const;
 export type StoreSort = keyof typeof SORTS;
 export const isStoreSort = (v: string): v is StoreSort => v in SORTS;
 
-export async function listStores(opts: { q?: string; status?: "ACTIVE" | "SUSPENDED"; sort: StoreSort; dir: "asc" | "desc"; page: number; perPage: number }) {
-  const { start, end } = jstMonthRange(jstYearMonth());
+/**
+ * 店舗一覧の集計。件数・総売上・店舗取り分・運営取り分は、すべて同じ期間の transactions を合計する。
+ * 取り分は決済時に transactions へ保存された値の合計（取り分率を後で変えても過去分は変わらない）。
+ */
+export async function listStores(opts: {
+  q?: string;
+  status?: "ACTIVE" | "SUSPENDED";
+  range: Range;
+  sort: StoreSort;
+  dir: "asc" | "desc";
+  page: number;
+  perPage: number;
+}) {
   const q = opts.q?.trim();
   const where = sql`WHERE 1=1
     ${q ? sql`AND (s.name ILIKE ${"%" + q.replace(/[%_\\]/g, "\\$&") + "%"} OR s.store_code = ${q.toLowerCase()})` : sql``}
@@ -97,14 +138,17 @@ export async function listStores(opts: { q?: string; status?: "ACTIVE" | "SUSPEN
   const order = sql.join([SORTS[opts.sort], opts.dir === "asc" ? sql`ASC NULLS FIRST` : sql`DESC NULLS LAST`], sql` `);
   const rows = await db().execute(sql`
     SELECT s.id, s.name, s.store_code, s.status,
-      coalesce(t.month_count,0)::int AS month_count, coalesce(t.total_gross,0)::int AS total_gross,
-      coalesce(t.total_store_share,0)::int AS total_store_share, t.last_used_at
+      coalesce(p.cnt,0)::int AS cnt, coalesce(p.gross,0)::int AS gross,
+      coalesce(p.store_share,0)::int AS store_share, coalesce(p.operator_share,0)::int AS operator_share,
+      l.last_used_at
     FROM stores s
     LEFT JOIN LATERAL (
-      SELECT count(*) FILTER (WHERE paid_at >= ${start.toISOString()} AND paid_at < ${end.toISOString()}) AS month_count,
-        sum(amount) AS total_gross, sum(store_share) AS total_store_share, max(paid_at) AS last_used_at
-      FROM transactions WHERE store_id = s.id AND payment_status = 'SUCCEEDED'
-    ) t ON true
+      SELECT count(*) AS cnt, sum(t.amount) AS gross, sum(t.store_share) AS store_share, sum(t.operator_share) AS operator_share
+      FROM transactions t WHERE t.store_id = s.id AND t.payment_status = 'SUCCEEDED' ${realPaymentsOnly()} ${rangeCond(opts.range)}
+    ) p ON true
+    LEFT JOIN LATERAL (
+      SELECT max(t.paid_at) AS last_used_at FROM transactions t WHERE t.store_id = s.id AND t.payment_status = 'SUCCEEDED' ${realPaymentsOnly()}
+    ) l ON true
     ${where}
     ORDER BY ${order}, s.id
     LIMIT ${opts.perPage} OFFSET ${(opts.page - 1) * opts.perPage}`);
@@ -117,9 +161,10 @@ export async function listStores(opts: { q?: string; status?: "ACTIVE" | "SUSPEN
         name: String(r.name),
         storeCode: String(r.store_code),
         status: r.status as StoreListRow["status"],
-        monthCount: num(r.month_count),
-        totalGross: num(r.total_gross),
-        totalStoreShare: num(r.total_store_share),
+        count: num(r.cnt),
+        gross: num(r.gross),
+        storeShare: num(r.store_share),
+        operatorShare: num(r.operator_share),
         lastUsedAt: r.last_used_at ? new Date(String(r.last_used_at)) : null,
       }),
     ),
@@ -128,7 +173,7 @@ export async function listStores(opts: { q?: string; status?: "ACTIVE" | "SUSPEN
 
 export async function listTransactions(opts: { storeId?: string; yearMonth?: string; page: number; perPage: number }) {
   const range = opts.yearMonth ? jstMonthRange(opts.yearMonth) : null;
-  const where = sql`WHERE 1=1
+  const where = sql`WHERE 1=1 ${realPaymentsOnly()}
     ${opts.storeId ? sql`AND t.store_id = ${opts.storeId}` : sql``}
     ${range ? sql`AND t.paid_at >= ${range.start.toISOString()} AND t.paid_at < ${range.end.toISOString()}` : sql``}`;
   const rows = await db().execute(sql`

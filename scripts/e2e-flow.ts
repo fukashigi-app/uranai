@@ -10,7 +10,10 @@ import { db } from "@/lib/db";
 import { authSessions, checkouts, fortuneResults, fortuneSessions, stores, transactions } from "@/lib/db/schema";
 import { randomToken, sha256Hex } from "@/lib/security/crypto";
 import { signMockWebhook } from "@/lib/payments/mock";
-import { createStore, createStoreUser, setStoreStatus } from "@/lib/services/stores";
+import { createOperator, createStore, createStoreUser, setStoreStatus } from "@/lib/services/stores";
+import { listStores, totalsForRange } from "@/lib/services/reports";
+import { resolvePeriod } from "@/lib/period";
+import { formatYen } from "@/lib/money";
 import { generateSettlements } from "@/lib/services/settlements";
 import { settlements } from "@/lib/db/schema";
 
@@ -265,6 +268,66 @@ async function main() {
   res = await new Client().req("/store/dashboard");
   assert.equal(res.status, 307);
   step("店舗アカウントは自店舗のみ閲覧可（運営画面404・他店舗QR不可・未ログインはリダイレクト）");
+
+  // 15. 集計: 店舗ごと・全店舗合計・期間切り替え（すべて transactions から自動集計）
+  for (const key of ["this", "last", "all"] as const) {
+    const period = resolvePeriod(key);
+    const all = await listStores({ range: period.range, sort: "gross", dir: "desc", page: 1, perPage: 100000 });
+    const grand = await totalsForRange(period.range);
+    const sum = all.rows.reduce((a, r) => ({ c: a.c + r.count, g: a.g + r.gross, s: a.s + r.storeShare, o: a.o + r.operatorShare }), { c: 0, g: 0, s: 0, o: 0 });
+    assert.deepEqual(sum, { c: grand.count, g: grand.gross, s: grand.storeShare, o: grand.operatorShare }, `${key}: 店舗ごとの合計 = 全店舗合計`);
+    assert.equal(grand.storeShare + grand.operatorShare, grand.gross, `${key}: 店舗取り分 + 運営取り分 = 総売上`);
+    // SQLで直接数えた値とも一致
+    const direct = (await db().execute(sql`SELECT count(*)::int AS c, coalesce(sum(amount),0)::int AS g FROM transactions t WHERE payment_status='SUCCEEDED'
+      ${period.range ? sql`AND paid_at >= ${period.range.start.toISOString()} AND paid_at < ${period.range.end.toISOString()}` : sql``}`)).rows[0];
+    assert.equal(grand.count, Number(direct.c));
+    assert.equal(grand.gross, Number(direct.g));
+  }
+  const mine = (await listStores({ q: store.storeCode, range: resolvePeriod("this").range, sort: "gross", dir: "desc", page: 1, perPage: 10 })).rows[0];
+  assert.deepEqual([mine.count, mine.gross, mine.storeShare, mine.operatorShare], [1, 100, 30, 70]);
+  const mineLast = (await listStores({ q: store.storeCode, range: resolvePeriod("last").range, sort: "gross", dir: "desc", page: 1, perPage: 10 })).rows[0];
+  assert.deepEqual([mineLast.count, mineLast.gross, mineLast.storeShare, mineLast.operatorShare], [0, 0, 0, 0], "先月に切り替えると件数も金額も先月分になる");
+  const mineAll = (await listStores({ q: store.storeCode, range: null, sort: "gross", dir: "desc", page: 1, perPage: 10 })).rows[0];
+  assert.deepEqual([mineAll.count, mineAll.gross, mineAll.storeShare, mineAll.operatorShare], [1, 100, 30, 70]);
+  // 運営画面（HTTP）
+  const opId = await createOperator({ name: "e2e運営", email: `op-${Date.now()}@example.com`, password: "E2eOperator123" });
+  const opToken = randomToken(32);
+  await db().insert(authSessions).values({ id: sha256Hex(opToken), userId: opId, expiresAt: new Date(Date.now() + 3600_000) });
+  const op = new Client();
+  op.jar.set("sid", opToken);
+  for (const qs of ["period=this", "period=last", "period=all", `period=month&ym=${resolvePeriod("last").yearMonth}`]) {
+    const p = new URLSearchParams(qs);
+    const period = resolvePeriod(p.get("period") ?? undefined, p.get("ym") ?? undefined);
+    const grand = await totalsForRange(period.range);
+    res = await op.req(`/admin/stores?${qs}`);
+    assert.equal(res.status, 200);
+    const page = await res.text();
+    const footer = page.slice(page.indexOf('data-testid="grand-total"'));
+    assert.ok(page.includes("全店舗合計") && page.includes(period.label), qs);
+    for (const v of [`${grand.count.toLocaleString("ja-JP")}件`, formatYen(grand.gross), formatYen(grand.storeShare), formatYen(grand.operatorShare)]) {
+      assert.ok(footer.includes(v), `${qs}: 全店舗合計に ${v}`);
+    }
+  }
+  res = await op.req(`/admin/stores?period=month&ym=2999-01`); // 未来の月は今月扱い
+  assert.equal(res.status, 200);
+  // 店舗画面: 自店舗の今月・累計のみ（他店舗の値は出ない）
+  res = await staff.req("/store/dashboard");
+  const dash = await res.text();
+  for (const w of ["今月の利用件数", "今月の総売上", "今月の店舗取り分", "累計利用件数", "累計総売上", "累計店舗取り分", "¥100", "¥30"]) assert.ok(dash.includes(w), `dashboard: ${w}`);
+  assert.ok(!dash.includes(otherStore.name));
+  res = await staff.req(`/store/sales?storeId=${otherStore.id}&store=${otherStore.id}`); // パラメータ改ざんしても自店舗のみ
+  const sales = await res.text();
+  assert.ok(sales.includes(store.name) && !sales.includes(otherStore.name) && sales.includes("累計店舗取り分"));
+  res = await staff.req("/admin/stores?period=all");
+  assert.equal(res.status, 404);
+  // 本番設定（PAYMENT_PROVIDER が mock 以外）では、疑似決済（旧テストモード含む）は売上集計に入らない
+  const savedProvider = process.env.PAYMENT_PROVIDER;
+  process.env.PAYMENT_PROVIDER = "payjp";
+  const realOnly = await totalsForRange(null);
+  const nonMock = (await db().execute(sql`SELECT count(*)::int AS c, coalesce(sum(amount),0)::int AS g FROM transactions WHERE payment_status='SUCCEEDED' AND payment_provider <> 'mock'`)).rows[0];
+  assert.deepEqual([realOnly.count, realOnly.gross], [Number(nonMock.c), Number(nonMock.g)]);
+  process.env.PAYMENT_PROVIDER = savedProvider;
+  step("集計: 店舗ごと・全店舗合計・期間切り替え（今月/先月/月指定/全期間）が一致、店舗は自店舗の今月・累計のみ表示");
 
   console.log("\nE2E PASSED");
   process.exit(0);

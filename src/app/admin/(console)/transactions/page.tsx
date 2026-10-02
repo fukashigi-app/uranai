@@ -55,8 +55,8 @@ export default async function AdminTransactionsPage(props: PageProps<"/admin/tra
         {[
           ["件数", `${totals.count.toLocaleString("ja-JP")}件`],
           ["売上", formatYen(totals.gross)],
-          ["店舗報酬", formatYen(totals.storeShare)],
-          ["運営売上", formatYen(totals.operatorShare)],
+          ["店舗取り分", formatYen(totals.storeShare)],
+          ["運営取り分", formatYen(totals.operatorShare)],
           ["手数料(推定)", formatYen(totals.fee)],
         ].map(([k, v]) => (
           <div key={k} className="glass rounded-xl px-3 py-2">
@@ -66,7 +66,7 @@ export default async function AdminTransactionsPage(props: PageProps<"/admin/tra
         ))}
       </div>
       <Card>
-        <Table head={["日時", "店舗", "占い", "金額", "店舗", "運営", "手数料", "決済", "占い", "決済ID"]} empty={data.rows.length === 0}>
+        <Table head={["日時", "店舗", "占い", "金額", "店舗取り分", "運営取り分", "手数料", "決済", "占い", "決済ID"]} empty={data.rows.length === 0}>
           {data.rows.map((t) => (
             <tr key={t.id}>
               <td className="whitespace-nowrap tabular-nums">{formatDateTimeJa(t.paidAt)}</td>
@@ -76,10 +76,10 @@ export default async function AdminTransactionsPage(props: PageProps<"/admin/tra
                 </Link>
               </td>
               <td>{FORTUNE_CATALOG[t.fortuneType].short}</td>
-              <td className="tabular-nums">{t.amount}</td>
-              <td className="tabular-nums text-gold-200">{t.storeShare}</td>
-              <td className="tabular-nums">{t.operatorShare}</td>
-              <td className="tabular-nums">{t.paymentFee}</td>
+              <td className="tabular-nums">{formatYen(t.amount)}</td>
+              <td className="tabular-nums text-gold-200">{formatYen(t.storeShare)}</td>
+              <td className="tabular-nums">{formatYen(t.operatorShare)}</td>
+              <td className="tabular-nums">{formatYen(t.paymentFee)}</td>
               <td>
                 <StatusBadge status={t.paymentStatus} />
                 {t.provider === "mock" ? <span className="ml-1 rounded-full border border-violet-400/40 px-1.5 text-[10px] text-violet-300">テスト</span> : null}

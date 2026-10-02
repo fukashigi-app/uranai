@@ -2,7 +2,7 @@ import Link from "next/link";
 import { Card, PageHeader, Stat, StatusBadge } from "@/components/console/shell";
 import { BarChart } from "@/components/ui/bar-chart";
 import { requireStoreUser } from "@/lib/auth/session";
-import { dailySeries, monthlySeries } from "@/lib/services/reports";
+import { dailySeries, monthlySeries, totalsForRange } from "@/lib/services/reports";
 import { formatYearMonthJa, jstYearMonth } from "@/lib/time";
 import { formatYen } from "@/lib/money";
 
@@ -11,7 +11,8 @@ export const metadata = { title: "ダッシュボード" };
 export default async function StoreDashboard() {
   const { store } = await requireStoreUser();
   const ym = jstYearMonth();
-  const [daily, monthly] = await Promise.all([dailySeries(ym, store.id), monthlySeries(12, store.id)]);
+  // storeId は必ずログイン中のアカウントから解決（URL等の値は使わない）
+  const [daily, monthly, allTime] = await Promise.all([dailySeries(ym, store.id), monthlySeries(12, store.id), totalsForRange(null, store.id)]);
   const cur = monthly[0];
   const shareRate = store.storeShareBps / 100;
 
@@ -30,10 +31,17 @@ export default async function StoreDashboard() {
           </Link>
         }
       />
+      <h2 className="mb-2 text-[13px] font-bold text-ink-muted">今月（{formatYearMonthJa(ym)}）</h2>
       <div className="grid gap-3 sm:grid-cols-3">
-        <Stat label="今月の利用" value={cur.count.toLocaleString("ja-JP")} unit="回" />
-        <Stat label="総売上" value={cur.gross.toLocaleString("ja-JP")} unit="円" />
-        <Stat label="店舗報酬" value={cur.storeShare.toLocaleString("ja-JP")} unit="円" sub={`売上の${shareRate}%`} emphasis />
+        <Stat label="今月の利用件数" value={cur.count.toLocaleString("ja-JP")} unit="件" />
+        <Stat label="今月の総売上" value={formatYen(cur.gross)} />
+        <Stat label="今月の店舗取り分" value={formatYen(cur.storeShare)} sub={`売上の${shareRate}%`} emphasis />
+      </div>
+      <h2 className="mb-2 mt-5 text-[13px] font-bold text-ink-muted">累計（これまでの合計）</h2>
+      <div className="grid gap-3 sm:grid-cols-3">
+        <Stat label="累計利用件数" value={allTime.count.toLocaleString("ja-JP")} unit="件" />
+        <Stat label="累計総売上" value={formatYen(allTime.gross)} />
+        <Stat label="累計店舗取り分" value={formatYen(allTime.storeShare)} emphasis />
       </div>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-2">

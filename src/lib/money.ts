@@ -27,6 +27,8 @@ export function assertYen(v: number) {
   if (!Number.isSafeInteger(v) || v < 0) throw new Error("amount must be non-negative integer yen");
 }
 
+/** 日本円の表示（例: ¥12,300）。負の値は -¥100 */
 export function formatYen(v: number): string {
-  return `${v.toLocaleString("ja-JP")}円`;
+  const abs = Math.abs(v).toLocaleString("ja-JP");
+  return v < 0 ? `-¥${abs}` : `¥${abs}`;
 }
