@@ -1,4 +1,6 @@
 import "server-only";
+import { isFirestore } from "@/lib/data-provider";
+import * as fsAudit from "@/lib/firestore/audit";
 import { db, type Tx } from "@/lib/db";
 import { auditLogs } from "@/lib/db/schema";
 
@@ -15,6 +17,7 @@ export async function writeAudit(
   },
   tx?: Tx,
 ): Promise<void> {
+  if (isFirestore()) return fsAudit.writeAudit(entry);
   await (tx ?? db()).insert(auditLogs).values({
     actorUserId: entry.actorUserId,
     actorRole: entry.actorRole,

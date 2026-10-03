@@ -1,9 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSessionUser, getStoreContext } from "@/lib/auth/session";
 import { qrPng } from "@/lib/services/qr";
-import { db } from "@/lib/db";
-import { stores } from "@/lib/db/schema";
-import { eq } from "drizzle-orm";
+import { getStoreById } from "@/lib/services/stores";
 
 /**
  * QR PNG ダウンロード。店舗スタッフは自店舗のみ（storeId はセッションから解決）。
@@ -22,9 +20,9 @@ export async function GET(req: Request) {
     const user = await getSessionUser();
     const storeId = url.searchParams.get("storeId") ?? "";
     if (user?.role === "OPERATOR" && /^[0-9a-f-]{36}$/.test(storeId)) {
-      const [s] = await db().select({ code: stores.storeCode, name: stores.name }).from(stores).where(eq(stores.id, storeId));
+      const s = await getStoreById(storeId);
       if (s) {
-        code = s.code;
+        code = s.storeCode;
         name = s.name;
       }
     }

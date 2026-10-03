@@ -1,4 +1,6 @@
 import "server-only";
+import { isFirestore } from "@/lib/data-provider";
+import * as fsReports from "@/lib/firestore/reports";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { jstMonthRange, jstYearMonth, shiftYearMonth } from "@/lib/time";
@@ -26,6 +28,7 @@ const totalsSelect = sql`count(*)::int AS count, coalesce(sum(amount),0)::int AS
   coalesce(sum(operator_share),0)::int AS operator_share, coalesce(sum(payment_fee),0)::int AS fee`;
 
 export async function totalsBetween(start: Date, end: Date, storeId?: string): Promise<Totals> {
+  if (isFirestore()) return fsReports.totalsBetween(start, end, storeId);
   const res = await db().execute(sql`
     SELECT ${totalsSelect} FROM transactions
     WHERE payment_status = 'SUCCEEDED' ${realPaymentsOnly()} AND paid_at >= ${start.toISOString()} AND paid_at < ${end.toISOString()}
@@ -34,12 +37,14 @@ export async function totalsBetween(start: Date, end: Date, storeId?: string): P
 }
 
 export async function monthTotals(yearMonth: string, storeId?: string): Promise<Totals> {
+  if (isFirestore()) return fsReports.monthTotals(yearMonth, storeId);
   const { start, end } = jstMonthRange(yearMonth);
   return totalsBetween(start, end, storeId);
 }
 
 /** 日別件数（月内の全日を0埋め） */
 export async function dailySeries(yearMonth: string, storeId?: string): Promise<{ day: number; count: number; gross: number }[]> {
+  if (isFirestore()) return fsReports.dailySeries(yearMonth, storeId);
   const { start, end } = jstMonthRange(yearMonth);
   const res = await db().execute(sql`
     SELECT extract(day FROM paid_at AT TIME ZONE 'Asia/Tokyo')::int AS day, count(*)::int AS count, coalesce(sum(amount),0)::int AS gross
@@ -54,6 +59,7 @@ export async function dailySeries(yearMonth: string, storeId?: string): Promise<
 
 /** 直近 n ヶ月の月別集計（新しい順、0件の月も含む） */
 export async function monthlySeries(months: number, storeId?: string): Promise<(Totals & { yearMonth: string })[]> {
+  if (isFirestore()) return fsReports.monthlySeries(months, storeId);
   const current = jstYearMonth();
   const oldest = shiftYearMonth(current, -(months - 1));
   const { start } = jstMonthRange(oldest);
@@ -72,6 +78,7 @@ export async function monthlySeries(months: number, storeId?: string): Promise<(
 }
 
 export async function countActiveStores(): Promise<{ total: number; active: number }> {
+  if (isFirestore()) return fsReports.countActiveStores();
   const res = await db().execute(sql`SELECT count(*)::int AS total, count(*) FILTER (WHERE status = 'ACTIVE')::int AS active FROM stores`);
   return { total: num(res.rows[0]?.total), active: num(res.rows[0]?.active) };
 }
@@ -99,6 +106,7 @@ function rangeCond(range: Range) {
 
 /** 期間内の合計（storeId 指定で1店舗、未指定で全店舗）。null = 全期間 */
 export async function totalsForRange(range: Range, storeId?: string): Promise<Totals> {
+  if (isFirestore()) return fsReports.totalsForRange(range, storeId);
   const res = await db().execute(sql`
     SELECT ${totalsSelect} FROM transactions t
     WHERE t.payment_status = 'SUCCEEDED' ${realPaymentsOnly()} ${rangeCond(range)}
@@ -131,6 +139,7 @@ export async function listStores(opts: {
   page: number;
   perPage: number;
 }) {
+  if (isFirestore()) return fsReports.listStores(opts);
   const q = opts.q?.trim();
   const where = sql`WHERE 1=1
     ${q ? sql`AND (s.name ILIKE ${"%" + q.replace(/[%_\\]/g, "\\$&") + "%"} OR s.store_code = ${q.toLowerCase()})` : sql``}
@@ -172,6 +181,7 @@ export async function listStores(opts: {
 }
 
 export async function listTransactions(opts: { storeId?: string; yearMonth?: string; page: number; perPage: number }) {
+  if (isFirestore()) return fsReports.listTransactions(opts);
   const range = opts.yearMonth ? jstMonthRange(opts.yearMonth) : null;
   const where = sql`WHERE 1=1 ${realPaymentsOnly()}
     ${opts.storeId ? sql`AND t.store_id = ${opts.storeId}` : sql``}

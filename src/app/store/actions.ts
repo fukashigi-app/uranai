@@ -2,14 +2,11 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { eq } from "drizzle-orm";
 import { performLogin } from "@/lib/auth/login-action";
 import { destroySession, requireStoreUser } from "@/lib/auth/session";
 import { verifyPassword, validatePasswordStrength } from "@/lib/auth/password";
-import { db } from "@/lib/db";
-import { users } from "@/lib/db/schema";
 import { bankInfoSchema, fieldErrors, storeProfileSchema } from "@/lib/validation";
-import { setUserPassword, updateBankInfo, updateStoreProfile } from "@/lib/services/stores";
+import { getUserPasswordHash, setUserPassword, updateBankInfo, updateStoreProfile } from "@/lib/services/stores";
 import type { FormState } from "@/components/console/form";
 
 export async function storeLoginAction(_prev: FormState, fd: FormData): Promise<FormState> {
@@ -38,8 +35,8 @@ export async function updateBankAction(_prev: FormState, fd: FormData): Promise<
   const parsed = bankInfoSchema.safeParse(Object.fromEntries(["bankName", "bankCode", "branchName", "branchCode", "accountType", "accountNumber", "accountHolder"].map((k) => [k, fd.get(k) ?? ""])));
   if (!parsed.success) return { errors: fieldErrors(parsed.error), message: "入力内容を確認してください" };
   // 口座変更は本人確認としてパスワード再入力を求める
-  const [u] = await db().select({ hash: users.passwordHash }).from(users).where(eq(users.id, user.id));
-  if (!u || !(await verifyPassword(String(fd.get("currentPassword") ?? ""), u.hash))) {
+  const hash = await getUserPasswordHash(user.id);
+  if (!hash || !(await verifyPassword(String(fd.get("currentPassword") ?? ""), hash))) {
     return { errors: { currentPassword: "パスワードが正しくありません" }, message: "確認のためログインパスワードを入力してください" };
   }
   await updateBankInfo(store.id, parsed.data, { userId: user.id, role: "STORE" });
@@ -51,8 +48,8 @@ export async function changeStorePasswordAction(_prev: FormState, fd: FormData):
   const { user } = await requireStoreUser();
   const current = String(fd.get("currentPassword") ?? "");
   const next = String(fd.get("newPassword") ?? "");
-  const [u] = await db().select({ hash: users.passwordHash }).from(users).where(eq(users.id, user.id));
-  if (!u || !(await verifyPassword(current, u.hash))) return { errors: { currentPassword: "現在のパスワードが正しくありません" } };
+  const hash = await getUserPasswordHash(user.id);
+  if (!hash || !(await verifyPassword(current, hash))) return { errors: { currentPassword: "現在のパスワードが正しくありません" } };
   const weak = validatePasswordStrength(next);
   if (weak) return { errors: { newPassword: weak } };
   await setUserPassword(user.id, next, { userId: user.id, role: "STORE" });

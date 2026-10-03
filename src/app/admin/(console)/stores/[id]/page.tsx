@@ -1,16 +1,13 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { desc, eq } from "drizzle-orm";
 import { Card, PageHeader, StatusBadge, Table } from "@/components/console/shell";
 import { QrPanel } from "@/components/console/qr-panel";
 import { BankForm } from "@/components/console/store-forms";
 import { ActionButton, NewStoreUserForm, StoreAdminProfileForm } from "@/components/console/admin-forms";
 import { requireOperator } from "@/lib/auth/session";
-import { db } from "@/lib/db";
-import { auditLogs, storeUsers, stores, users } from "@/lib/db/schema";
 import { listTransactions, monthlySeries } from "@/lib/services/reports";
 import { listSettlements } from "@/lib/services/settlements";
-import { readBankInfoMasked } from "@/lib/services/stores";
+import { getStoreById, listStoreAuditLogs, listStoreStaff, readBankInfoMasked } from "@/lib/services/stores";
 import { qrSvgDataUrl, storeUrl } from "@/lib/services/qr";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
 import { formatDateJa, formatDateTimeJa, formatYearMonthJa } from "@/lib/time";
@@ -49,19 +46,15 @@ export default async function AdminStoreDetail(props: PageProps<"/admin/stores/[
   const { id } = await props.params;
   const sp = await props.searchParams;
   if (!/^[0-9a-f-]{36}$/.test(id)) notFound();
-  const [store] = await db().select().from(stores).where(eq(stores.id, id));
+  const store = await getStoreById(id);
   if (!store) notFound();
 
   const [monthly, txs, settlementRows, staff, audits, qr] = await Promise.all([
     monthlySeries(12, id),
     listTransactions({ storeId: id, page: 1, perPage: 15 }),
     listSettlements({ storeId: id, limit: 24 }),
-    db()
-      .select({ id: users.id, name: users.name, email: users.email, isActive: users.isActive, lastLoginAt: users.lastLoginAt })
-      .from(storeUsers)
-      .innerJoin(users, eq(users.id, storeUsers.userId))
-      .where(eq(storeUsers.storeId, id)),
-    db().select().from(auditLogs).where(eq(auditLogs.storeId, id)).orderBy(desc(auditLogs.createdAt)).limit(30),
+    listStoreStaff(id),
+    listStoreAuditLogs(id, 30),
     qrSvgDataUrl(store.storeCode),
   ]);
   const bank = readBankInfoMasked(store);

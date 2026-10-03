@@ -11,6 +11,7 @@ const globalForDb = globalThis as unknown as { __uranaiPool?: Pool; __uranaiDb?:
 
 function create(): DB {
   const url = env().DATABASE_URL;
+  if (!url) throw new Error("DATABASE_URL is not set (PostgreSQL is not configured)");
   const pool =
     globalForDb.__uranaiPool ??
     new Pool(poolConfig(url, Number(process.env.DB_POOL_MAX ?? 5)));

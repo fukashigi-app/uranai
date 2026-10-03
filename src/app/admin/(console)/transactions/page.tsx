@@ -1,11 +1,9 @@
 import Link from "next/link";
-import { eq } from "drizzle-orm";
 import { Card, PageHeader, StatusBadge, Table } from "@/components/console/shell";
 import { MonthPicker } from "@/components/console/month-picker";
 import { Pagination, one, parsePage } from "@/components/console/pagination";
 import { requireOperator } from "@/lib/auth/session";
-import { db } from "@/lib/db";
-import { stores } from "@/lib/db/schema";
+import { getStoreById } from "@/lib/services/stores";
 import { listTransactions, monthTotals } from "@/lib/services/reports";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
 import { formatDateTimeJa, isValidYearMonth, jstYearMonth } from "@/lib/time";
@@ -25,7 +23,7 @@ export default async function AdminTransactionsPage(props: PageProps<"/admin/tra
   const [data, totals, storeRow] = await Promise.all([
     listTransactions({ storeId, yearMonth: ym, page, perPage }),
     monthTotals(ym, storeId),
-    storeId ? db().select({ name: stores.name }).from(stores).where(eq(stores.id, storeId)) : Promise.resolve([]),
+    storeId ? getStoreById(storeId).then((s) => (s ? [{ name: s.name }] : [])) : Promise.resolve([]),
   ]);
   const q = (o: Record<string, string | number>) => {
     const p = new URLSearchParams({ ym, ...(storeId ? { storeId } : {}) });

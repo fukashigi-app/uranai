@@ -1,26 +1,22 @@
 import "server-only";
+import { isFirestore } from "@/lib/data-provider";
+import * as fsPay from "@/lib/firestore/payments";
+import * as fsStores from "@/lib/firestore/stores";
 import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { checkouts, stores, type FortuneTypeValue } from "@/lib/db/schema";
 import { CHECKOUT_TTL_MS, CURRENCY, PRICE_JPY } from "@/config/pricing";
 import { siteConfig } from "@/config/site";
-import { activeProvider, isProviderId, PaymentUnavailableError } from "@/lib/payments";
+import { isProviderId } from "@/lib/payments";
 import { confirmCharge, markChargeFailed } from "@/lib/payments/confirm";
-import type { PaymentProvider } from "@/lib/payments/types";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
 import { randomToken, sha256Hex } from "@/lib/security/crypto";
 
-export class CheckoutError extends Error {
-  constructor(
-    public readonly code: string,
-    public readonly userMessage: string,
-    public readonly httpStatus = 400,
-  ) {
-    super(code);
-  }
-}
+export { CheckoutError } from "@/lib/errors";
+import { CheckoutError, providerOrThrow, PAID_FLOW_BLOCKED_STORE_CODES } from "@/lib/errors";
 
 export async function findActiveStoreByCode(storeCode: string) {
+  if (isFirestore()) return fsStores.findStoreByCode(storeCode);
   const [store] = await db()
     .select({ id: stores.id, name: stores.name, status: stores.status, storeCode: stores.storeCode })
     .from(stores)
@@ -29,19 +25,6 @@ export async function findActiveStoreByCode(storeCode: string) {
   return store ?? null;
 }
 
-/** テスト店舗では有料決済を受け付けない（テストモードは決済を使わない別フロー） */
-const TEST_STORE_CODES = new Set(["test", "testmode0001"]);
-
-function providerOrThrow(): PaymentProvider {
-  try {
-    return activeProvider();
-  } catch (e) {
-    if (e instanceof PaymentUnavailableError) {
-      throw new CheckoutError("payment_unavailable", "ただいまお支払いを受け付けていません。お手数ですがお店のスタッフにお知らせください。", 503);
-    }
-    throw e;
-  }
-}
 
 /**
  * 決済セッション（注文）を作成する。
@@ -49,12 +32,13 @@ function providerOrThrow(): PaymentProvider {
  * 金額はサーバーの固定価格のみを使う。
  */
 export async function createCheckout(storeCode: string | null, fortuneType: FortuneTypeValue) {
+  if (isFirestore()) return fsPay.createCheckout(storeCode, fortuneType);
   if (!storeCode) {
     throw new CheckoutError("no_store", "店舗のQRコードを読み込んでからご利用ください。");
   }
   const store = await findActiveStoreByCode(storeCode);
   if (!store) throw new CheckoutError("store_not_found", "店舗情報が見つかりません。お店のQRコードをもう一度読み込んでください。", 404);
-  if (store.status !== "ACTIVE" || TEST_STORE_CODES.has(store.storeCode)) {
+  if (store.status !== "ACTIVE" || PAID_FLOW_BLOCKED_STORE_CODES.has(store.storeCode)) {
     throw new CheckoutError("store_suspended", "こちらの店舗では現在ご利用いただけません。", 403);
   }
   const provider = providerOrThrow();
@@ -74,6 +58,7 @@ export async function createCheckout(storeCode: string | null, fortuneType: Fort
 }
 
 export async function getCheckoutByToken(token: string | null) {
+  if (isFirestore()) return fsPay.getCheckoutByToken(token);
   if (!token) return null;
   const [row] = await db()
     .select({ checkout: checkouts, storeName: stores.name, storeStatus: stores.status })
@@ -93,6 +78,7 @@ export type PayResult =
  * カードトークンで課金する。売上計上は行わない（Webhook/照合で確定）。
  */
 export async function payCheckout(token: string | null, cardToken: string): Promise<PayResult> {
+  if (isFirestore()) return fsPay.payCheckout(token, cardToken);
   const found = await getCheckoutByToken(token);
   if (!found) throw new CheckoutError("not_found", "お支払い情報が見つかりません。お店のQRコードから再度お試しください。", 404);
   const { checkout } = found;
@@ -194,6 +180,7 @@ export type CheckoutStatus = "created" | "processing" | "succeeded" | "failed" |
  * （クライアントの申告は使わない。confirmCharge は冪等）。
  */
 export async function getCheckoutStatus(token: string | null): Promise<{ status: CheckoutStatus; failureCode?: string | null }> {
+  if (isFirestore()) return fsPay.getCheckoutStatus(token);
   const found = await getCheckoutByToken(token);
   if (!found) return { status: "expired" };
   const { checkout } = found;

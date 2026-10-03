@@ -1,10 +1,7 @@
 import { NextResponse } from "next/server";
-import { inArray } from "drizzle-orm";
 import { getSessionUser } from "@/lib/auth/session";
-import { db } from "@/lib/db";
-import { stores } from "@/lib/db/schema";
 import { listSettlements, SETTLEMENT_LABEL } from "@/lib/services/settlements";
-import { readBankInfo } from "@/lib/services/stores";
+import { getStoresByIds, readBankInfo } from "@/lib/services/stores";
 import { writeAudit } from "@/lib/services/audit";
 import { isValidYearMonth } from "@/lib/time";
 
@@ -15,7 +12,7 @@ export async function GET(req: Request) {
   const ym = new URL(req.url).searchParams.get("ym") ?? "";
   if (!isValidYearMonth(ym)) return new NextResponse("bad request", { status: 400 });
   const rows = await listSettlements({ yearMonth: ym });
-  const storeRows = rows.length ? await db().select().from(stores).where(inArray(stores.id, rows.map((r) => r.s.storeId))) : [];
+  const storeRows = await getStoresByIds(rows.map((r) => r.s.storeId));
   const byId = new Map(storeRows.map((s) => [s.id, s]));
   const esc = (v: string | number) => {
     const s = String(v);

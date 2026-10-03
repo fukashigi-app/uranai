@@ -40,3 +40,13 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Firebase: サービスアカウントの秘密鍵JSONは絶対にコミットしない（Vercel の環境変数に登録する）
+*firebase-adminsdk*.json
+*service-account*.json
+*serviceAccount*.json
+*-credentials.json
+.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log

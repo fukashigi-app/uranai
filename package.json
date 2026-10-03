@@ -14,10 +14,13 @@
     "db:seed": "tsx --conditions=react-server scripts/seed.ts",
     "admin:create": "tsx --conditions=react-server scripts/create-admin.ts",
     "e2e": "tsx --conditions=react-server scripts/e2e-flow.ts",
-    "vercel-build": "tsx scripts/migrate.ts && next build"
+    "vercel-build": "tsx scripts/migrate.ts && next build",
+    "e2e:firestore": "tsx --conditions=react-server scripts/e2e-firestore.ts",
+    "emulator": "npx -y firebase-tools@15 emulators:start --only firestore --project demo-uranai"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.3",
+    "firebase-admin": "^14.5.0",
     "next": "16.3.8",
     "pg": "^8.23.1",
     "qrcode": "^1.5.4",

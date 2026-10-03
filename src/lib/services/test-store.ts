@@ -4,6 +4,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { FortuneTypeValue } from "@/lib/db/schema";
 import type { FortuneInput } from "@/lib/fortune/engine";
 import { isTestPaymentEnabled } from "@/lib/env";
+import { hasDatabase, isFirestore } from "@/lib/data-provider";
 import { getQrStoreCode } from "@/lib/cookies";
 
 /**
@@ -97,8 +98,13 @@ export function isSecureRequest(req: Request): boolean {
 
 /** テスト利用を記録（テスト専用テーブル）。DB未設定・障害時は記録をあきらめて占いは続行 */
 export async function logTestFortune(storeCode: string, type: FortuneTypeValue): Promise<void> {
-  if (!process.env.DATABASE_URL) return;
+  if (!hasDatabase()) return;
   try {
+    if (isFirestore()) {
+      const { logTestFortune: fsLog } = await import("@/lib/firestore/misc");
+      await fsLog(storeCode, type);
+      return;
+    }
     const { db } = await import("@/lib/db");
     const { testFortuneLogs } = await import("@/lib/db/schema");
     await db().insert(testFortuneLogs).values({ storeCode: storeCode.slice(0, 32), fortuneType: type });

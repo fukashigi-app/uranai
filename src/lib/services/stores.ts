@@ -1,7 +1,10 @@
 import "server-only";
-import { eq, sql } from "drizzle-orm";
+import { isFirestore } from "@/lib/data-provider";
+import * as fsStores from "@/lib/firestore/stores";
+import * as fsUsers from "@/lib/firestore/users";
+import { desc, eq, inArray, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { storeUsers, stores, users, type Store } from "@/lib/db/schema";
+import { auditLogs, storeUsers, stores, users, type Store } from "@/lib/db/schema";
 import { decryptJson, encryptJson, generateStoreCode } from "@/lib/security/crypto";
 import { hashPassword } from "@/lib/auth/password";
 import { DEFAULT_STORE_SHARE_BPS } from "@/config/pricing";
@@ -17,6 +20,7 @@ function pickProfile(s: Pick<Store, (typeof PROFILE_KEYS)[number]>) {
 }
 
 export async function createStore(input: StoreProfileInput, actor: Actor): Promise<Store> {
+  if (isFirestore()) return fsStores.createStore(input, actor);
   for (let attempt = 0; attempt < 5; attempt++) {
     const inserted = await db()
       .insert(stores)
@@ -32,6 +36,7 @@ export async function createStore(input: StoreProfileInput, actor: Actor): Promi
 }
 
 export async function updateStoreProfile(storeId: string, input: StoreProfileInput, actor: Actor): Promise<void> {
+  if (isFirestore()) return fsStores.updateStoreProfile(storeId, input, actor);
   await db().transaction(async (tx) => {
     const [before] = await tx.select().from(stores).where(eq(stores.id, storeId)).for("update");
     if (!before) throw new Error("store not found");
@@ -72,6 +77,7 @@ export function readBankInfoMasked(store: Pick<Store, "bankInfoEncrypted">) {
 }
 
 export async function updateBankInfo(storeId: string, bank: BankInfo, actor: Actor): Promise<void> {
+  if (isFirestore()) return fsStores.updateBankInfo(storeId, bank, actor);
   await db().transaction(async (tx) => {
     const [before] = await tx.select().from(stores).where(eq(stores.id, storeId)).for("update");
     if (!before) throw new Error("store not found");
@@ -84,6 +90,7 @@ export async function updateBankInfo(storeId: string, bank: BankInfo, actor: Act
 }
 
 export async function setStoreStatus(storeId: string, status: "ACTIVE" | "SUSPENDED", actor: Actor): Promise<void> {
+  if (isFirestore()) return fsStores.setStoreStatus(storeId, status, actor);
   const [before] = await db().select({ status: stores.status }).from(stores).where(eq(stores.id, storeId));
   if (!before || before.status === status) return;
   await db().update(stores).set({ status }).where(eq(stores.id, storeId));
@@ -92,6 +99,7 @@ export async function setStoreStatus(storeId: string, status: "ACTIVE" | "SUSPEN
 
 /** QR再発行: 店舗コードを新しくする（旧QRは無効になる） */
 export async function reissueStoreCode(storeId: string, actor: Actor): Promise<string> {
+  if (isFirestore()) return fsStores.reissueStoreCode(storeId, actor);
   for (let attempt = 0; attempt < 5; attempt++) {
     const code = generateStoreCode();
     const [before] = await db().select({ storeCode: stores.storeCode }).from(stores).where(eq(stores.id, storeId));
@@ -109,9 +117,11 @@ export async function reissueStoreCode(storeId: string, actor: Actor): Promise<s
   throw new Error("failed to reissue store code");
 }
 
-export class DuplicateEmailError extends Error {}
+export { DuplicateEmailError } from "@/lib/errors";
+import { DuplicateEmailError } from "@/lib/errors";
 
 export async function createStoreUser(storeId: string, input: { name: string; email: string; password: string }, actor: Actor) {
+  if (isFirestore()) return fsUsers.createStoreUser(storeId, input, actor);
   const passwordHash = await hashPassword(input.password);
   return db().transaction(async (tx) => {
     const inserted = await tx
@@ -127,6 +137,7 @@ export async function createStoreUser(storeId: string, input: { name: string; em
 }
 
 export async function createOperator(input: { name: string; email: string; password: string }) {
+  if (isFirestore()) return fsUsers.createOperator(input);
   const passwordHash = await hashPassword(input.password);
   const inserted = await db()
     .insert(users)
@@ -138,6 +149,72 @@ export async function createOperator(input: { name: string; email: string; passw
 }
 
 export async function setUserPassword(userId: string, password: string, actor: Actor) {
+  if (isFirestore()) return fsUsers.setUserPassword(userId, password, actor);
   await db().update(users).set({ passwordHash: await hashPassword(password), failedLoginCount: 0, lockedUntil: null }).where(eq(users.id, userId));
   await writeAudit({ actorUserId: actor.userId, actorRole: actor.role, action: "user.password.set", targetType: "user", targetId: userId });
+}
+
+// ===== 画面・アクションから使う読み書き（以前はページ内で直接DBを操作していたもの）=====
+
+export async function getStoreById(id: string): Promise<Store | null> {
+  if (isFirestore()) return fsStores.getStoreById(id);
+  const [s] = await db().select().from(stores).where(eq(stores.id, id));
+  return s ?? null;
+}
+
+export async function getStoresByIds(ids: string[]): Promise<Store[]> {
+  if (isFirestore()) return fsStores.getStoresByIds(ids);
+  if (!ids.length) return [];
+  return db().select().from(stores).where(inArray(stores.id, ids));
+}
+
+/** 店舗配分率の変更（以後の決済にのみ適用。過去の取引は保存済みの取り分のまま） */
+export async function setStoreShareBps(storeId: string, bps: number, actor: Actor): Promise<void> {
+  if (isFirestore()) return fsStores.setStoreShareBps(storeId, bps, actor);
+  const [before] = await db().select({ bps: stores.storeShareBps }).from(stores).where(eq(stores.id, storeId));
+  if (!before || before.bps === bps) return;
+  await db().update(stores).set({ storeShareBps: bps }).where(eq(stores.id, storeId));
+  await writeAudit({ actorUserId: actor.userId, actorRole: actor.role, action: "store.share.update", targetType: "store", targetId: storeId, storeId, before: { storeShareBps: before.bps }, after: { storeShareBps: bps } });
+}
+
+export async function getUserPasswordHash(userId: string): Promise<string | null> {
+  if (isFirestore()) return fsUsers.getUserPasswordHash(userId);
+  const [u] = await db().select({ hash: users.passwordHash }).from(users).where(eq(users.id, userId));
+  return u?.hash ?? null;
+}
+
+/** ユーザーが所属する店舗ID（最初の1件） */
+export async function getUserStoreId(userId: string): Promise<string | null> {
+  if (isFirestore()) return fsUsers.getUserStoreId(userId);
+  const [link] = await db().select().from(storeUsers).where(eq(storeUsers.userId, userId));
+  return link?.storeId ?? null;
+}
+
+export async function setUserActive(userId: string, active: boolean, storeId: string, actor: Actor): Promise<void> {
+  if (isFirestore()) return fsUsers.setUserActive(userId, active, storeId, actor);
+  await db().update(users).set({ isActive: active }).where(eq(users.id, userId));
+  await writeAudit({ actorUserId: actor.userId, actorRole: actor.role, action: active ? "user.enable" : "user.disable", targetType: "user", targetId: userId, storeId });
+}
+
+export type StaffRow = { id: string; name: string; email: string; isActive: boolean; lastLoginAt: Date | null };
+
+export async function listStoreStaff(storeId: string): Promise<StaffRow[]> {
+  if (isFirestore()) return fsUsers.listStoreStaff(storeId);
+  return db()
+    .select({ id: users.id, name: users.name, email: users.email, isActive: users.isActive, lastLoginAt: users.lastLoginAt })
+    .from(storeUsers)
+    .innerJoin(users, eq(users.id, storeUsers.userId))
+    .where(eq(storeUsers.storeId, storeId));
+}
+
+export type AuditRow = { id: string; action: string; actorRole: string; createdAt: Date; before: unknown; after: unknown };
+
+export async function listStoreAuditLogs(storeId: string, limit = 30): Promise<AuditRow[]> {
+  if (isFirestore()) return fsStores.listStoreAuditLogs(storeId, limit);
+  return db()
+    .select({ id: auditLogs.id, action: auditLogs.action, actorRole: auditLogs.actorRole, createdAt: auditLogs.createdAt, before: auditLogs.before, after: auditLogs.after })
+    .from(auditLogs)
+    .where(eq(auditLogs.storeId, storeId))
+    .orderBy(desc(auditLogs.createdAt))
+    .limit(limit);
 }

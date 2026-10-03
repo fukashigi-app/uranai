@@ -1,4 +1,6 @@
 import "server-only";
+import { isFirestore } from "@/lib/data-provider";
+import * as fsFortune from "@/lib/firestore/fortune";
 import { and, eq, gt } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { fortuneResults, fortuneSessions, stores, transactions, type FortuneResultData } from "@/lib/db/schema";
@@ -14,6 +16,7 @@ export type FortuneSessionView =
 
 /** Cookie のトークンから占い権利を取得（URLにIDを含めないため改ざんで他人の結果は見られない） */
 export async function getFortuneSession(token: string | null): Promise<FortuneSessionView> {
+  if (isFirestore()) return fsFortune.getFortuneSession(token);
   if (!token) return { state: "none" };
   const [row] = await db()
     .select({ session: fortuneSessions, storeName: stores.name })
@@ -36,21 +39,15 @@ export async function getFortuneSession(token: string | null): Promise<FortuneSe
   return { state: "paid", fortuneType: s.fortuneType, storeName: row.storeName, expiresAt: s.expiresAt };
 }
 
-export class FortuneError extends Error {
-  constructor(
-    public readonly code: string,
-    public readonly userMessage: string,
-    public readonly httpStatus = 400,
-  ) {
-    super(code);
-  }
-}
+export { FortuneError } from "@/lib/errors";
+import { FortuneError } from "@/lib/errors";
 
 /**
  * 占いを実行する。1つの権利につき1回だけ（PAID→USED の原子的更新）。
  * 生年月日などの入力値は seed 計算にのみ使い、DBには保存しない。
  */
 export async function runFortune(token: string | null, input: FortuneInput): Promise<FortuneResultData> {
+  if (isFirestore()) return fsFortune.runFortune(token, input);
   if (!token) throw new FortuneError("no_session", "お支払い情報が確認できません。お店のQRコードからやり直してください。", 401);
   const tokenHash = sha256Hex(token);
   const engine = getFortuneEngine();

@@ -2,21 +2,23 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { performLogin } from "@/lib/auth/login-action";
 import { destroySession, requireOperator } from "@/lib/auth/session";
 import { validatePasswordStrength, verifyPassword } from "@/lib/auth/password";
-import { db } from "@/lib/db";
-import { storeUsers, stores, users } from "@/lib/db/schema";
 import { bankInfoSchema, fieldErrors, newStoreUserSchema, storeProfileSchema } from "@/lib/validation";
 import {
   createStore,
   createStoreUser,
   DuplicateEmailError,
+  getStoreById,
+  getUserPasswordHash,
+  getUserStoreId,
   readBankInfo,
   reissueStoreCode,
+  setStoreShareBps,
   setStoreStatus,
+  setUserActive,
   setUserPassword,
   updateBankInfo,
   updateStoreProfile,
@@ -90,12 +92,7 @@ export async function updateStoreAction(storeId: string, _prev: FormState, fd: F
   if (shareRaw !== "") {
     const pct = Number(shareRaw);
     if (!Number.isFinite(pct) || pct < 0 || pct > 100 || Math.round(pct * 100) !== pct * 100) return { errors: { storeSharePercent: "0〜100の数値で入力してください" } };
-    const [before] = await db().select({ bps: stores.storeShareBps }).from(stores).where(eq(stores.id, storeId));
-    const bps = Math.round(pct * 100);
-    if (before && before.bps !== bps) {
-      await db().update(stores).set({ storeShareBps: bps }).where(eq(stores.id, storeId));
-      await writeAudit({ actorUserId: actor.userId, actorRole: "OPERATOR", action: "store.share.update", targetType: "store", targetId: storeId, storeId, before: { storeShareBps: before.bps }, after: { storeShareBps: bps } });
-    }
+    await setStoreShareBps(storeId, Math.round(pct * 100), actor);
   }
   await updateStoreProfile(storeId, parsed.data, actor);
   revalidatePath(`/admin/stores/${storeId}`);
@@ -132,7 +129,7 @@ export async function reissueQrAction(storeId: string, _prev: FormState): Promis
 export async function revealBankAction(storeId: string, _prev: FormState): Promise<FormState> {
   const { actor } = await operator();
   assertId(storeId);
-  const [s] = await db().select().from(stores).where(eq(stores.id, storeId));
+  const s = await getStoreById(storeId);
   const bank = s ? readBankInfo(s) : null;
   if (!bank) return { message: "振込先が登録されていません" };
   await writeAudit({ actorUserId: actor.userId, actorRole: "OPERATOR", action: "store.bank.reveal", targetType: "store", targetId: storeId, storeId });
@@ -161,8 +158,7 @@ export async function resetStoreUserPasswordAction(storeId: string, userId: stri
   const { actor } = await operator();
   assertId(storeId);
   assertId(userId);
-  const [link] = await db().select().from(storeUsers).where(eq(storeUsers.userId, userId));
-  if (!link || link.storeId !== storeId) return { message: "アカウントが見つかりません" };
+  if ((await getUserStoreId(userId)) !== storeId) return { message: "アカウントが見つかりません" };
   const temp = `${randomToken(9)}9a`;
   await setUserPassword(userId, temp, actor);
   return { ok: true, message: `一時パスワード: ${temp}（この画面を閉じると再表示できません。店舗へ安全な方法で伝え、変更を依頼してください）` };
@@ -172,10 +168,8 @@ export async function toggleStoreUserAction(storeId: string, userId: string, act
   const { actor } = await operator();
   assertId(storeId);
   assertId(userId);
-  const [link] = await db().select().from(storeUsers).where(eq(storeUsers.userId, userId));
-  if (!link || link.storeId !== storeId) return { message: "アカウントが見つかりません" };
-  await db().update(users).set({ isActive: active }).where(eq(users.id, userId));
-  await writeAudit({ actorUserId: actor.userId, actorRole: "OPERATOR", action: active ? "user.enable" : "user.disable", targetType: "user", targetId: userId, storeId });
+  if ((await getUserStoreId(userId)) !== storeId) return { message: "アカウントが見つかりません" };
+  await setUserActive(userId, active, storeId, actor);
   revalidatePath(`/admin/stores/${storeId}`);
   return { ok: true, message: active ? "アカウントを有効化しました" : "アカウントを無効化しました" };
 }
@@ -206,8 +200,8 @@ export async function updateSettlementAction(id: string, _prev: FormState, fd: F
 
 export async function changeAdminPasswordAction(_prev: FormState, fd: FormData): Promise<FormState> {
   const { user, actor } = await operator();
-  const [u] = await db().select({ hash: users.passwordHash }).from(users).where(eq(users.id, user.id));
-  if (!u || !(await verifyPassword(String(fd.get("currentPassword") ?? ""), u.hash))) return { errors: { currentPassword: "現在のパスワードが正しくありません" } };
+  const hash = await getUserPasswordHash(user.id);
+  if (!hash || !(await verifyPassword(String(fd.get("currentPassword") ?? ""), hash))) return { errors: { currentPassword: "現在のパスワードが正しくありません" } };
   const next = String(fd.get("newPassword") ?? "");
   const weak = validatePasswordStrength(next);
   if (weak) return { errors: { newPassword: weak } };

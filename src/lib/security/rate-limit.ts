@@ -1,4 +1,6 @@
 import "server-only";
+import { isFirestore } from "@/lib/data-provider";
+import * as fsMisc from "@/lib/firestore/misc";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 
@@ -7,6 +9,7 @@ import { db } from "@/lib/db";
  * @returns 許可されれば true
  */
 export async function rateLimit(key: string, limit: number, windowSec: number): Promise<boolean> {
+  if (isFirestore()) return fsMisc.rateLimit(key, limit, windowSec);
   const windowMs = windowSec * 1000;
   const windowStart = new Date(Math.floor(Date.now() / windowMs) * windowMs);
   const res = await db().execute<{ count: number }>(sql`
@@ -20,5 +23,6 @@ export async function rateLimit(key: string, limit: number, windowSec: number): 
 }
 
 export async function purgeOldRateLimits(): Promise<void> {
+  if (isFirestore()) return; // Firestore 版は runMaintenance 内で削除
   await db().execute(sql`DELETE FROM rate_limits WHERE window_start < now() - interval '1 day'`);
 }

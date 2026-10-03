@@ -1,4 +1,6 @@
 import "server-only";
+import { isFirestore } from "@/lib/data-provider";
+import * as fsPay from "@/lib/firestore/payments";
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { checkouts, fortuneSessions, stores, transactions, webhookEvents } from "@/lib/db/schema";
@@ -23,6 +25,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  *   ON CONFLICT DO NOTHING により、Webhook の重複・同時到着でも二重計上しない
  */
 export async function confirmCharge(providerId: ProviderId, chargeId: string): Promise<ConfirmOutcome> {
+  if (isFirestore()) return fsPay.confirmCharge(providerId, chargeId);
   const provider = getProvider(providerId);
   const charge = await provider.retrieveCharge(chargeId);
   if (!charge) return { status: "rejected", reason: "charge_not_found" };
@@ -107,6 +110,7 @@ export async function confirmCharge(providerId: ProviderId, chargeId: string): P
  * 決済失敗: Charge を取得し直して未決済を確認できた場合のみ、対応する処理中の checkout を FAILED にして再試行可能にする
  */
 export async function markChargeFailed(providerId: ProviderId, chargeId: string): Promise<boolean> {
+  if (isFirestore()) return fsPay.markChargeFailed(providerId, chargeId);
   const charge = await getProvider(providerId).retrieveCharge(chargeId);
   if (!charge || charge.paid) return false;
   const updated = await db()
@@ -119,6 +123,7 @@ export async function markChargeFailed(providerId: ProviderId, chargeId: string)
 
 /** 返金: 売上集計から除外し、未使用の占い権利を失効させる */
 export async function markRefunded(providerId: ProviderId, chargeId: string): Promise<boolean> {
+  if (isFirestore()) return fsPay.markRefunded(providerId, chargeId);
   const charge = await getProvider(providerId).retrieveCharge(chargeId);
   if (!charge || !charge.refunded) return false;
   return db().transaction(async (tx) => {
@@ -147,6 +152,7 @@ export async function markRefunded(providerId: ProviderId, chargeId: string): Pr
  * Webhookイベント単位の冪等性。処理済みなら false を返す。
  */
 export async function beginWebhookEvent(provider: ProviderId, eventId: string, type: string): Promise<boolean> {
+  if (isFirestore()) return fsPay.beginWebhookEvent(provider, eventId, type);
   await db().insert(webhookEvents).values({ provider, eventId, type }).onConflictDoNothing();
   const [row] = await db()
     .select({ processedAt: webhookEvents.processedAt })
@@ -156,6 +162,7 @@ export async function beginWebhookEvent(provider: ProviderId, eventId: string, t
 }
 
 export async function finishWebhookEvent(provider: ProviderId, eventId: string): Promise<void> {
+  if (isFirestore()) return fsPay.finishWebhookEvent(provider, eventId);
   await db()
     .update(webhookEvents)
     .set({ processedAt: sql`now()` })

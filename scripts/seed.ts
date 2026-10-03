@@ -6,7 +6,8 @@ import "dotenv/config";
 import { eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { stores, users } from "@/lib/db/schema";
-import { createOperator, createStore, createStoreUser, updateBankInfo } from "@/lib/services/stores";
+import { createOperator, createStore, createStoreUser, DuplicateEmailError, updateBankInfo } from "@/lib/services/stores";
+import { isFirestore } from "@/lib/data-provider";
 
 const SYSTEM = { userId: null, role: "SYSTEM" as const };
 
@@ -16,6 +17,29 @@ async function main() {
   const adminPassword = process.env.SEED_ADMIN_PASSWORD ?? "AdminPass2026";
   const storeEmail = process.env.SEED_STORE_EMAIL ?? "store@example.com";
   const storePassword = process.env.SEED_STORE_PASSWORD ?? "StorePass2026";
+
+  if (isFirestore()) {
+    // Firestore（Emulator 推奨）: 運営・デモ店舗・店舗スタッフのみ作成（デモの売上履歴は作らない）
+    const { listAllStores } = await import("@/lib/firestore/stores");
+    const ignoreDup = (e: unknown) => {
+      if (!(e instanceof DuplicateEmailError)) throw e;
+    };
+    await createOperator({ name: "運営管理者", email: adminEmail, password: adminPassword }).catch(ignoreDup);
+    let lune = (await listAllStores()).find((s) => s.name === "BAR Lune（デモ店舗）");
+    if (!lune) {
+      const s = await createStore({ name: "BAR Lune（デモ店舗）", contactName: "月野 しずか", postalCode: "150-0001", address: "東京都渋谷区神宮前1-2-3 ルナビル2F", phone: "03-1234-5678", email: "lune@example.com" }, SYSTEM);
+      if (process.env.DATA_ENCRYPTION_KEY) {
+        await updateBankInfo(s.id, { bankName: "みずほ銀行", bankCode: "0001", branchName: "渋谷支店", branchCode: "210", accountType: "普通", accountNumber: "1234567", accountHolder: "カ）ルナ" }, SYSTEM);
+      }
+      await createStoreUser(s.id, { name: "月野 しずか", email: storeEmail, password: storePassword }, SYSTEM).catch(ignoreDup);
+      lune = { ...s, lastUsedAt: null };
+    }
+    console.log("Seed completed (Firestore)");
+    console.log(`  運営:   ${adminEmail} / ${adminPassword}  → /admin/login`);
+    console.log(`  店舗:   ${storeEmail} / ${storePassword}  → /store/login`);
+    console.log(`  QR URL: ${process.env.APP_URL}/s/${lune.storeCode}`);
+    process.exit(0);
+  }
 
   const [existingAdmin] = await db().select().from(users).where(eq(users.email, adminEmail));
   if (!existingAdmin) await createOperator({ name: "運営管理者", email: adminEmail, password: adminPassword });

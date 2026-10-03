@@ -1,4 +1,6 @@
 import "server-only";
+import { isFirestore } from "@/lib/data-provider";
+import * as fsUsers from "@/lib/firestore/users";
 import { cache } from "react";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
@@ -27,7 +29,8 @@ export async function createSession(userId: string, role: SessionUser["role"]): 
   const token = randomToken(32);
   const ttl = role === "OPERATOR" ? OPERATOR_TTL_MS : STORE_TTL_MS;
   const expiresAt = new Date(Date.now() + ttl);
-  await db().insert(authSessions).values({ id: sha256Hex(token), userId, expiresAt });
+  if (isFirestore()) await fsUsers.createSession(sha256Hex(token), userId, expiresAt);
+  else await db().insert(authSessions).values({ id: sha256Hex(token), userId, expiresAt });
   const jar = await cookies();
   jar.set(sessionCookieName(), token, {
     httpOnly: true,
@@ -41,7 +44,10 @@ export async function createSession(userId: string, role: SessionUser["role"]): 
 export async function destroySession(): Promise<void> {
   const jar = await cookies();
   const token = jar.get(sessionCookieName())?.value;
-  if (token) await db().delete(authSessions).where(eq(authSessions.id, sha256Hex(token)));
+  if (token) {
+    if (isFirestore()) await fsUsers.deleteSession(sha256Hex(token));
+    else await db().delete(authSessions).where(eq(authSessions.id, sha256Hex(token)));
+  }
   jar.delete(sessionCookieName());
 }
 
@@ -50,6 +56,7 @@ export const getSessionUser = cache(async (): Promise<SessionUser | null> => {
   const jar = await cookies();
   const token = jar.get(sessionCookieName())?.value;
   if (!token || token.length > 100) return null;
+  if (isFirestore()) return fsUsers.getSessionUser(sha256Hex(token));
   const rows = await db()
     .select({ id: users.id, email: users.email, name: users.name, role: users.role })
     .from(authSessions)
@@ -71,6 +78,10 @@ export async function requireOperator(): Promise<SessionUser> {
 export const getStoreContext = cache(async (): Promise<{ user: SessionUser; store: Store } | null> => {
   const user = await getSessionUser();
   if (!user || user.role !== "STORE") return null;
+  if (isFirestore()) {
+    const store = await fsUsers.getStoreForUser(user.id);
+    return store ? { user, store } : null;
+  }
   const rows = await db()
     .select({ store: stores })
     .from(storeUsers)

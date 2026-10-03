@@ -4,7 +4,8 @@
  */
 import "dotenv/config";
 import { validatePasswordStrength } from "@/lib/auth/password";
-import { createOperator } from "@/lib/services/stores";
+import { createOperator, DuplicateEmailError } from "@/lib/services/stores";
+import { dataProvider } from "@/lib/data-provider";
 
 async function main() {
   const email = process.env.ADMIN_EMAIL;
@@ -13,8 +14,13 @@ async function main() {
   if (!email || !password) throw new Error("ADMIN_EMAIL and ADMIN_PASSWORD are required");
   const weak = validatePasswordStrength(password);
   if (weak) throw new Error(weak);
-  const id = await createOperator({ email, password, name });
-  console.log(`operator created: ${id}`);
+  try {
+    const id = await createOperator({ email, password, name });
+    console.log(`運営アカウントを作成しました（保存先: ${dataProvider()}）: ${email} / id=${id}`);
+  } catch (e) {
+    if (e instanceof DuplicateEmailError) throw new Error(`このメールアドレスのアカウントは既にあります: ${email}`);
+    throw e;
+  }
   process.exit(0);
 }
 

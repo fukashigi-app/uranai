@@ -1,10 +1,13 @@
 import "server-only";
+import { isFirestore } from "@/lib/data-provider";
+import * as fsMisc from "@/lib/firestore/misc";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { purgeOldRateLimits } from "@/lib/security/rate-limit";
 
 /** 定期メンテナンス（期限切れ処理・不要データの削除）。冪等。 */
 export async function runMaintenance() {
+  if (isFirestore()) return fsMisc.runMaintenance();
   const d = db();
   const expiredSessions = await d.execute(sql`
     WITH s AS (

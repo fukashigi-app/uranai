@@ -7,7 +7,43 @@
 
 ## 技術構成
 
-Next.js 16 (App Router) / TypeScript / Tailwind CSS v4 / PostgreSQL + Drizzle ORM / PAY.JP（`PaymentProvider` で抽象化）
+Next.js 16 (App Router) / TypeScript / Tailwind CSS v4 / **Cloud Firestore（Firebase Admin SDK）** または PostgreSQL + Drizzle ORM / PAY.JP（`PaymentProvider` で抽象化）
+
+## データベース（Cloud Firestore へ移行中）
+
+保存先は環境変数で自動的に切り替わります（`src/lib/data-provider.ts`）。
+
+| 設定 | 使われる保存先 |
+| --- | --- |
+| `FIREBASE_PROJECT_ID`（＋ `FIREBASE_CLIENT_EMAIL` / `FIREBASE_PRIVATE_KEY`）あり | **Cloud Firestore** |
+| 上記なし | PostgreSQL（`DATABASE_URL`。移行確認後に削除予定） |
+
+- Firestore へは **Vercel 上のサーバーから Firebase Admin SDK でのみ**アクセスします。`firestore.rules` でブラウザからの読み書きは全面禁止です（Firebase Console の「ルール」に同じ内容を設定してください）。
+- 店舗ごとの閲覧制限は、これまでどおりサーバー側のコードで行います。
+- 二重計上防止: `transactions` のドキュメントIDを「決済会社_決済ID」にし、トランザクション内で存在確認します。
+- 集計はすべて「1つの等価条件」の検索なので、**複合インデックスの作成は不要**です。
+- コレクション: `users` `userEmails` `authSessions` `stores` `storeCodes` `storeUsers` `checkouts` `transactions` `fortuneSessions` `fortuneResults` `settlements` `webhookEvents` `auditLogs` `testFortuneLogs` `rateLimits`
+
+### Firestore Emulator でのテスト（本番に触れない）
+
+```bash
+npm run emulator                       # 別ターミナルで起動（Java が必要）
+npm run build
+FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 FIREBASE_PROJECT_ID=demo-uranai PAYMENT_PROVIDER=mock \
+  ALLOW_MOCK_PAYMENTS_IN_PRODUCTION=true ENABLE_TEST_PAYMENT=true npx next start   # 別ターミナル
+FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 FIREBASE_PROJECT_ID=demo-uranai PAYMENT_PROVIDER=mock npm run e2e:firestore
+```
+
+### 本番 Firestore の初期設定
+
+1. Vercel の環境変数に `FIREBASE_PROJECT_ID` / `FIREBASE_CLIENT_EMAIL` / `FIREBASE_PRIVATE_KEY` / `SESSION_SECRET` / `DATA_ENCRYPTION_KEY` を登録し、Redeploy
+2. `https://<公開URL>/api/health` で `"dataProvider":"firestore"` と `"database":"ok"` を確認
+3. 自分のパソコンで運営アカウントを作成（秘密鍵はファイルに保存せず、その場の環境変数で渡す）
+   ```bash
+   FIREBASE_PROJECT_ID=... FIREBASE_CLIENT_EMAIL=... FIREBASE_PRIVATE_KEY="..." \
+   ADMIN_EMAIL=you@example.com ADMIN_PASSWORD='英数字10文字以上' npm run admin:create
+   ```
+4. 運営画面（`/admin/login`）から店舗と店舗アカウントを作成
 
 ## ローカル開発
 

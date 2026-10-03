@@ -1,4 +1,6 @@
 import "server-only";
+import { isFirestore } from "@/lib/data-provider";
+import * as fsUsers from "@/lib/firestore/users";
 import { eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { users } from "@/lib/db/schema";
@@ -16,6 +18,7 @@ export async function authenticate(
   password: string,
   role: "OPERATOR" | "STORE",
 ): Promise<LoginResult> {
+  if (isFirestore()) return fsUsers.authenticate(emailRaw, password, role);
   const email = emailRaw.trim().toLowerCase();
   const [user] = await db()
     .select()

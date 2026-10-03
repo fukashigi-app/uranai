@@ -1,4 +1,6 @@
 import "server-only";
+import { isFirestore } from "@/lib/data-provider";
+import * as fsSettle from "@/lib/firestore/settlements";
 import { and, desc, eq, notInArray, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { settlements, stores } from "@/lib/db/schema";
@@ -15,6 +17,7 @@ export const SETTLEMENT_LABEL: Record<SettlementStatus, string> = { UNPAID: "未
  * テスト決済（payment_provider = 'mock'）は振込対象外。
  */
 export async function generateSettlements(yearMonth: string, actor: Actor): Promise<{ upserted: number; skipped: number }> {
+  if (isFirestore()) return fsSettle.generateSettlements(yearMonth, actor);
   if (!isValidYearMonth(yearMonth)) throw new Error("invalid yearMonth");
   if (yearMonth >= jstYearMonth()) throw new Error("当月以降の精算は作成できません（月末締め後に作成してください）");
   const { start, end } = jstMonthRange(yearMonth);
@@ -61,6 +64,7 @@ export async function generateSettlements(yearMonth: string, actor: Actor): Prom
 }
 
 export async function updateSettlementStatus(id: string, status: SettlementStatus, note: string, actor: Actor): Promise<void> {
+  if (isFirestore()) return fsSettle.updateSettlementStatus(id, status, note, actor);
   await db().transaction(async (tx) => {
     const [before] = await tx.select().from(settlements).where(eq(settlements.id, id)).for("update");
     if (!before) throw new Error("settlement not found");
@@ -76,6 +80,7 @@ export async function updateSettlementStatus(id: string, status: SettlementStatu
 }
 
 export async function listSettlements(opts: { yearMonth?: string; status?: SettlementStatus; storeId?: string; limit?: number }) {
+  if (isFirestore()) return fsSettle.listSettlements(opts);
   const conds = [
     opts.yearMonth ? eq(settlements.yearMonth, opts.yearMonth) : undefined,
     opts.status ? eq(settlements.status, opts.status) : undefined,
