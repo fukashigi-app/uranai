@@ -38,11 +38,11 @@ FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 FIREBASE_PROJECT_ID=demo-uranai PAYMENT_P
 
 1. Vercel の環境変数に `FIREBASE_PROJECT_ID` / `FIREBASE_CLIENT_EMAIL` / `FIREBASE_PRIVATE_KEY` / `SESSION_SECRET` / `DATA_ENCRYPTION_KEY` を登録し、Redeploy
 2. `https://<公開URL>/api/health` で `"dataProvider":"firestore"` と `"database":"ok"` を確認
-3. 自分のパソコンで運営アカウントを作成（秘密鍵はファイルに保存せず、その場の環境変数で渡す）
-   ```bash
-   FIREBASE_PROJECT_ID=... FIREBASE_CLIENT_EMAIL=... FIREBASE_PRIVATE_KEY="..." \
-   ADMIN_EMAIL=you@example.com ADMIN_PASSWORD='英数字10文字以上' npm run admin:create
-   ```
+3. ブラウザで `https://<公開URL>/admin/setup` を開き、最初の運営アカウントを作成（メールアドレスとパスワードを入力）
+   - 運営アカウントが1件も無いときだけ使え、作成後は永久に無効になります（以後は「初期設定は完了しています」と表示）
+   - 任意で Vercel の環境変数 `ADMIN_SETUP_TOKEN` を設定すると、その値（セットアップキー）を知っている人だけが作成できます
+   - パスワードは既存ルール（10文字以上・英字と数字）。scrypt ハッシュのみ保存
+   - 従来どおりパソコンから `npm run admin:create` で作成することもできます
 4. 運営画面（`/admin/login`）から店舗と店舗アカウントを作成
 
 ## ローカル開発

@@ -80,6 +80,8 @@ export const C = {
   auditLogs: "auditLogs",
   testFortuneLogs: "testFortuneLogs",
   rateLimits: "rateLimits",
+  /** システム設定（system/initialSetup … 初回の運営アカウント作成が済んだ印） */
+  system: "system",
 } as const;
 
 /** ドキュメントIDに使えない "/" を避ける */

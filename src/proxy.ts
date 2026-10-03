@@ -26,7 +26,8 @@ export function proxy(req: NextRequest) {
   if (pathname.startsWith("/store") && pathname !== "/store/login" && !hasSession) {
     return NextResponse.redirect(new URL("/store/login", req.url));
   }
-  if (pathname.startsWith("/admin") && pathname !== "/admin/login" && !hasSession) {
+  // /admin/setup は最初の運営アカウント作成画面（運営アカウントが無いときだけ使える。判定はページ側）
+  if (pathname.startsWith("/admin") && pathname !== "/admin/login" && pathname !== "/admin/setup" && !hasSession) {
     return NextResponse.redirect(new URL("/admin/login", req.url));
   }
   return NextResponse.next();
