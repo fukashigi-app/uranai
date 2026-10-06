@@ -71,4 +71,39 @@ export type ZodiacResultV2 = {
   rarity: RarityInfo;
 };
 
-export type FortuneResultV2 = ZodiacResultV2;
+export type BloodTypeValue = "A" | "B" | "O" | "AB";
+
+export type BloodResultV2 = {
+  v: 2;
+  kind: "BLOOD";
+  dateLabel: string;
+  generatedAt: string;
+  bloodType: BloodTypeValue;
+  birthMonth: number;
+  /** 48タイプ（血液型×誕生月） */
+  typeName: string;
+  typeCatch: string;
+  typeFeature: string;
+  /** 今日のあなた（タイプの持ち味と今日の調子のひとこと） */
+  typeToday: string;
+  overall: StarComment;
+  love: StarComment;
+  work: StarComment;
+  money: StarComment;
+  health: StarComment;
+  /** 今日うまくいく行動 */
+  goodAction: string;
+  /** 今日気をつけたいこと */
+  caution: string;
+  /** 今日相性のいい血液型（固定部分）と理由 */
+  goodBlood: { type: BloodTypeValue; reason: string };
+  luckyColor: { name: string; hex: string };
+  luckyItem: string;
+  luckyNumber: number;
+  /** 今日の一言 */
+  message: string;
+  care: CareSection;
+  rarity: RarityInfo;
+};
+
+export type FortuneResultV2 = ZodiacResultV2 | BloodResultV2;

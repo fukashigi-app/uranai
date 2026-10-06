@@ -276,7 +276,7 @@ async function main() {
   for (const [slug, input] of [
     ["birthday", { type: "BIRTHDAY", birthDate: "1998-06-11" }],
     ["zodiac", { type: "ZODIAC", sign: "leo" }],
-    ["blood", { type: "BLOOD", bloodType: "AB" }],
+    ["blood", { type: "BLOOD", bloodType: "AB", birthMonth: 9 }],
   ] as const) {
     res = await guest.req("/api/test-fortune", { method: "POST", json: { fortuneType: slug } });
     assert.equal(res.status, 200);
@@ -289,6 +289,37 @@ async function main() {
   assert.deepEqual(await totalsForRange(null), grandBefore);
   assert.equal((await fsdb().collection(C.testFortuneLogs).count().get()).data().count - logsBefore, 3);
   step("テストモード（3種類の無料占い）は決済履歴・売上に入らない（テスト記録のみ3件）");
+
+  // 12b. 無料テストモードの血液型占い v2（48タイプ）：やり直すと文章だけ変化・再読み込みは不変・誕生月で固定部分が変わる
+  const starsOf = (html: string) => [...html.matchAll(/aria-label="([^"]+?)(\d)つ星（5段階）"/g)].map((m) => `${m[1]}${m[2]}`).join(",");
+  const rarityOf = (html: string) => /(NEW MOON|CRESCENT|HALF MOON|FULL MOON|MIRACLE)/.exec(html)?.[1];
+  const goodBloodOf = (html: string) => /今日相性のいい血液型<\/p><p[^>]*><span[^>]*>(A|B|O|AB)<\/span>/.exec(html)?.[1];
+  const afterOverall = (html: string) => html.slice(html.indexOf("今日の総合運"));
+  const testBlood = async (birthMonth: number) => {
+    const g = new Client();
+    await g.req("/s/test");
+    let r = await g.req("/api/test-fortune", { method: "POST", json: { fortuneType: "blood" } });
+    assert.equal(r.status, 200);
+    r = await g.req("/fortune/input");
+    assert.match(await r.text(), /生まれた月/);
+    r = await g.req("/api/fortune", { method: "POST", json: { type: "BLOOD", bloodType: "O", birthMonth } });
+    assert.equal(r.status, 200, await r.clone().text());
+    const h1 = await (await g.req("/fortune/result")).text();
+    const h2 = await (await g.req("/fortune/result")).text();
+    assert.equal(afterOverall(h1), afterOverall(h2)); // 再読み込みでは変わらない
+    return h1;
+  };
+  const tA = await testBlood(8);
+  const tB = await testBlood(8);
+  assert.match(tA, /真夏の太陽リーダー/);
+  assert.deepEqual([starsOf(tA), rarityOf(tA), goodBloodOf(tA)], [starsOf(tB), rarityOf(tB), goodBloodOf(tB)]);
+  assert.ok(goodBloodOf(tA) && rarityOf(tA) && starsOf(tA).split(",").length >= 5);
+  assert.notEqual(afterOverall(tA), afterOverall(tB)); // もう一度テストすると文章・ラッキー系は変わる
+  const others = [await testBlood(7), await testBlood(9)];
+  assert.match(others[0], /夏空の仲間づくり名人/);
+  assert.ok(others.some((h) => `${starsOf(h)}|${rarityOf(h)}|${goodBloodOf(h)}` !== `${starsOf(tA)}|${rarityOf(tA)}|${goodBloodOf(tA)}`));
+  assert.equal(await countTx(), before);
+  step(`無料テストモードの血液型占い v2（O型×8月=真夏の太陽リーダー・${rarityOf(tA)}。やり直しで★・レア度は同じ・文章は変化、再読み込みは不変、別の月は別の運勢）`);
 
   // 13. 停止中店舗は決済不可
   await setStoreStatus(storeA.id, "SUSPENDED", SYSTEM);
@@ -340,6 +371,41 @@ async function main() {
   assert.deepEqual(again.map((r) => JSON.stringify(r)).sort(), [ra, rb].map((r) => JSON.stringify(r)).sort());
   assert.match(await (await z2.req("/fortune/result")).text(), new RegExp(rb.rarity.en));
   step(`12星座占い v2（${ra.rarity.en}・12星座中${ra.rank}位を保存。再購入で★とレア度は同じ・文章は変化。再表示・再送信でも結果は不変）`);
+
+  // 13c. 血液型占い v2（有料）：結果の保存・再購入時の2層構造・別の誕生月
+  const buyBlood = async (birthMonth: number) => {
+    const c = new Client();
+    await c.req(`/s/${storeC.storeCode}`);
+    let r = await c.req("/api/checkout", { method: "POST", json: { fortuneType: "BLOOD" } });
+    assert.equal(r.status, 201, await r.clone().text());
+    r = await c.req("/api/checkout/pay", { method: "POST", json: { cardToken: "mock_tok_success" } });
+    assert.equal(r.status, 200);
+    for (let i = 0; i < 20; i++) {
+      r = await c.req("/api/checkout/status");
+      if (((await r.json()) as { status: string }).status === "succeeded") break;
+      await sleep(400);
+    }
+    r = await c.req("/api/fortune", { method: "POST", json: { type: "BLOOD", bloodType: "A", birthMonth } });
+    assert.equal(r.status, 200, await r.clone().text());
+    return c;
+  };
+  const p1 = await buyBlood(8);
+  await buyBlood(8);
+  await buyBlood(7);
+  const br = (await fsdb().collection(C.fortuneResults).where("storeId", "==", storeC.id).get()).docs.map((d) => d.get("result")).filter((r) => r.kind === "BLOOD");
+  assert.equal(br.length, 3);
+  const [x8, y8] = br.filter((r) => r.birthMonth === 8);
+  const z7 = br.find((r) => r.birthMonth === 7);
+  assert.deepEqual([x8.typeName, z7.typeName], ["陽だまりの実行家", "きらめく段取り上手"]);
+  const fixedB = (r: typeof x8) => [r.overall.stars, r.love.stars, r.work.stars, r.money.stars, r.health.stars, r.rarity.key, r.goodBlood.type];
+  assert.deepEqual(fixedB(x8), fixedB(y8));
+  assert.notDeepEqual([x8.message, x8.goodAction, x8.luckyItem, x8.typeToday, x8.overall.comment], [y8.message, y8.goodAction, y8.luckyItem, y8.typeToday, y8.overall.comment]);
+  assert.match(await (await p1.req("/fortune/result")).text(), /陽だまりの実行家/);
+  step(`血液型占い v2（A型×8月=${x8.typeName}・${x8.rarity.en} を保存。再購入で★・レア度・相性は同じ・文章は変化、7月生まれは別タイプ）`);
+
+  // 13d. 開発用プレビューは本番相当の環境では使えない
+  for (const q of ["?type=blood&rarity=MIRACLE", "?rarity=MIRACLE"]) assert.equal((await fetch(`${BASE}/dev/fortune-preview${q}`)).status, 404);
+  step("開発用プレビュー（/dev/fortune-preview）は本番相当の環境では 404");
 
   // 14. 接続確認API
   res = await fetch(`${BASE}/api/health`);

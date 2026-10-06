@@ -23,8 +23,8 @@ export const FORTUNE_CATALOG: Record<
     slug: "blood",
     label: "血液型占い",
     short: "血液型",
-    description: "A・B・O・AB型。気質に合わせた今日の過ごし方をアドバイス。",
-    inputLabel: "血液型",
+    description: "血液型×生まれた月の48タイプから、あなたらしい今日の過ごし方をアドバイス。",
+    inputLabel: "血液型と生まれた月",
   },
 };
 

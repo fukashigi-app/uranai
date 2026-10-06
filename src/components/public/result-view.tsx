@@ -1,5 +1,6 @@
 import type { FortuneResultData, LegacyFortuneResult } from "@/lib/db/schema";
 import { ZodiacResultView } from "./zodiac-result-view";
+import { BloodResultView } from "./blood-result-view";
 import { StarRating } from "@/components/ui/stars";
 
 function delay(i: number) {
@@ -9,6 +10,7 @@ function delay(i: number) {
 /** 保存された結果の形に合わせて表示を切り替える（v を持たない旧形式は従来の表示） */
 export function ResultView({ result }: { result: FortuneResultData }) {
   if (result.v === 2 && result.kind === "ZODIAC") return <ZodiacResultView result={result} />;
+  if (result.v === 2 && result.kind === "BLOOD") return <BloodResultView result={result} />;
   return <LegacyResultView result={result as LegacyFortuneResult} />;
 }
 

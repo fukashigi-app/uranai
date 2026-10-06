@@ -25,15 +25,15 @@ describe("templateEngine", () => {
   it("日付が変われば結果が変わる（少なくとも一部）", async () => {
     const results = new Set<string>();
     for (let i = 0; i < 7; i++) {
-      const r = await templateEngine.generate({ type: "BLOOD", bloodType: "A" }, ctx(new Date(day.getTime() + i * 86400000)));
+      const r = await templateEngine.generate({ type: "BLOOD", bloodType: "A", birthMonth: 8 }, ctx(new Date(day.getTime() + i * 86400000)));
       results.add(JSON.stringify(r));
     }
     expect(results.size).toBeGreaterThan(1);
-    expect(await templateEngine.generate({ type: "BLOOD", bloodType: "A" }, ctx(nextDay))).toBeDefined();
+    expect(await templateEngine.generate({ type: "BLOOD", bloodType: "A", birthMonth: 8 }, ctx(nextDay))).toBeDefined();
   });
   it("星の数は1〜5、必要な項目がそろう（12星座占い v2）", async () => {
     const r = await templateEngine.generate({ type: "ZODIAC", sign: "libra" }, ctx(day));
-    if (r.v !== 2) throw new Error("zodiac must be v2");
+    if (r.v !== 2 || r.kind !== "ZODIAC") throw new Error("zodiac must be v2");
     for (const k of ["overall", "love", "work", "money", "health"] as const) {
       expect(r[k].stars).toBeGreaterThanOrEqual(1);
       expect(r[k].stars).toBeLessThanOrEqual(5);
@@ -53,7 +53,7 @@ describe("templateEngine", () => {
     const signs = ["aries","taurus","gemini","cancer","leo","virgo","libra","scorpio","sagittarius","capricorn","aquarius","pisces"] as const;
     const ranks = await Promise.all(signs.map(async (s) => {
       const r = await templateEngine.generate({ type: "ZODIAC", sign: s }, ctx(day));
-      return r.v === 2 ? r.rank : 0;
+      return r.v === 2 && r.kind === "ZODIAC" ? r.rank : 0;
     }));
     expect(new Set(ranks).size).toBe(12);
   });

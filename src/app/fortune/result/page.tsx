@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { headers } from "next/headers";
 import { PublicShell, Notice, RestartButton } from "@/components/public/public-shell";
 import { getTestSession, testGenerateContext } from "@/lib/services/test-store";
-import { getFortuneEngine } from "@/lib/fortune/engine";
+import { fortuneInputSchema, getFortuneEngine } from "@/lib/fortune/engine";
 import type { FortuneResultData, FortuneTypeValue } from "@/lib/db/schema";
 import { ResultView } from "@/components/public/result-view";
 import { ShareButton } from "@/components/public/share-button";
@@ -28,6 +28,16 @@ export default async function FortuneResultPage() {
   const test = await getTestSession();
   if (test) {
     if (test.status !== "done" || !test.input || !test.date) redirect("/fortune/input");
+    // 以前の形式のテスト（誕生月の無い血液型占いなど）は、今の入力ルールでは作り直せないためやり直してもらう
+    if (!fortuneInputSchema.safeParse(test.input).success) {
+      return (
+        <PublicShell>
+          <Notice title="もう一度テストしてください" action={<RestartButton />}>
+            占いの内容が新しくなりました。お手数ですが、最初からもう一度お試しください。
+          </Notice>
+        </PublicShell>
+      );
+    }
     let result: FortuneResultData;
     try {
       result = await getFortuneEngine().generate(test.input, testGenerateContext(test));

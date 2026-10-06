@@ -8,7 +8,7 @@ const stars = (n: number) => "★".repeat(n) + "☆".repeat(5 - n);
  */
 export function shareSummary(r: FortuneResultData, typeLabel: string): string {
   if (r.v === 2) {
-    const rank = r.kind === "ZODIAC" ? `（12星座中${r.rank}位）` : "";
+    const rank = r.kind === "ZODIAC" ? `（12星座中${r.rank}位）` : r.kind === "BLOOD" ? `（${r.typeName}）` : "";
     return `${typeLabel}で今日の運勢レア度は「${r.rarity.en}｜${r.rarity.ja}」${rank}でした！総合運${stars(r.overall.stars)}`;
   }
   return `${typeLabel}で今日の総合運は${stars(r.overall.stars)}でした！ラッキーアイテムは「${r.luckyItem}」`;
