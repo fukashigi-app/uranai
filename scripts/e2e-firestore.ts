@@ -23,7 +23,8 @@ import { signMockWebhook } from "@/lib/payments/mock";
 import { resolvePeriod } from "@/lib/period";
 import { formatYen } from "@/lib/money";
 import { randomToken, sha256Hex } from "@/lib/security/crypto";
-import { jstMonthRange, jstYearMonth, shiftYearMonth } from "@/lib/time";
+import { jstDateString, jstMonthRange, jstYearMonth, shiftYearMonth } from "@/lib/time";
+import { personalDayNumber } from "@/lib/fortune/numerology";
 
 const BASE = process.env.E2E_BASE_URL ?? "http://localhost:3000";
 const SYSTEM = { userId: null, role: "SYSTEM" as const };
@@ -321,6 +322,36 @@ async function main() {
   assert.equal(await countTx(), before);
   step(`無料テストモードの血液型占い v2（O型×8月=真夏の太陽リーダー・${rarityOf(tA)}。やり直しで★・レア度は同じ・文章は変化、再読み込みは不変、別の月は別の運勢）`);
 
+  // 12c. 無料テストモードの生年月日占い v2：星座・誕生数・今日のナンバー、やり直し・再読み込み
+  const BD = "1995-08-10";
+  const todayPd = personalDayNumber(8, 10, jstDateString());
+  const testBirthday = async () => {
+    const g = new Client();
+    await g.req("/s/test");
+    let r = await g.req("/api/test-fortune", { method: "POST", json: { fortuneType: "birthday" } });
+    assert.equal(r.status, 200);
+    r = await g.req("/api/fortune", { method: "POST", json: { type: "BIRTHDAY", birthDate: BD } });
+    assert.equal(r.status, 200, await r.clone().text());
+    const h1 = await (await g.req("/fortune/result")).text();
+    const h2 = await (await g.req("/fortune/result")).text();
+    assert.equal(afterOverall(h1), afterOverall(h2));
+    return h1;
+  };
+  const bdA = await testBirthday();
+  const bdB = await testBirthday();
+  // 1995-08-10 → 獅子座・誕生数 1+9+9+5+8+1+0=33（マスターナンバー）
+  for (const h of [bdA, bdB]) {
+    assert.match(h, /あなたを表す3つのサイン/);
+    assert.match(h, /獅子座(<!-- -->)? × 誕生数(<!-- -->)?33/);
+    assert.match(h, new RegExp(`今日のナンバー <span[^>]*>${todayPd}</span>`));
+    assert.equal(h.includes(BD), false);
+  }
+  const themeOf = (h: string) => /今日のテーマ<\/p>[\s\S]*?<p class="mt-2[^"]*">([\s\S]*?)<\/p>/.exec(h)?.[1];
+  assert.deepEqual([starsOf(bdA), rarityOf(bdA), themeOf(bdA)], [starsOf(bdB), rarityOf(bdB), themeOf(bdB)]);
+  assert.ok(themeOf(bdA));
+  assert.notEqual(afterOverall(bdA), afterOverall(bdB));
+  step(`無料テストモードの生年月日占い v2（獅子座×誕生数33・今日のナンバー${todayPd}・${rarityOf(bdA)}。やり直しで★・レア度・テーマは同じ・文章は変化、再読み込みは不変、生年月日は画面に出ない）`);
+
   // 13. 停止中店舗は決済不可
   await setStoreStatus(storeA.id, "SUSPENDED", SYSTEM);
   const u2 = new Client();
@@ -402,6 +433,47 @@ async function main() {
   assert.notDeepEqual([x8.message, x8.goodAction, x8.luckyItem, x8.typeToday, x8.overall.comment], [y8.message, y8.goodAction, y8.luckyItem, y8.typeToday, y8.overall.comment]);
   assert.match(await (await p1.req("/fortune/result")).text(), /陽だまりの実行家/);
   step(`血液型占い v2（A型×8月=${x8.typeName}・${x8.rarity.en} を保存。再購入で★・レア度・相性は同じ・文章は変化、7月生まれは別タイプ）`);
+
+  // 13e. 生年月日占い v2（有料）：同じ生年月日で2回購入、生年月日そのものは保存しない
+  const buyBirthday = async (birthDate: string) => {
+    const c = new Client();
+    await c.req(`/s/${storeC.storeCode}`);
+    let r = await c.req("/api/checkout", { method: "POST", json: { fortuneType: "BIRTHDAY" } });
+    assert.equal(r.status, 201, await r.clone().text());
+    r = await c.req("/api/checkout/pay", { method: "POST", json: { cardToken: "mock_tok_success" } });
+    assert.equal(r.status, 200);
+    for (let i = 0; i < 20; i++) {
+      r = await c.req("/api/checkout/status");
+      if (((await r.json()) as { status: string }).status === "succeeded") break;
+      await sleep(400);
+    }
+    r = await c.req("/api/fortune", { method: "POST", json: { type: "BIRTHDAY", birthDate } });
+    assert.equal(r.status, 200, await r.clone().text());
+    return c;
+  };
+  const PAID_BD = "1983-02-06"; // 水瓶座・誕生数 29 → 11（マスターナンバー）
+  const q1 = await buyBirthday(PAID_BD);
+  await buyBirthday(PAID_BD);
+  const dr = (await fsdb().collection(C.fortuneResults).where("storeId", "==", storeC.id).get()).docs.map((d) => d.get("result")).filter((r) => r.kind === "BIRTHDAY");
+  assert.equal(dr.length, 2);
+  const [ba, bb] = dr;
+  assert.deepEqual([ba.sign.name, ba.lifePath, ba.isMaster, ba.birthMonth], ["水瓶座", 11, true, 2]);
+  const fixedD = (r: typeof ba) => [r.overall.stars, r.love.stars, r.work.stars, r.money.stars, r.health.stars, r.rarity.key, r.personalDay, r.theme.text, r.events];
+  assert.deepEqual(fixedD(ba), fixedD(bb));
+  assert.notDeepEqual([ba.message, ba.action, ba.caution, ba.luckyItem, ba.luckyNumber, ba.overall.comment], [bb.message, bb.action, bb.caution, bb.luckyItem, bb.luckyNumber, bb.overall.comment]);
+  const page = await (await q1.req("/fortune/result")).text();
+  assert.match(page, /あなたを表す3つのサイン/);
+  assert.equal(page.includes(PAID_BD), false);
+  // 生年月日そのものは Firestore のどのコレクションにも保存されない
+  for (const col of [C.fortuneResults, C.fortuneSessions, C.checkouts, C.transactions, C.auditLogs, C.testFortuneLogs]) {
+    const docs = (await fsdb().collection(col).get()).docs;
+    for (const d of docs) {
+      const json = JSON.stringify(d.data());
+      // この E2E で入力したすべての生年月日（有料・無料テスト）
+      for (const form of [PAID_BD, "19830206", BD, "19950810", "1990-05-12", "19900512", "1998-06-11", "19980611"]) assert.equal(json.includes(form), false, `${col}/${d.id} に生年月日`);
+    }
+  }
+  step(`生年月日占い v2（水瓶座×誕生数11・今日のナンバー${ba.personalDay}・${ba.rarity.en} を保存。再購入で★・レア度・テーマは同じ・文章は変化。生年月日はどのコレクションにも無し）`);
 
   // 13d. 開発用プレビューは本番相当の環境では使えない
   for (const q of ["?type=blood&rarity=MIRACLE", "?rarity=MIRACLE"]) assert.equal((await fetch(`${BASE}/dev/fortune-preview${q}`)).status, 404);

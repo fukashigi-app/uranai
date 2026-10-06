@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ResultView } from "@/components/public/result-view";
 import type { LegacyFortuneResult } from "@/lib/db/schema";
+import { generateBirthday } from "@/lib/fortune/birthday-fortune";
 import { generateBlood } from "@/lib/fortune/blood-fortune";
 import { generateZodiac } from "@/lib/fortune/zodiac-fortune";
 import { shareSummary } from "@/lib/fortune/share";
@@ -52,5 +53,29 @@ describe("結果画面の表示（旧形式との互換）", () => {
     const out = html(r);
     expect(out).toContain("今日の12星座ランキング");
     expect(out).toContain(r.rarity.en);
+  });
+
+  it("旧形式の生年月日占いの結果を、そのまま表示できる", () => {
+    const legacyBirthday: LegacyFortuneResult = {
+      ...legacyBlood,
+      subject: "獅子座 × 誕生数33",
+      highlight: "火のエレメント・獅子座",
+      traits: "誕生数33：無償の愛のマスターナンバー。",
+    };
+    const out = html(legacyBirthday);
+    expect(out).toContain("獅子座 × 誕生数33");
+    expect(out).toContain("火のエレメント・獅子座");
+    expect(out).not.toContain("あなたを表す3つのサイン");
+  });
+
+  it("生年月日占い v2 は3つのサイン・基本タイプ・今日のテーマを表示し、生年月日そのものは表示しない", () => {
+    const r = generateBirthday("1990-05-12", { now: new Date("2026-10-07T20:00:00+09:00"), purchaseSeed: "view" });
+    const out = html(r);
+    for (const w of ["今日の運勢レア度", "あなたを表す3つのサイン", "牡牛座", "誕生数", "今日のナンバー", "あなたの基本タイプ", r.typeName, "あなたの強み", "気をつけたいところ", "今日のテーマ", "今日起こりやすいこと", "今日おすすめの行動", "今日気をつけたいこと", "ラッキーナンバー", "あなたへの一言"]) {
+      expect(out, w).toContain(w);
+    }
+    expect(out).not.toContain("1990-05-12");
+    expect(out).not.toContain("5月12日");
+    expect(shareSummary(r, "生年月日占い")).toContain("牡牛座×誕生数9");
   });
 });

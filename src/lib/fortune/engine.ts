@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { FortuneResultData, FortuneTypeValue } from "@/lib/db/schema";
 import type { GenerateContext } from "./context";
-import { legacyGenerate } from "./legacy";
+import { generateBirthday } from "./birthday-fortune";
 import { generateBlood } from "./blood-fortune";
 import { generateZodiac } from "./zodiac-fortune";
 import { BLOOD_TYPES, isValidBirthDate, ZODIAC_KEYS, type ZodiacKey } from "./zodiac";
@@ -38,15 +38,18 @@ export interface FortuneEngine {
 }
 
 /**
- * template-v2: 12星座占い・血液型占い（48タイプ）は新方式（レア度付き）。
- * 生年月日占いは新方式に移行するまで旧方式の結果を返す。
+ * template-v2: 3種類すべて新方式（今日の運勢レア度付き）。
+ *  - 12星座占い … 今日の12星座ランキングが主役
+ *  - 血液型占い … 血液型×誕生月の48タイプ
+ *  - 生年月日占い … 星座・誕生数・今日の個人日数・誕生月を組み合わせた本格占い
+ * 旧方式（template-v1）で保存済みの結果は作り直さず、そのまま表示する。
  */
 export const templateEngine: FortuneEngine = {
   id: "template-v2",
   async generate(input, ctx) {
     if (input.type === "ZODIAC") return generateZodiac(input.sign, ctx);
     if (input.type === "BLOOD") return generateBlood(input.bloodType, input.birthMonth, ctx);
-    return legacyGenerate(input, ctx.now);
+    return generateBirthday(input.birthDate, ctx);
   },
 };
 

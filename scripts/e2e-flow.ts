@@ -234,16 +234,16 @@ async function main() {
     assert.equal(res.status, 200, await res.clone().text());
     res = await guest.req("/fortune/result");
     html2 = await res.text();
-    // 12星座占い・血液型占いは新方式（レア度付き）。生年月日占いは移行まで旧方式の項目
+    // 3種類とも新方式（レア度付き）。それぞれ専用の項目を表示する
     const expected =
       slug === "zodiac"
         ? ["今日の運勢レア度", "今日の12星座ランキング", "今日の総合運", "恋愛運", "仕事運", "金運", "健康運", "今日の星からのメッセージ", "今日相性のいい星座", "注意したい星座", "ラッキーカラー", "ラッキーアイテム", "ラッキータイム", "今日の開運アクション"]
         : slug === "blood"
           ? ["今日の運勢レア度", "あなたのタイプ", "月見の調停役", "今日の総合運", "恋愛運", "仕事運", "金運", "健康運", "今日うまくいく行動", "今日気をつけたいこと", "今日相性のいい血液型", "ラッキーカラー", "ラッキーアイテム", "ラッキーナンバー", "今日の一言"]
-          : ["今日の総合運", "恋愛運", "仕事運", "金運", "健康運", "ラッキーカラー", "ラッキーアイテム", "ラッキーナンバー", "今日の一言"];
+          : ["今日の運勢レア度", "あなたを表す3つのサイン", "あなたの基本タイプ", "あなたの強み", "気をつけたいところ", "今日のテーマ", "今日の総合運", "恋愛運", "仕事運", "金運", "健康運", "今日起こりやすいこと", "今日おすすめの行動", "今日気をつけたいこと", "ラッキーカラー", "ラッキーアイテム", "ラッキーナンバー", "あなたへの一言"];
     for (const w of expected) assert.match(html2, new RegExp(w), `${slug}: ${w}`);
     const again = await (await guest.req("/fortune/result")).text(); // 再読み込みでも同じ結果
-    const marker = slug === "zodiac" ? /今日の星からのメッセージ[\s\S]{0,400}/ : /今日の一言[\s\S]{0,400}/;
+    const marker = slug === "zodiac" ? /今日の星からのメッセージ[\s\S]{0,400}/ : slug === "blood" ? /今日の一言[\s\S]{0,400}/ : /あなたへの一言[\s\S]{0,400}/;
     assert.equal(again.match(marker)?.[0], html2.match(marker)?.[0]);
     res = await guest.req("/fortune/input"); // 戻る操作 → 結果へ
     assert.equal(res.status, 307);
@@ -403,6 +403,57 @@ async function main() {
   assert.deepEqual(fixedOf(b8a), fixedOf(b8b));
   assert.notDeepEqual([b8a.message, b8a.goodAction, b8a.luckyItem, b8a.typeToday, b8a.overall.comment], [b8b.message, b8b.goodAction, b8b.luckyItem, b8b.typeToday, b8b.overall.comment]);
   step(`血液型占い v2（PostgreSQL）: A型×8月=${b8a.typeName}（${b8a.rarity.en}）を保存、再購入で★・レア度・相性は同じ・文章は変化、7月生まれは別タイプ`);
+
+  // 生年月日占い（v2）を PostgreSQL で：同じ生年月日で2回購入・生年月日そのものを保存しない
+  const dStore = await createStore({ name: `E2E生年月日店舗 ${Date.now()}`, contactName: "", postalCode: "", address: "", phone: "", email: "" }, { userId: null, role: "SYSTEM" });
+  const BIRTH = "1988-07-23";
+  for (let n = 0; n < 2; n++) {
+    const base = new Client();
+    const ip = `10.30.0.${n + 1}`;
+    const c = { req: (path: string, init: Parameters<Client["req"]>[1] = {}) => base.req(path, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), "x-real-ip": ip } }) };
+    await c.req(`/s/${dStore.storeCode}`);
+    res = await c.req("/api/checkout", { method: "POST", json: { fortuneType: "BIRTHDAY" } });
+    assert.equal(res.status, 201, await res.clone().text());
+    res = await c.req("/api/checkout/pay", { method: "POST", json: { cardToken: "mock_tok_success" } });
+    assert.equal(res.status, 200);
+    for (let i = 0; i < 20; i++) {
+      res = await c.req("/api/checkout/status");
+      if (((await res.json()) as { status: string }).status === "succeeded") break;
+      await sleep(400);
+    }
+    res = await c.req("/api/fortune", { method: "POST", json: { type: "BIRTHDAY", birthDate: BIRTH } });
+    assert.equal(res.status, 200, await res.clone().text());
+    const page = await (await c.req("/fortune/result")).text();
+    assert.match(page, /あなたを表す3つのサイン/);
+    assert.equal(page.includes(BIRTH), false);
+    assert.equal(await (await c.req("/fortune/result")).text().then((t) => t.includes("あなたを表す3つのサイン")), true); // 再表示
+  }
+  const dRows = await db().select().from(fortuneResults).where(eq(fortuneResults.storeId, dStore.id));
+  assert.equal(dRows.length, 2);
+  const [da, dbr] = dRows.map((r) => r.result);
+  assert.ok(da.v === 2 && da.kind === "BIRTHDAY" && dbr.v === 2 && dbr.kind === "BIRTHDAY");
+  assert.deepEqual([da.sign.name, da.lifePath, da.isMaster, da.birthMonth], ["獅子座", 11, true, 7]); // 1+9+8+8+7+2+3=38 → 11（マスターナンバー）
+  const dFixed = (r: typeof da) => [r.overall.stars, r.love.stars, r.work.stars, r.money.stars, r.health.stars, r.rarity.key, r.personalDay, r.theme.text, r.events];
+  assert.deepEqual(dFixed(da), dFixed(dbr));
+  assert.notDeepEqual([da.message, da.action, da.caution, da.luckyItem, da.luckyNumber, da.overall.comment], [dbr.message, dbr.action, dbr.caution, dbr.luckyItem, dbr.luckyNumber, dbr.overall.comment]);
+  // 生年月日そのものは結果・占いの権利・決済のどのテーブルにも保存されない
+  // この E2E で入力したすべての生年月日（有料: 1992-11-09・1988-07-23 / 無料テスト: 1998-06-11）
+  const leakOf = async (form: string) =>
+    (
+      await db().execute(sql`
+    SELECT
+      (SELECT count(*) FROM fortune_results WHERE result::text LIKE ${"%" + form + "%"})::int AS r,
+      (SELECT count(*) FROM fortune_sessions WHERE row_to_json(fortune_sessions)::text LIKE ${"%" + form + "%"})::int AS s,
+      (SELECT count(*) FROM checkouts WHERE row_to_json(checkouts)::text LIKE ${"%" + form + "%"})::int AS c,
+      (SELECT count(*) FROM transactions WHERE row_to_json(transactions)::text LIKE ${"%" + form + "%"})::int AS t,
+      (SELECT count(*) FROM audit_logs WHERE row_to_json(audit_logs)::text LIKE ${"%" + form + "%"})::int AS a,
+      (SELECT count(*) FROM test_fortune_logs WHERE row_to_json(test_fortune_logs)::text LIKE ${"%" + form + "%"})::int AS l
+  `)
+    ).rows[0];
+  for (const form of [BIRTH, "19880723", "1992-11-09", "19921109", "1998-06-11", "19980611"]) {
+    assert.deepEqual(await leakOf(form), { r: 0, s: 0, c: 0, t: 0, a: 0, l: 0 }, form);
+  }
+  step(`生年月日占い v2（PostgreSQL）: 獅子座×誕生数11・今日のナンバー${da.personalDay}（${da.rarity.en}）を保存、再購入で★・レア度・テーマは同じ・文章は変化、生年月日はどのテーブルにも保存なし`);
 
   console.log("\nE2E PASSED");
   process.exit(0);

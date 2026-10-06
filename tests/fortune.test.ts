@@ -20,7 +20,8 @@ describe("templateEngine", () => {
     const input = { type: "BIRTHDAY" as const, birthDate: "1990-05-12" };
     const r1 = await templateEngine.generate(input, ctx(day));
     const r2 = await templateEngine.generate(input, ctx(new Date("2026-10-01T14:00:00Z"))); // 同じJST日付
-    expect(r1).toEqual(r2);
+    // 作成時刻（generatedAt）以外は同じ
+    expect({ ...r1, generatedAt: "" }).toEqual({ ...r2, generatedAt: "" });
   });
   it("日付が変われば結果が変わる（少なくとも一部）", async () => {
     const results = new Set<string>();

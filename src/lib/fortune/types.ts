@@ -106,4 +106,44 @@ export type BloodResultV2 = {
   rarity: RarityInfo;
 };
 
-export type FortuneResultV2 = ZodiacResultV2 | BloodResultV2;
+export type BirthdayResultV2 = {
+  v: 2;
+  kind: "BIRTHDAY";
+  dateLabel: string;
+  generatedAt: string;
+  /** 生年月日そのものは保存しない。ここにあるのは生年月日から導いた情報だけ */
+  sign: ZodiacSignRef & { element: string };
+  lifePath: number;
+  lifePathTitle: string;
+  isMaster: boolean;
+  birthMonth: number;
+  /** 今日の個人日数（今日のテーマを表す数字 1〜9） */
+  personalDay: number;
+  typeName: string;
+  typeDescription: string;
+  strengths: string;
+  weakPoints: string;
+  theme: { keyword: string; text: string };
+  overall: StarComment;
+  love: StarComment;
+  work: StarComment;
+  money: StarComment;
+  health: StarComment;
+  /** 今日起こりやすいこと（固定部分） */
+  events: string;
+  action: string;
+  caution: string;
+  luckyColor: { name: string; hex: string };
+  luckyItem: string;
+  /** ラッキーナンバー（お守りの数字。今日の個人日数とは別） */
+  luckyNumber: number;
+  luckyNumberNote: string;
+  /** あなたへの一言 */
+  message: string;
+  /** 奇跡の星夜だけの、生年月日占い専用の祝福 */
+  blessing?: string;
+  care: CareSection;
+  rarity: RarityInfo;
+};
+
+export type FortuneResultV2 = ZodiacResultV2 | BloodResultV2 | BirthdayResultV2;
