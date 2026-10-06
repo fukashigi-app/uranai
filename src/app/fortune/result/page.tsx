@@ -2,7 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { headers } from "next/headers";
 import { PublicShell, Notice, RestartButton } from "@/components/public/public-shell";
-import { getTestSession } from "@/lib/services/test-store";
+import { getTestSession, testGenerateContext } from "@/lib/services/test-store";
 import { getFortuneEngine } from "@/lib/fortune/engine";
 import type { FortuneResultData, FortuneTypeValue } from "@/lib/db/schema";
 import { ResultView } from "@/components/public/result-view";
@@ -11,6 +11,7 @@ import { getAccessToken } from "@/lib/cookies";
 import { getFortuneSession } from "@/lib/services/fortune";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
 import { siteConfig } from "@/config/site";
+import { shareSummary } from "@/lib/fortune/share";
 
 export const metadata = { title: "占い結果", robots: { index: false } };
 
@@ -29,7 +30,7 @@ export default async function FortuneResultPage() {
     if (test.status !== "done" || !test.input || !test.date) redirect("/fortune/input");
     let result: FortuneResultData;
     try {
-      result = await getFortuneEngine().generate(test.input, new Date(`${test.date}T12:00:00+09:00`));
+      result = await getFortuneEngine().generate(test.input, testGenerateContext(test));
     } catch (e) {
       console.error("[result:test] generate failed", (e as Error).message);
       return (
@@ -70,7 +71,7 @@ async function ResultScreen({
   storeName: string;
   testMode?: boolean;
 }) {
-  const shareText = `${FORTUNE_CATALOG[fortuneType].label}で今日の総合運は${"★".repeat(r.overall.stars)}${"☆".repeat(5 - r.overall.stars)}でした！ラッキーアイテムは「${r.luckyItem}」 #${siteConfig.name}`;
+  const shareText = `${shareSummary(r, FORTUNE_CATALOG[fortuneType].label)} #${siteConfig.name}`;
   return (
     <PublicShell storeName={storeName} step={4}>
       <h1 className="sr-only">占い結果</h1>

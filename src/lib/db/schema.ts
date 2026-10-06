@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import type { FortuneResultV2 } from "@/lib/fortune/types";
 import {
   boolean,
   check,
@@ -213,7 +214,9 @@ export const fortuneSessions = pgTable(
   ],
 );
 
-export type FortuneResultData = {
+/** 旧形式の占い結果（v を持たない）。保存済みの結果を表示するために残す */
+export type LegacyFortuneResult = {
+  v?: undefined;
   title: string;
   subject: string;
   dateLabel: string;
@@ -233,6 +236,9 @@ export type FortuneResultData = {
   /** 例: 「12星座中 3位」 */
   highlight?: string;
 };
+
+/** 保存される占い結果。v2 は占いごとに専用の形（src/lib/fortune/types.ts） */
+export type FortuneResultData = LegacyFortuneResult | FortuneResultV2;
 
 export const fortuneResults = pgTable(
   "fortune_results",

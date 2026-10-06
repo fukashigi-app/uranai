@@ -1,4 +1,5 @@
 import "server-only";
+import { purchaseSeedFor } from "@/lib/fortune/seed";
 import { isFirestore } from "@/lib/data-provider";
 import * as fsFortune from "@/lib/firestore/fortune";
 import { and, eq, gt } from "drizzle-orm";
@@ -73,7 +74,7 @@ export async function runFortune(token: string | null, input: FortuneInput): Pro
     }
 
     const now = new Date();
-    const result = await engine.generate(input, now);
+    const result = await engine.generate(input, { now, purchaseSeed: purchaseSeedFor(session.id) });
     await tx.update(fortuneSessions).set({ status: "USED", usedAt: now }).where(eq(fortuneSessions.id, session.id));
     await tx.insert(fortuneResults).values({
       fortuneSessionId: session.id,

@@ -234,9 +234,15 @@ async function main() {
     assert.equal(res.status, 200, await res.clone().text());
     res = await guest.req("/fortune/result");
     html2 = await res.text();
-    for (const w of ["今日の総合運", "恋愛運", "仕事運", "金運", "健康運", "ラッキーカラー", "ラッキーアイテム", "ラッキーナンバー", "今日の一言"]) assert.match(html2, new RegExp(w), `${slug}: ${w}`);
+    // 12星座占いは新方式（ランキング・レア度）。血液型・生年月日は移行まで旧方式の項目
+    const expected =
+      slug === "zodiac"
+        ? ["今日の運勢レア度", "今日の12星座ランキング", "今日の総合運", "恋愛運", "仕事運", "金運", "健康運", "今日の星からのメッセージ", "今日相性のいい星座", "注意したい星座", "ラッキーカラー", "ラッキーアイテム", "ラッキータイム", "今日の開運アクション"]
+        : ["今日の総合運", "恋愛運", "仕事運", "金運", "健康運", "ラッキーカラー", "ラッキーアイテム", "ラッキーナンバー", "今日の一言"];
+    for (const w of expected) assert.match(html2, new RegExp(w), `${slug}: ${w}`);
     const again = await (await guest.req("/fortune/result")).text(); // 再読み込みでも同じ結果
-    assert.equal(again.match(/今日の一言[\s\S]{0,400}/)?.[0], html2.match(/今日の一言[\s\S]{0,400}/)?.[0]);
+    const marker = slug === "zodiac" ? /今日の星からのメッセージ[\s\S]{0,400}/ : /今日の一言[\s\S]{0,400}/;
+    assert.equal(again.match(marker)?.[0], html2.match(marker)?.[0]);
     res = await guest.req("/fortune/input"); // 戻る操作 → 結果へ
     assert.equal(res.status, 307);
   }
@@ -328,6 +334,33 @@ async function main() {
   assert.deepEqual([realOnly.count, realOnly.gross], [Number(nonMock.c), Number(nonMock.g)]);
   process.env.PAYMENT_PROVIDER = savedProvider;
   step("集計: 店舗ごと・全店舗合計・期間切り替え（今月/先月/月指定/全期間）が一致、店舗は自店舗の今月・累計のみ表示");
+
+  // 12星座占い（v2）を PostgreSQL で：結果の保存・再購入時の2層構造（他の集計に影響しないよう最後に別店舗で実施）
+  const zStore = await createStore({ name: `E2E星座店舗 ${Date.now()}`, contactName: "", postalCode: "", address: "", phone: "", email: "" }, { userId: null, role: "SYSTEM" });
+  const zodiacResults = [];
+  for (let n = 0; n < 2; n++) {
+    const c = new Client();
+    await c.req(`/s/${zStore.storeCode}`);
+    res = await c.req("/api/checkout", { method: "POST", json: { fortuneType: "ZODIAC" } });
+    assert.equal(res.status, 201, await res.clone().text());
+    res = await c.req("/api/checkout/pay", { method: "POST", json: { cardToken: "mock_tok_success" } });
+    assert.equal(res.status, 200);
+    for (let i = 0; i < 20; i++) {
+      res = await c.req("/api/checkout/status");
+      if (((await res.json()) as { status: string }).status === "succeeded") break;
+      await sleep(400);
+    }
+    res = await c.req("/api/fortune", { method: "POST", json: { type: "ZODIAC", sign: "virgo" } });
+    assert.equal(res.status, 200, await res.clone().text());
+    assert.match(await (await c.req("/fortune/result")).text(), /今日の運勢レア度/);
+  }
+  for (const r of await db().select().from(fortuneResults).where(eq(fortuneResults.storeId, zStore.id))) zodiacResults.push(r);
+  assert.equal(zodiacResults.length, 2);
+  const [za, zb] = zodiacResults.map((r) => r.result);
+  assert.ok(za.v === 2 && zb.v === 2 && za.kind === "ZODIAC" && zb.kind === "ZODIAC");
+  assert.deepEqual([za.rank, za.overall.stars, za.rarity.key], [zb.rank, zb.overall.stars, zb.rarity.key]);
+  assert.notDeepEqual([za.starMessage, za.action, za.luckyItem, za.point, za.love.comment], [zb.starMessage, zb.action, zb.luckyItem, zb.point, zb.love.comment]);
+  step(`12星座占い v2（PostgreSQL）: ${za.rarity.en}・12星座中${za.rank}位を保存、再購入で★とレア度は同じ・文章は変化`);
 
   console.log("\nE2E PASSED");
   process.exit(0);

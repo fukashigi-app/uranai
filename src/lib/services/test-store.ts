@@ -6,6 +6,7 @@ import type { FortuneInput } from "@/lib/fortune/engine";
 import { isTestPaymentEnabled } from "@/lib/env";
 import { hasDatabase, isFirestore } from "@/lib/data-provider";
 import { getQrStoreCode } from "@/lib/cookies";
+import { purchaseSeedFor } from "@/lib/fortune/seed";
 
 /**
  * ===== テストモード（ENABLE_TEST_PAYMENT=true のときだけ有効）=====
@@ -40,6 +41,8 @@ export type TestSession = {
   status: "ready" | "done";
   /** 占った日（JST）。結果を同じ内容で再表示するため */
   date?: string;
+  /** 占った時刻（ミリ秒）。ラッキータイム等を同じ内容で再表示するため */
+  at?: number;
   /** 結果の再生成用。ブラウザの HttpOnly Cookie にのみ保存し、サーバー/DBには保存しない */
   input?: FortuneInput;
   exp: number;
@@ -88,6 +91,15 @@ export async function saveTestSession(s: TestSession, secure: boolean): Promise<
 
 export function newTestSession(store: { storeCode: string; name: string }, type: FortuneTypeValue): TestSession {
   return { v: 1, id: randomBytes(8).toString("hex"), storeCode: store.storeCode, storeName: store.name, type, status: "ready", exp: Date.now() + TTL_MS };
+}
+
+/**
+ * テストモードの結果を作る条件。テストセッションIDを「購入ごとの値」として使うため、
+ * テストをやり直すと本番の再購入と同じように文章・ラッキー系だけが変わる（★・レア度は同じ）。
+ */
+export function testGenerateContext(s: TestSession): { now: Date; purchaseSeed: string } {
+  const now = s.at ? new Date(s.at) : new Date(`${s.date}T12:00:00+09:00`);
+  return { now, purchaseSeed: purchaseSeedFor(`test:${s.id}`) };
 }
 
 /** リクエストが HTTPS か（Vercel は常に https） */

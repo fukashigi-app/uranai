@@ -6,6 +6,7 @@ import { getFortuneEngine, type FortuneInput } from "@/lib/fortune/engine";
 import { sha256Hex } from "@/lib/security/crypto";
 import { FortuneError } from "@/lib/errors";
 import type { FortuneSessionView } from "@/lib/services/fortune";
+import { purchaseSeedFor } from "@/lib/fortune/seed";
 import { C, fsdb, mustDate, toDate } from "./admin";
 
 /**
@@ -54,7 +55,8 @@ export async function runFortune(token: string | null, input: FortuneInput): Pro
     if (s.get("fortuneType") !== input.type) throw new FortuneError("type_mismatch", "お支払いいただいた占いと種類が異なります。", 400);
 
     const now = new Date();
-    const result = await engine.generate(input, now);
+    // 購入ごとに変わる部分は占う権利（fortuneSession）の ID から。★・レア度など固定部分は日付＋入力だけで決まる
+    const result = await engine.generate(input, { now, purchaseSeed: purchaseSeedFor(s.id) });
     tx.update(sessionRef, { status: "USED", usedAt: now });
     tx.create(resultRef, {
       fortuneSessionId: s.id,

@@ -195,6 +195,23 @@ body {
   animation: shimmer 2.2s linear infinite;
 }
 
+/* ---------- 今日の運勢レア度 ---------- */
+.rarity-gold-text {
+  background: linear-gradient(120deg, #fffaf0, var(--gold-200) 35%, var(--gold-400) 70%, #fff3d0);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.rarity-full { box-shadow: inset 0 0 0 1px rgba(236, 217, 166, 0.25), 0 30px 90px -25px rgba(223, 196, 136, 0.75); }
+/* 奇跡の星夜: 金と紫のグラデーション枠（背景クリップで描画。画像不要） */
+.rarity-miracle {
+  border-width: 1.5px;
+  background:
+    linear-gradient(180deg, rgba(43, 35, 80, 0.96), rgba(11, 16, 38, 0.96)) padding-box,
+    linear-gradient(135deg, #fffaf0, var(--gold-300), var(--violet-400), var(--gold-200), #fffaf0) border-box;
+}
+.rarity-twinkle { animation: twinkle 2.4s ease-in-out infinite; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;

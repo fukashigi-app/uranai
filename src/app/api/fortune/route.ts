@@ -3,7 +3,7 @@ import { guardPost, jsonError, jsonOk, readJson } from "@/lib/api";
 import { getAccessToken } from "@/lib/cookies";
 import { fortuneInputSchema, getFortuneEngine } from "@/lib/fortune/engine";
 import { FortuneError, runFortune } from "@/lib/services/fortune";
-import { getTestSession, isSameHostRequest, isSecureRequest, logTestFortune, saveTestSession } from "@/lib/services/test-store";
+import { getTestSession, isSameHostRequest, isSecureRequest, logTestFortune, saveTestSession, testGenerateContext } from "@/lib/services/test-store";
 import { jstDateString } from "@/lib/time";
 
 export async function POST(req: Request) {
@@ -17,8 +17,9 @@ export async function POST(req: Request) {
     if (parsed.data.type !== test.type) return jsonError(400, "type_mismatch", "選んだ占いと入力内容が一致しません。最初からやり直してください。");
     try {
       const now = new Date();
-      await getFortuneEngine().generate(parsed.data, now); // 生成できることを確認（結果は表示時に同じ条件で再生成）
-      await saveTestSession({ ...test, status: "done", date: jstDateString(now), input: parsed.data }, isSecureRequest(req));
+      const done = { ...test, status: "done" as const, date: jstDateString(now), at: now.getTime(), input: parsed.data };
+      await getFortuneEngine().generate(parsed.data, testGenerateContext(done)); // 生成できることを確認（結果は表示時に同じ条件で再生成）
+      await saveTestSession(done, isSecureRequest(req));
       await logTestFortune(test.storeCode, test.type);
       return NextResponse.json({ ok: true, test: true });
     } catch (e) {
