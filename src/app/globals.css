@@ -212,6 +212,211 @@ body {
 }
 .rarity-twinkle { animation: twinkle 2.4s ease-in-out infinite; }
 
+/* ---------- 結果表示の演出（今日の月 → レア度 → 結果） ---------- */
+.fx-reveal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  cursor: pointer;
+  background: radial-gradient(120% 90% at 50% 40%, #121a3a 0%, #070a1a 60%, #04050d 100%);
+  animation: fx-overlay-out 0.4s ease var(--fx-out, 1500ms) forwards;
+  -webkit-tap-highlight-color: transparent;
+}
+@keyframes fx-overlay-out { to { opacity: 0; visibility: hidden; } }
+.fx-sky { position: absolute; inset: 0; }
+.fx-center {
+  position: absolute;
+  left: 50%;
+  top: 46%;
+  width: min(88vw, 360px);
+  transform: translate(-50%, -50%);
+  text-align: center;
+}
+.fx-star {
+  position: absolute;
+  border-radius: 9999px;
+  background: #faf3df;
+  box-shadow: 0 0 6px 1px rgba(250, 243, 223, 0.6);
+  opacity: 0;
+  animation: fx-star-in 1.2s ease-out both;
+}
+@keyframes fx-star-in {
+  0% { opacity: 0; transform: scale(0.4); }
+  50% { opacity: 1; }
+  100% { opacity: 0.75; transform: scale(1); }
+}
+.fx-moon {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  opacity: 0;
+  animation: fx-moon-rise 0.9s cubic-bezier(0.2, 0.7, 0.2, 1) 0.05s both;
+}
+@keyframes fx-moon-rise {
+  from { opacity: 0; transform: translateY(14px) scale(0.82); filter: brightness(0.5); }
+  to { opacity: 1; transform: none; filter: brightness(1); }
+}
+.fx-label, .fx-name-en, .fx-name-ja, .fx-tagline { opacity: 0; animation: fx-text-in 0.5s ease both; }
+.fx-label { margin-top: 18px; font-size: 11px; letter-spacing: 0.3em; color: var(--ink-muted); animation-delay: 0.5s; }
+.fx-name-en {
+  margin-top: 8px;
+  font-family: var(--font-display);
+  font-size: 34px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  line-height: 1.15;
+  color: var(--gold-200);
+  animation-delay: 0.75s;
+}
+.fx-name-ja { margin-top: 2px; font-size: 14px; letter-spacing: 0.25em; color: var(--gold-200); animation-delay: 0.9s; }
+.fx-tagline { margin-top: 10px; font-family: var(--font-serif); font-size: 15px; color: var(--ink); animation-delay: 1.1s; }
+@keyframes fx-text-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.fx-skip {
+  position: absolute;
+  left: 50%;
+  bottom: max(28px, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  min-height: 44px;
+  padding: 0 22px;
+  border-radius: 9999px;
+  border: 1px solid rgba(223, 196, 136, 0.35);
+  background: rgba(7, 10, 26, 0.6);
+  color: var(--gold-200);
+  font-size: 13px;
+  letter-spacing: 0.1em;
+}
+/* 新月：静かに輪郭が浮かぶ */
+.fx-tier-new .fx-name-en, .fx-tier-new .fx-name-ja { color: var(--violet-300); }
+.fx-tier-new .fx-star { animation-duration: 2s; }
+/* 三日月：柔らかな光 */
+.fx-tier-crescent .fx-moon svg { filter: drop-shadow(0 0 14px rgba(236, 217, 166, 0.35)); }
+/* 上弦：光を少し強く、星がゆっくり瞬く */
+.fx-tier-half .fx-moon svg { filter: drop-shadow(0 0 20px rgba(236, 217, 166, 0.5)); }
+.fx-tier-half .fx-star { animation: fx-star-in 1.2s ease-out both, twinkle 3s ease-in-out 1.2s infinite; }
+/* 満月：金色の光の輪・文字が柔らかく輝く */
+.fx-halo {
+  position: absolute;
+  left: 50%;
+  top: 56px;
+  width: 220px;
+  height: 220px;
+  margin: -110px 0 0 -110px;
+  border-radius: 9999px;
+  background: radial-gradient(circle, rgba(236, 217, 166, 0.45) 0%, rgba(223, 196, 136, 0.12) 45%, transparent 70%);
+  opacity: 0;
+  animation: fx-halo 1.4s ease-out 0.35s both;
+}
+@keyframes fx-halo {
+  0% { opacity: 0; transform: scale(0.5); }
+  60% { opacity: 1; }
+  100% { opacity: 0.7; transform: scale(1.15); }
+}
+.fx-tier-full .fx-moon svg { filter: drop-shadow(0 0 28px rgba(236, 217, 166, 0.75)); }
+.fx-tier-full .fx-name-en, .fx-tier-miracle .fx-name-en {
+  background: linear-gradient(120deg, #fffaf0, var(--gold-200) 35%, var(--gold-400) 70%, #fff3d0);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 0 10px rgba(236, 217, 166, 0.45));
+}
+.fx-tier-full .fx-name-en { animation-delay: 0.95s; }
+.fx-tier-full .fx-name-ja { animation-delay: 1.15s; }
+.fx-tier-full .fx-tagline { animation-delay: 1.35s; }
+/* 奇跡の星夜：星が集まる → 満月が強く輝く → 流れ星 → 金色の光 → MIRACLE */
+.fx-tier-miracle .fx-star { animation: fx-gather 1s cubic-bezier(0.2, 0.7, 0.2, 1) both, twinkle 2.4s ease-in-out 1.2s infinite; }
+@keyframes fx-gather {
+  from { opacity: 0; transform: translate(var(--fx-sx), var(--fx-sy)) scale(0.3); }
+  to { opacity: 0.9; transform: none; }
+}
+.fx-tier-miracle .fx-moon { animation-delay: 0.5s; animation-duration: 1s; }
+.fx-tier-miracle .fx-moon svg { filter: drop-shadow(0 0 34px rgba(255, 243, 208, 0.9)); }
+.fx-tier-miracle .fx-halo { animation-delay: 0.7s; }
+.fx-tier-miracle .fx-label { animation-delay: 1.2s; }
+.fx-tier-miracle .fx-name-en { font-size: 40px; animation: fx-miracle-title 0.8s ease 1.7s both; }
+.fx-tier-miracle .fx-name-ja { animation-delay: 2s; }
+.fx-tier-miracle .fx-tagline { animation-delay: 2.2s; }
+@keyframes fx-miracle-title {
+  from { opacity: 0; letter-spacing: 0.5em; transform: scale(0.94); }
+  to { opacity: 1; letter-spacing: 0.14em; transform: none; }
+}
+.fx-shooting {
+  position: absolute;
+  height: 2px;
+  border-radius: 9999px;
+  background: linear-gradient(90deg, rgba(255, 250, 240, 0), rgba(255, 250, 240, 0.95));
+  transform: rotate(calc(180deg - var(--fx-angle))) translateX(0);
+  transform-origin: right center;
+  opacity: 0;
+  animation: fx-shoot 0.75s ease-in both;
+}
+@keyframes fx-shoot {
+  0% { opacity: 0; transform: rotate(calc(180deg - var(--fx-angle))) translateX(0); }
+  15% { opacity: 1; }
+  100% { opacity: 0; transform: rotate(calc(180deg - var(--fx-angle))) translateX(110vw); }
+}
+.fx-goldlight {
+  position: absolute;
+  left: 50%;
+  top: 40%;
+  width: 160vmax;
+  height: 160vmax;
+  margin: -80vmax 0 0 -80vmax;
+  border-radius: 9999px;
+  background: radial-gradient(circle, rgba(240, 205, 120, 0.2) 0%, rgba(207, 171, 102, 0.07) 28%, transparent 55%);
+  opacity: 0;
+  animation: fx-goldlight 1.2s ease-out 1.4s both;
+}
+@keyframes fx-goldlight {
+  0% { opacity: 0; transform: scale(0.15); }
+  55% { opacity: 1; }
+  100% { opacity: 0.45; transform: scale(1); }
+}
+/* 結果本文：演出画面が消えるのに合わせて上からふわっと表示 */
+.fx-body { animation: fx-body-in 0.6s ease var(--fx-out, 0ms) both; }
+.fx-body-instant, html[data-fx-skip] .fx-body { animation: none; }
+html[data-fx-skip] .fx-reveal-overlay { display: none; }
+@keyframes fx-body-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+/* ---------- 結果カードの静的な特別感（演出後もスクリーンショットに残る） ---------- */
+.rarity-sweep {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(105deg, transparent 35%, rgba(255, 243, 208, 0.22) 50%, transparent 65%);
+  transform: translateX(-120%);
+  animation: rarity-sweep 1.4s ease-out calc(var(--fx-out, 0ms) + 500ms) 1 both;
+}
+html[data-fx-skip] .rarity-sweep, .fx-body-instant .rarity-sweep { animation-delay: 300ms; }
+@keyframes rarity-sweep { to { transform: translateX(120%); } }
+.rarity-particle {
+  position: absolute;
+  width: 3px;
+  height: 3px;
+  border-radius: 9999px;
+  background: var(--gold-200);
+  box-shadow: 0 0 6px 1px rgba(236, 217, 166, 0.6);
+  opacity: 0;
+  animation: rarity-float 4.5s ease-in-out infinite;
+}
+@keyframes rarity-float {
+  0% { opacity: 0; transform: translateY(8px); }
+  30% { opacity: 0.9; }
+  100% { opacity: 0; transform: translateY(-36px); }
+}
+
+/* 動きを減らす設定：流れ星・光の横切り・粒子・大きな移動を止め、演出画面は出さない（月とレア度は結果カードに静的に表示） */
+@media (prefers-reduced-motion: reduce) {
+  .fx-reveal-overlay { display: none; }
+  .fx-body, .rarity-sweep, .rarity-particle, .rarity-twinkle { animation: none !important; }
+  .rarity-sweep, .rarity-particle { display: none; }
+}
+.fx-force-reduced .fx-body, .fx-force-reduced .rarity-sweep, .fx-force-reduced .rarity-particle, .fx-force-reduced .rarity-twinkle, .fx-force-reduced .reveal, .fx-force-reduced .fade-up { animation: none !important; }
+.fx-force-reduced .rarity-sweep, .fx-force-reduced .rarity-particle { display: none; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;

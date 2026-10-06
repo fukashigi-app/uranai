@@ -5,7 +5,7 @@ import { PublicShell, Notice, RestartButton } from "@/components/public/public-s
 import { getTestSession, testGenerateContext } from "@/lib/services/test-store";
 import { fortuneInputSchema, getFortuneEngine } from "@/lib/fortune/engine";
 import type { FortuneResultData, FortuneTypeValue } from "@/lib/db/schema";
-import { ResultView } from "@/components/public/result-view";
+import { FortuneResult } from "@/components/public/fortune-result";
 import { ShareButton } from "@/components/public/share-button";
 import { getAccessToken } from "@/lib/cookies";
 import { getFortuneSession } from "@/lib/services/fortune";
@@ -83,16 +83,20 @@ async function ResultScreen({
 }) {
   const shareText = `${shareSummary(r, FORTUNE_CATALOG[fortuneType].label)} #${siteConfig.name}`;
   return (
-    <PublicShell storeName={storeName} step={4}>
+    <PublicShell storeName={storeName} step={4} fade={false}>
       <h1 className="sr-only">占い結果</h1>
-      <ResultView result={r} />
-      <div className="mt-6 space-y-3 fade-up" style={{ animationDelay: "1.8s" }}>
-        <ShareButton text={shareText} url={await siteOrigin()} />
-        <Link href="/" className="btn-gold flex h-14 items-center justify-center rounded-2xl text-base font-bold">
-          {testMode ? "別の占いも試す（無料）" : "別の占いもしてみる（100円）"}
-        </Link>
-        <p className="text-center text-[11px] leading-relaxed text-ink-faint">この結果は24時間、このブラウザで再表示できます。</p>
-      </div>
+      <FortuneResult
+        result={r}
+        footer={
+          <div className="mt-6 space-y-3">
+            <ShareButton text={shareText} url={await siteOrigin()} />
+            <Link href="/" className="btn-gold flex h-14 items-center justify-center rounded-2xl text-base font-bold">
+              {testMode ? "別の占いも試す（無料）" : "別の占いもしてみる（100円）"}
+            </Link>
+            <p className="text-center text-[11px] leading-relaxed text-ink-faint">この結果は24時間、このブラウザで再表示できます。</p>
+          </div>
+        }
+      />
     </PublicShell>
   );
 }

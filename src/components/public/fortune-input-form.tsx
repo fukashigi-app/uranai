@@ -1,31 +1,19 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { FortuneTypeValue } from "@/lib/db/schema";
 import { BLOOD_TYPES, ZODIAC_SIGNS } from "@/lib/fortune/zodiac";
 import { CelestialLoader } from "@/components/ui/spinner";
 
-/** 演出の長さ（短すぎず、待たせすぎない 1.6 秒） */
-const MIN_ANIMATION_MS = 1600;
-const READING_LABELS = [
-  "あなたの運勢を読み解いています…",
-  "星の導きを確認しています…",
-  "今日のメッセージを受け取っています…",
-];
-
-function ReadingAnimation() {
-  const [i, setI] = useState(0);
-  useEffect(() => {
-    const t = setInterval(
-      () => setI((v) => Math.min(v + 1, READING_LABELS.length - 1)),
-      650,
-    );
-    return () => clearInterval(t);
-  }, []);
-  return <CelestialLoader label={READING_LABELS[i]} />;
-}
+/** 「占い中」の表示時間（この後、結果画面で今日の月・レア度の演出が続くため短め） */
+const MIN_ANIMATION_MS = 700;
+const READING_LABELS: Record<FortuneTypeValue, string> = {
+  ZODIAC: "今日の星の巡りを読み解いています…",
+  BLOOD: "今日のあなたの運気を読み解いています…",
+  BIRTHDAY: "あなたの数字と星を読み解いています…",
+};
 
 export function FortuneInputForm({ type }: { type: FortuneTypeValue }) {
   const router = useRouter();
@@ -105,7 +93,7 @@ export function FortuneInputForm({ type }: { type: FortuneTypeValue }) {
   if (reading) {
     return (
       <div className="glass mt-6 rounded-3xl px-6 py-10">
-        <ReadingAnimation />
+        <CelestialLoader label={READING_LABELS[type]} />
       </div>
     );
   }

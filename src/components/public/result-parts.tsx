@@ -3,7 +3,8 @@ import { StarRating } from "@/components/ui/stars";
 
 /** 結果画面の共通パーツ（血液型占い・生年月日占い v2 で使用） */
 
-export const revealDelay = (i: number) => ({ animationDelay: `${300 + i * 180}ms` });
+/** 各項目のふわっと表示（待たせすぎないよう短い間隔で） */
+export const revealDelay = (i: number) => ({ animationDelay: `${120 + i * 70}ms` });
 
 export function OverallCard({ overall, delay, children }: { overall: StarComment; delay: number; children?: React.ReactNode }) {
   return (

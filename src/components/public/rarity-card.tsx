@@ -50,9 +50,16 @@ export function RarityCard({
   const [y, m, d] = dateLabel.split("-");
   const high = rarity.level >= 4;
   return (
-    <section className={`reveal relative overflow-hidden rounded-[2rem] border px-6 pb-6 pt-5 text-center ${st.frame}`} aria-label="今日の運勢レア度">
+    <section
+      className={`reveal relative overflow-hidden rounded-[2rem] border px-6 pb-6 pt-5 text-center ${st.frame}`}
+      aria-label={`今日の運勢レア度 ${rarity.en}｜${rarity.ja}`}
+      data-rarity={rarity.key}
+    >
       {high ? <div className="pointer-events-none absolute inset-x-0 -top-28 mx-auto h-56 w-56 rounded-full bg-gold-300/25 blur-3xl" aria-hidden /> : null}
-      {rarity.key === "MIRACLE" ? <Sparkles /> : null}
+      {rarity.key === "MIRACLE" ? <Constellation /> : null}
+      {rarity.key === "MIRACLE" ? <Sparkles count={6} /> : null}
+      {rarity.key === "HALF_MOON" ? <Sparkles count={3} /> : null}
+      {rarity.key === "FULL_MOON" ? <FullMoonLight /> : null}
       <p className="relative text-[11px] tracking-[0.25em] text-ink-muted">
         {typeLabel}・{y}.{m}.{d}
       </p>
@@ -92,8 +99,8 @@ export function RarityCard({
   );
 }
 
-/** 奇跡の星夜だけの静かな星のきらめき（CSSのみ・少数の要素） */
-function Sparkles() {
+/** 静かな星のきらめき（CSSのみ・少数の要素）。奇跡の星夜は6個、上弦は3個 */
+function Sparkles({ count }: { count: number }) {
   // 文字に重ならないよう、カードの左右の端だけに置く
   const stars = [
     [5, 10, 0],
@@ -105,11 +112,64 @@ function Sparkles() {
   ];
   return (
     <div className="pointer-events-none absolute inset-0" aria-hidden>
-      {stars.map(([x, y, delay], i) => (
+      {stars.slice(0, count).map(([x, y, delay], i) => (
         <span key={i} className="rarity-twinkle absolute text-[10px] text-gold-50" style={{ left: `${x}%`, top: `${y}%`, animationDelay: `${delay}s` }}>
           ✦
         </span>
       ))}
     </div>
+  );
+}
+
+/** 満月：カードを1回だけ横切る光と、ゆっくり舞う金色の粒（6個） */
+function FullMoonLight() {
+  const particles = [
+    [8, 78, 0],
+    [90, 70, 1.4],
+    [14, 40, 2.6],
+    [86, 30, 0.7],
+    [6, 60, 3.3],
+    [94, 52, 2],
+  ];
+  return (
+    <div className="pointer-events-none absolute inset-0" aria-hidden>
+      <span className="rarity-sweep" />
+      {particles.map(([x, y, d], i) => (
+        <span key={i} className="rarity-particle" style={{ left: `${x}%`, top: `${y}%`, animationDelay: `${d}s` }} />
+      ))}
+    </div>
+  );
+}
+
+/** 奇跡の星夜：星座を思わせる線（演出後も残る静的な背景） */
+function Constellation() {
+  return (
+    <svg className="pointer-events-none absolute inset-0 h-full w-full opacity-40" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden>
+      <g stroke="#ecd9a6" strokeWidth="0.25" fill="none">
+        <polyline points="6,18 14,9 22,15 18,26" />
+        <polyline points="78,12 86,20 94,14" />
+        <polyline points="8,70 15,82 24,78" />
+        <polyline points="80,84 88,74 95,80" />
+      </g>
+      <g fill="#fffaf0">
+        {[
+          [6, 18],
+          [14, 9],
+          [22, 15],
+          [18, 26],
+          [78, 12],
+          [86, 20],
+          [94, 14],
+          [8, 70],
+          [15, 82],
+          [24, 78],
+          [80, 84],
+          [88, 74],
+          [95, 80],
+        ].map(([x, y], i) => (
+          <circle key={i} cx={x} cy={y} r="0.6" />
+        ))}
+      </g>
+    </svg>
   );
 }

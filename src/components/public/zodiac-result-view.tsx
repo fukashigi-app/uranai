@@ -2,7 +2,7 @@ import type { ZodiacResultV2 } from "@/lib/fortune/types";
 import { StarRating } from "@/components/ui/stars";
 import { RarityCard } from "./rarity-card";
 
-const delay = (i: number) => ({ animationDelay: `${300 + i * 180}ms` });
+const delay = (i: number) => ({ animationDelay: `${120 + i * 70}ms` });
 /** 星座記号を絵文字ではなく文字として表示する */
 const sym = (s: string) => `${s}︎`;
 

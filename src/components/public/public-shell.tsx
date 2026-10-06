@@ -6,11 +6,14 @@ export function PublicShell({
   children,
   storeName,
   step,
+  fade = true,
 }: {
   children: React.ReactNode;
   storeName?: string | null;
   /** 1:選ぶ 2:お支払い 3:入力 4:結果 */
   step?: 1 | 2 | 3 | 4;
+  /** 本文をふわっと表示するか（結果画面はレア度演出で表示するため false） */
+  fade?: boolean;
 }) {
   return (
     <div className="mx-auto flex min-h-dvh w-full max-w-md flex-col px-5 pb-[max(1.5rem,env(safe-area-inset-bottom))] pt-[max(1rem,env(safe-area-inset-top))]">
@@ -28,7 +31,7 @@ export function PublicShell({
         ) : null}
       </header>
       {step ? <StepIndicator step={step} /> : null}
-      <main className="flex-1 fade-in">{children}</main>
+      <main className={`flex-1 ${fade ? "fade-in" : ""}`}>{children}</main>
       <footer className="mt-10 space-y-2 text-center text-[11px] text-ink-faint">
         <nav className="flex justify-center gap-4">
           <Link href="/terms" className="hover:text-ink-muted">利用規約</Link>
