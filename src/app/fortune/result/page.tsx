@@ -56,13 +56,30 @@ export default async function FortuneResultPage() {
 
   const session = await getFortuneSession(await getAccessToken());
   if (session.state === "paid") redirect("/fortune/input");
+  if (session.state === "expired") {
+    return (
+      <PublicShell>
+        <Notice title="占いの有効期限が切れています" action={<RestartButton />}>
+          お支払いから24時間以内に占いが行われなかったため、この占いはご利用いただけなくなりました。
+        </Notice>
+      </PublicShell>
+    );
+  }
+  if (session.state === "used" && !session.result) {
+    return (
+      <PublicShell>
+        <Notice title="結果の表示期間が終了しました" action={<RestartButton />}>
+          占い結果は、占ってから24時間まで表示できます。
+        </Notice>
+      </PublicShell>
+    );
+  }
   if (session.state !== "used" || !session.result) {
     return (
       <PublicShell>
         <Notice title="結果を表示できません" action={<RestartButton />}>
-          {session.state === "used"
-            ? "結果の表示期間（24時間）が終了しました。"
-            : "占い結果はお支払いをしたブラウザでのみ表示できます。"}
+          このブラウザには、お支払いの記録が見つかりませんでした。占い結果はお支払いをしたブラウザでのみ表示できます。
+          <span className="mt-2 block text-[12px]">ブラウザのCookieが無効になっている場合は、Cookieを有効にしてからもう一度お試しください。</span>
         </Notice>
       </PublicShell>
     );

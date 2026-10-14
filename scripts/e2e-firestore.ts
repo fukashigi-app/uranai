@@ -346,7 +346,8 @@ async function main() {
     assert.match(h, new RegExp(`今日のナンバー <span[^>]*>${todayPd}</span>`));
     assert.equal(h.includes(BD), false);
   }
-  const themeOf = (h: string) => /今日のテーマ<\/p>[\s\S]*?<p class="mt-2[^"]*">([\s\S]*?)<\/p>/.exec(h)?.[1];
+  // 今日のテーマ（キーワードと意味の書き出し）は固定。「あなたにとっての意味」の言い回しは購入ごとに変わってよい
+  const themeOf = (h: string) => /今日のテーマ<\/p>[\s\S]*?「([^」]+)」[\s\S]*?<p class="mt-2[^"]*">([^。]+。)/.exec(h)?.slice(1, 3).join("|");
   assert.deepEqual([starsOf(bdA), rarityOf(bdA), themeOf(bdA)], [starsOf(bdB), rarityOf(bdB), themeOf(bdB)]);
   assert.ok(themeOf(bdA));
   assert.notEqual(afterOverall(bdA), afterOverall(bdB));
@@ -458,7 +459,7 @@ async function main() {
   assert.equal(dr.length, 2);
   const [ba, bb] = dr;
   assert.deepEqual([ba.sign.name, ba.lifePath, ba.isMaster, ba.birthMonth], ["水瓶座", 11, true, 2]);
-  const fixedD = (r: typeof ba) => [r.overall.stars, r.love.stars, r.work.stars, r.money.stars, r.health.stars, r.rarity.key, r.personalDay, r.theme.text, r.events];
+  const fixedD = (r: typeof ba) => [r.overall.stars, r.love.stars, r.work.stars, r.money.stars, r.health.stars, r.rarity.key, r.personalDay, r.theme.keyword, r.typeName, r.typeDescription, r.events];
   assert.deepEqual(fixedD(ba), fixedD(bb));
   assert.notDeepEqual([ba.message, ba.action, ba.caution, ba.luckyItem, ba.luckyNumber, ba.overall.comment], [bb.message, bb.action, bb.caution, bb.luckyItem, bb.luckyNumber, bb.overall.comment]);
   const page = await (await q1.req("/fortune/result")).text();

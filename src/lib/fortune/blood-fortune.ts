@@ -1,11 +1,11 @@
-import { CAUTION_BY_CATEGORY, LUCKY_COLORS, LUCKY_ITEMS, RESET_ACTIONS, STYLE_TIPS } from "./content/common";
+import { LUCKY_COLORS, LUCKY_ITEMS } from "./content/common";
 import { FULL_MOON_MESSAGES, MIRACLE_MESSAGES } from "./content/rarity";
-import { BLOOD_CORE, CAUTIONS, GOOD_ACTIONS, GOOD_BLOOD_REASONS, HEALTH, HELPERS, LOVE, MESSAGES, MONEY, MONTH_MOTIFS, OVERALL, TYPE_TODAY, TYPES_48, WORK } from "./content/blood";
+import { BLOOD_CORE, CARE_CAUTION, CARE_RESET, CARE_STYLE, CAUTIONS, GOOD_ACTIONS, GOOD_BLOOD_REASONS, HEALTH, HELPERS, LOVE, MESSAGES, MONEY, MONTH_MOTIFS, OVERALL, TYPE_TODAY, TYPES_48, WORK } from "./content/blood";
 import { dayRng, momentOf, purchaseRng, type GenerateContext } from "./context";
 import { standardDay } from "./day-stars";
 import { rarityInfo } from "./rarity";
 import type { Rng } from "./rng";
-import { fill, pickTagged, toneOf } from "./select";
+import { createComposer, pickTagged, toneOf, type Composer } from "./select";
 import { CATEGORY_KEYS, CATEGORY_LABELS, type BloodResultV2, type BloodTypeValue, type CareSection, type CategoryKey, type DayStars, type RarityKey } from "./types";
 
 /**
@@ -29,15 +29,20 @@ export function goodBloodFor(date: string, bloodType: BloodTypeValue, birthMonth
   return { mode, target, helper };
 }
 
-function careFor(rarity: RarityKey, stars: DayStars, rng: Rng): CareSection {
+function careFor(rarity: RarityKey, stars: DayStars, rng: Rng, text: Composer): CareSection {
   const care: CareSection = {};
   const weakest = [...CATEGORY_KEYS].sort((a, b) => stars[a] - stars[b])[0];
   // 「今日気をつけたいこと」は常に表示するため、ここでは控えめな運勢の具体的な注意点だけを足す
-  if (rarity === "NEW_MOON" || stars[weakest] <= 2) care.caution = rng.pick(CAUTION_BY_CATEGORY[weakest]);
-  if (rarity === "NEW_MOON" || rarity === "CRESCENT") care.style = rng.pick(STYLE_TIPS);
-  if (rarity === "NEW_MOON") care.reset = rng.pick(RESET_ACTIONS);
+  if (rarity === "NEW_MOON" || stars[weakest] <= 2) care.caution = text.pick(rng, CARE_CAUTION[weakest]);
+  if (rarity === "NEW_MOON" || rarity === "CRESCENT") care.style = text.pick(rng, CARE_STYLE);
+  if (rarity === "NEW_MOON") care.reset = text.pick(rng, CARE_RESET);
   return care;
 }
+
+/** 読む文章の合計文字数の上限の目安（血液型占いは 400〜600 字） */
+const MAX_READING_LENGTH = 600;
+/** 同じ結果の中で使う回数の上限（血液型の持ち味・「日」止めの文が続きすぎないように） */
+const PHRASE_LIMITS = { あなた: 3, 日です: 1, 疲れやすい: 1 } as const;
 
 export function generateBlood(bloodType: BloodTypeValue, birthMonth: number, ctx: GenerateContext): BloodResultV2 {
   const m = momentOf(ctx.now);
@@ -50,9 +55,28 @@ export function generateBlood(bloodType: BloodTypeValue, birthMonth: number, ctx
   const tone = toneOf(s.overall);
 
   const good = goodBloodFor(m.date, bloodType, birthMonth, s);
-  const reason = fill(p.pick(GOOD_BLOOD_REASONS[good.mode]), { ...vars, cat: CATEGORY_LABELS[good.target], partner: good.helper.type, help: good.helper.help });
-  const used = new Set<string>();
   const special = rarity === "MIRACLE" ? p.pick(MIRACLE_MESSAGES) : rarity === "FULL_MOON" ? p.pick(FULL_MOON_MESSAGES) : undefined;
+  const info = rarityInfo(rarity, s, undefined, special);
+  const luckyColor = lucky.pick(LUCKY_COLORS);
+  const luckyItem = pickTagged(lucky, LUCKY_ITEMS, { season: m.season }).text;
+  const luckyNumber = lucky.int(1, 9);
+  const others = [type.name, luckyColor.name, luckyItem, String(luckyNumber), info.tagline, ...info.reasons, special ?? ""];
+  const text = createComposer(
+    { ...vars, name: type.name, cat: CATEGORY_LABELS[good.target], partner: good.helper.type, help: good.helper.help },
+    { limits: { ...PHRASE_LIMITS, [vars.trait]: 2, [vars.motif]: 1 }, maxLength: MAX_READING_LENGTH - others.reduce((n, t) => n + [...t].length, 0) },
+  );
+  for (const t of [type.catch, type.feature]) text.add(t);
+  const typeToday = text.pick(p, TYPE_TODAY, { tone });
+  const overall = text.pick(p, OVERALL[s.overall]);
+  const love = text.pick(p, LOVE[s.love]);
+  const work = text.pick(p, WORK[s.work]);
+  const money = text.pick(p, MONEY[s.money]);
+  const health = text.pick(p, HEALTH[s.health]);
+  const goodAction = text.pick(p, GOOD_ACTIONS[bloodType], { tone });
+  const caution = text.pick(p, CAUTIONS[bloodType], { tone });
+  const reason = text.pick(p, GOOD_BLOOD_REASONS[good.mode]);
+  const message = text.pick(p, MESSAGES, { tone });
+  const care = careFor(rarity, s, p, text);
 
   return {
     v: 2,
@@ -64,20 +88,20 @@ export function generateBlood(bloodType: BloodTypeValue, birthMonth: number, ctx
     typeName: type.name,
     typeCatch: type.catch,
     typeFeature: type.feature,
-    typeToday: fill(pickTagged(p, TYPE_TODAY, { tone }).text, { ...vars, name: type.name }),
-    overall: { stars: s.overall, comment: fill(p.pick(OVERALL[s.overall]), vars) },
-    love: { stars: s.love, comment: fill(p.pick(LOVE[s.love]), vars) },
-    work: { stars: s.work, comment: fill(p.pick(WORK[s.work]), vars) },
-    money: { stars: s.money, comment: fill(p.pick(MONEY[s.money]), vars) },
-    health: { stars: s.health, comment: fill(p.pick(HEALTH[s.health]), vars) },
-    goodAction: pickTagged(p, GOOD_ACTIONS[bloodType], { tone }, used).text,
-    caution: pickTagged(p, CAUTIONS[bloodType], { tone }, used).text,
+    typeToday,
+    overall: { stars: s.overall, comment: overall },
+    love: { stars: s.love, comment: love },
+    work: { stars: s.work, comment: work },
+    money: { stars: s.money, comment: money },
+    health: { stars: s.health, comment: health },
+    goodAction,
+    caution,
     goodBlood: { type: good.helper.type, reason },
-    luckyColor: lucky.pick(LUCKY_COLORS),
-    luckyItem: pickTagged(lucky, LUCKY_ITEMS, { season: m.season }).text,
-    luckyNumber: lucky.int(1, 9),
-    message: fill(pickTagged(p, MESSAGES, { tone }, used).text, vars),
-    care: careFor(rarity, s, p),
-    rarity: rarityInfo(rarity, s, undefined, special),
+    luckyColor,
+    luckyItem,
+    luckyNumber,
+    message,
+    care,
+    rarity: info,
   };
 }

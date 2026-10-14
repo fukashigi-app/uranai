@@ -16,6 +16,7 @@ export function BloodResultView({ result: r }: { result: BloodResultV2 }) {
             <span className="font-display text-xl text-gold-200">{r.bloodType}</span>型 × {r.birthMonth}月生まれ
           </>
         }
+        typeName={r.typeName}
       />
 
       <section className="glass reveal rounded-3xl p-5 text-center" style={revealDelay(0)}>

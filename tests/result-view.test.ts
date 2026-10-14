@@ -45,7 +45,11 @@ describe("結果画面の表示（旧形式との互換）", () => {
     for (const w of ["今日の運勢レア度", r.rarity.en, "月見の調停役", r.typeCatch, "今日うまくいく行動", "今日気をつけたいこと", "今日相性のいい血液型", "ラッキーナンバー", "今日の一言"]) {
       expect(out, w).toContain(w);
     }
-    expect(shareSummary(r, "血液型占い")).toContain("月見の調停役");
+    expect(shareSummary(r, "血液型占い")).toBe(`血液型占いをしたら、AB型×9月の「月見の調停役」でした！今日の運勢レア度は「${r.rarity.en}｜${r.rarity.ja}」、総合運${"★".repeat(r.overall.stars)}${"☆".repeat(5 - r.overall.stars)}`);
+    // スクリーンショット1枚でタイプが分かるよう、レア度カードにもタイプ名を出す
+    const card = out.slice(out.indexOf("data-rarity"), out.indexOf("今日の運勢レア度</p>"));
+    expect(card).toContain("月見の調停役");
+    expect(card).toContain("9月生まれ");
   });
 
   it("12星座占い v2 も引き続き表示できる", () => {
@@ -53,6 +57,8 @@ describe("結果画面の表示（旧形式との互換）", () => {
     const out = html(r);
     expect(out).toContain("今日の12星座ランキング");
     expect(out).toContain(r.rarity.en);
+    expect(out).toContain("星座占い・");
+    expect(shareSummary(r, "星座占い")).toMatch(new RegExp(`^星座占いをしたら、獅子座は今日12星座中${r.rank}位でした！今日の運勢レア度は「`));
   });
 
   it("旧形式の生年月日占いの結果を、そのまま表示できる", () => {
@@ -76,6 +82,9 @@ describe("結果画面の表示（旧形式との互換）", () => {
     }
     expect(out).not.toContain("1990-05-12");
     expect(out).not.toContain("5月12日");
-    expect(shareSummary(r, "生年月日占い")).toContain("牡牛座×誕生数9");
+    expect(shareSummary(r, "生年月日占い")).toContain(`牡牛座×誕生数9の「${r.typeName}」でした！`);
+    expect(shareSummary(r, "生年月日占い")).not.toMatch(/1990|5月12日/);
+    const card = out.slice(out.indexOf("data-rarity"), out.indexOf("今日の運勢レア度</p>"));
+    expect(card).toContain(r.typeName);
   });
 });

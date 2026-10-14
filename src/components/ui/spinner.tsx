@@ -8,7 +8,8 @@ export function Spinner({ className = "h-5 w-5" }: { className?: string }) {
 }
 
 /** 月と星が周回する占い中アニメーション */
-export function CelestialLoader({ label }: { label: string }) {
+/** label を配列で渡すと、行ごとに改行して表示する（語の途中で折り返さない） */
+export function CelestialLoader({ label }: { label: string | readonly string[] }) {
   return (
     <div className="flex flex-col items-center gap-6 py-6" role="status" aria-live="polite">
       <div className="relative h-36 w-36">
@@ -23,7 +24,15 @@ export function CelestialLoader({ label }: { label: string }) {
         <div className="absolute inset-10 rounded-full bg-gradient-to-br from-gold-50 via-gold-300 to-gold-500 animate-glow" />
         <div className="absolute inset-10 translate-x-3 -translate-y-2 rounded-full bg-night-800" />
       </div>
-      <p className="font-serif text-lg tracking-wider text-gold-200">{label}</p>
+      <p className="text-center font-serif text-lg leading-relaxed tracking-wider text-gold-200">
+        {typeof label === "string"
+          ? label
+          : label.map((l) => (
+              <span key={l} className="block whitespace-nowrap">
+                {l}
+              </span>
+            ))}
+      </p>
     </div>
   );
 }

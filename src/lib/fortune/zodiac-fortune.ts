@@ -1,6 +1,8 @@
-import { ACTIONS, CAUTION_BY_CATEGORY, LUCKY_COLORS, LUCKY_ITEMS, LUCKY_TIME_WINDOWS, RESET_ACTIONS, STYLE_TIPS } from "./content/common";
+import { LUCKY_COLORS, LUCKY_ITEMS, LUCKY_TIME_WINDOWS } from "./content/common";
 import { FULL_MOON_MESSAGES, MIRACLE_MESSAGES } from "./content/rarity";
 import {
+  ACTIONS,
+  CAUTION_BY_CATEGORY,
   CAUTION_SIGN_REASONS,
   GOOD_SIGN_REASONS,
   HEALTH,
@@ -8,15 +10,17 @@ import {
   MONEY,
   OVERALL,
   RANK_HEADLINES,
+  RESET_ACTIONS,
   SIGN_POINTS,
   SIGN_PROFILES,
   STAR_MESSAGES,
+  STYLE_TIPS,
   WORK,
 } from "./content/zodiac";
 import { dayRng, momentOf, purchaseRng, type GenerateContext, type Moment } from "./context";
 import { CATEGORY_OFFSET_WEIGHTS, judgeZodiacRarity, rarityInfo } from "./rarity";
 import type { Rng } from "./rng";
-import { fill, pickTagged, toneOf } from "./select";
+import { createComposer, pickTagged, toneOf, type Composer } from "./select";
 import { CATEGORY_KEYS, type CareSection, type CategoryKey, type DayStars, type RarityKey, type Stars, type ZodiacResultV2 } from "./types";
 import { ZODIAC_SIGNS, zodiacInfo, type ZodiacKey } from "./zodiac";
 
@@ -83,14 +87,19 @@ function luckyTime(m: Moment, rng: Rng): string {
   return `${s}:00〜${e}:00`;
 }
 
-function careFor(rarity: RarityKey, stars: DayStars, rng: Rng): CareSection {
+function careFor(rarity: RarityKey, stars: DayStars, rng: Rng, text: Composer): CareSection {
   const care: CareSection = {};
   const weakest = [...CATEGORY_KEYS].sort((a, b) => stars[a] - stars[b])[0] as CategoryKey;
-  if (stars[weakest] <= 2 || rarity === "NEW_MOON") care.caution = rng.pick(CAUTION_BY_CATEGORY[weakest]);
-  if (rarity === "NEW_MOON" || rarity === "CRESCENT") care.style = rng.pick(STYLE_TIPS);
-  if (rarity === "NEW_MOON") care.reset = rng.pick(RESET_ACTIONS);
+  if (stars[weakest] <= 2 || rarity === "NEW_MOON") care.caution = text.pick(rng, CAUTION_BY_CATEGORY[weakest]);
+  if (rarity === "NEW_MOON" || rarity === "CRESCENT") care.style = text.pick(rng, STYLE_TIPS);
+  if (rarity === "NEW_MOON") care.reset = text.pick(rng, RESET_ACTIONS);
   return care;
 }
+
+/** 読む文章の合計文字数の上限の目安（12星座占いは 400〜600 字） */
+const MAX_READING_LENGTH = 600;
+/** 同じ結果の中で使う回数の上限（「星」「あなた」が続きすぎないように） */
+const PHRASE_LIMITS = { 星: 6, あなた: 3, 日です: 1 } as const;
 
 export function generateZodiac(signKey: ZodiacKey, ctx: GenerateContext): ZodiacResultV2 {
   const m = momentOf(ctx.now);
@@ -101,8 +110,8 @@ export function generateZodiac(signKey: ZodiacKey, ctx: GenerateContext): Zodiac
   const subject = `Z:${signKey}`;
   const p = purchaseRng(m.date, subject, ctx.purchaseSeed, "text");
   const lucky = purchaseRng(m.date, subject, ctx.purchaseSeed, "lucky");
-  const vars = { sign: sign.name, strength: profile.strength };
   const s = me.stars;
+  const tone = toneOf(s.overall);
 
   // 相性のいい星座：同じエレメント＋高め合うエレメントのうち、今日いちばん順位が高い星座（固定）
   const i = signIndex(signKey);
@@ -112,13 +121,46 @@ export function generateZodiac(signKey: ZodiacKey, ctx: GenerateContext): Zodiac
   const good = [...sameEl, ...compEl].sort(byRank)[0];
   const goodEntry = day.find((d) => d.key === good)!;
   const goodInfo = zodiacInfo(good);
-  const goodTpl = p.pick(GOOD_SIGN_REASONS[sameEl.includes(good) ? "same" : "complement"]);
   // 注意したい星座：90度の位置にある2星座のうち、今日順位が低いほう（固定）
   const caution = [3, 9].map((d) => ZODIAC_SIGNS[(i + d) % 12].key as ZodiacKey).sort(byRank)[1];
   const cautionInfo = zodiacInfo(caution);
 
+  const vars = {
+    sign: sign.name,
+    strength: profile.strength,
+    rank: me.rank,
+    element: ELEMENT_JA[sign.element],
+    otherElement: ELEMENT_JA[goodInfo.element],
+    other: goodInfo.name,
+    otherRank: goodEntry.rank,
+    caution: cautionInfo.name,
+  };
   const rarity = me.rarity;
   const special = rarity === "MIRACLE" ? p.pick(MIRACLE_MESSAGES) : rarity === "FULL_MOON" ? p.pick(FULL_MOON_MESSAGES) : undefined;
+  const info = rarityInfo(rarity, s, me.rank, special);
+  const luckyColor = lucky.pick(LUCKY_COLORS);
+  const luckyItem = pickTagged(lucky, LUCKY_ITEMS, { season: m.season }).text;
+  const time = luckyTime(m, lucky);
+  const others = [luckyColor.name, luckyItem, time, info.tagline, ...info.reasons, special ?? ""];
+
+  // 星座の持ち味（{strength}）は1つの結果で2回まで。「星」「あなた」も続きすぎないようにする
+  const text = createComposer(vars, {
+    limits: { ...PHRASE_LIMITS, [profile.strength]: 2 },
+    maxLength: MAX_READING_LENGTH - others.reduce((n, t) => n + [...t].length, 0),
+  });
+  text.add(profile.note);
+  const rankHeadline = text.pick(p, RANK_HEADLINES[me.rank]);
+  const overall = text.pick(p, OVERALL[s.overall]);
+  const point = text.pick(p, SIGN_POINTS, { tone });
+  const love = text.pick(p, LOVE[s.love]);
+  const work = text.pick(p, WORK[s.work]);
+  const money = text.pick(p, MONEY[s.money]);
+  const health = text.pick(p, HEALTH[s.health]);
+  const starMessage = text.pick(p, STAR_MESSAGES, { tone });
+  const goodReason = text.pick(p, GOOD_SIGN_REASONS[sameEl.includes(good) ? "same" : "complement"]);
+  const cautionReason = text.pick(p, CAUTION_SIGN_REASONS);
+  const action = text.pick(p, ACTIONS, { time: m.timeOfDay });
+  const care = careFor(rarity, s, p, text);
 
   return {
     v: 2,
@@ -128,31 +170,22 @@ export function generateZodiac(signKey: ZodiacKey, ctx: GenerateContext): Zodiac
     sign: { ...ref(signKey), element: sign.element },
     rank: me.rank,
     ranking: day.map((d) => ({ ...ref(d.key), stars: d.stars.overall })),
-    rankHeadline: p.pick(RANK_HEADLINES[me.rank]),
+    rankHeadline,
     signNote: profile.note,
-    overall: { stars: s.overall, comment: fill(p.pick(OVERALL[s.overall]), vars) },
-    love: { stars: s.love, comment: p.pick(LOVE[s.love]) },
-    work: { stars: s.work, comment: p.pick(WORK[s.work]) },
-    money: { stars: s.money, comment: p.pick(MONEY[s.money]) },
-    health: { stars: s.health, comment: p.pick(HEALTH[s.health]) },
-    point: fill(pickTagged(p, SIGN_POINTS, { tone: toneOf(s.overall) }).text, vars),
-    starMessage: fill(pickTagged(p, STAR_MESSAGES, { tone: toneOf(s.overall) }).text, vars),
-    goodSign: {
-      ...ref(good),
-      reason: fill(goodTpl, {
-        ...vars,
-        element: ELEMENT_JA[sign.element],
-        otherElement: ELEMENT_JA[goodInfo.element],
-        other: goodInfo.name,
-        otherRank: goodEntry.rank,
-      }),
-    },
-    cautionSign: { ...ref(caution), reason: fill(p.pick(CAUTION_SIGN_REASONS), { other: cautionInfo.name }) },
-    luckyColor: lucky.pick(LUCKY_COLORS),
-    luckyItem: pickTagged(lucky, LUCKY_ITEMS, { season: m.season }).text,
-    luckyTime: luckyTime(m, lucky),
-    action: pickTagged(p, ACTIONS, { time: m.timeOfDay }).text,
-    care: careFor(rarity, s, p),
-    rarity: rarityInfo(rarity, s, me.rank, special),
+    overall: { stars: s.overall, comment: overall },
+    love: { stars: s.love, comment: love },
+    work: { stars: s.work, comment: work },
+    money: { stars: s.money, comment: money },
+    health: { stars: s.health, comment: health },
+    point,
+    starMessage,
+    goodSign: { ...ref(good), reason: goodReason },
+    cautionSign: { ...ref(caution), reason: cautionReason },
+    luckyColor,
+    luckyItem,
+    luckyTime: time,
+    action,
+    care,
+    rarity: info,
   };
 }

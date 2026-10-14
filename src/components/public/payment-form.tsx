@@ -228,7 +228,9 @@ function PayjpCardForm({
     });
     if (!r.id) {
       setPhase("idle");
-      setError(r.error?.message ?? "カード情報を確認できませんでした。入力内容をご確認ください。");
+      // PAY.JP のメッセージが日本語でない場合は、英語のままお客さんに見せない
+      const msg = r.error?.message;
+      setError(msg && /[ぁ-んァ-ヶ一-龠]/.test(msg) ? msg : "カード情報を確認できませんでした。入力内容をご確認ください。");
       return;
     }
     onToken(r.id);

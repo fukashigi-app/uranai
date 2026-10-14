@@ -124,6 +124,8 @@ export type BirthdayResultV2 = {
   strengths: string;
   weakPoints: string;
   theme: { keyword: string; text: string };
+  /** 今日のテーマの補足（購入ごとに変わる。この項目が無い古い結果もある） */
+  themeNote?: string;
   overall: StarComment;
   love: StarComment;
   work: StarComment;
@@ -131,6 +133,8 @@ export type BirthdayResultV2 = {
   health: StarComment;
   /** 今日起こりやすいこと（固定部分） */
   events: string;
+  /** 今日起こりやすいことの補足（購入ごとに変わる。この項目が無い古い結果もある） */
+  eventsNote?: string;
   action: string;
   caution: string;
   luckyColor: { name: string; hex: string };

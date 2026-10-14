@@ -38,6 +38,7 @@ export function RarityCard({
   dateLabel,
   subject,
   rank,
+  typeName,
 }: {
   rarity: RarityInfo;
   overall: Stars;
@@ -45,6 +46,8 @@ export function RarityCard({
   dateLabel: string;
   subject: React.ReactNode;
   rank?: number;
+  /** 占い固有のタイプ名（血液型の48タイプ・生年月日の基本タイプ）。スクリーンショット1枚でタイプが分かるように */
+  typeName?: string;
 }) {
   const st = STYLE[rarity.key];
   const [y, m, d] = dateLabel.split("-");
@@ -71,13 +74,18 @@ export function RarityCard({
           <span className="text-[12px]">位</span>
         </p>
       ) : null}
+      {typeName ? (
+        <p className="relative mx-auto mt-2 max-w-full rounded-full bg-gold-300/15 px-4 py-1 font-serif text-[17px] font-bold leading-snug text-gold-50 [word-break:keep-all] [overflow-wrap:anywhere]">
+          {typeName}
+        </p>
+      ) : null}
 
       <div className="hairline relative my-4" />
       <p className="relative text-[11px] tracking-[0.3em] text-ink-muted">今日の運勢レア度</p>
       <div className="relative mt-2 flex justify-center">
         <MoonPhase level={rarity.level} className={high ? "h-16 w-16" : "h-14 w-14"} />
       </div>
-      <p className={`relative mt-2 font-display text-[28px] font-semibold leading-tight tracking-[0.12em] ${st.name}`}>{rarity.en}</p>
+      <p className={`relative mt-2 whitespace-nowrap font-display text-[clamp(22px,7vw,28px)] font-semibold leading-tight tracking-[0.08em] ${st.name}`}>{rarity.en}</p>
       <p className={`relative text-[13px] tracking-[0.2em] ${st.name}`}>{rarity.ja}</p>
       <p className={`relative mt-1.5 font-serif text-[15px] ${st.tagline}`}>「{rarity.tagline}」</p>
 

@@ -53,6 +53,22 @@ export default async function PaymentPage() {
           <span className="block text-[10px] text-ink-faint">税込</span>
         </p>
       </div>
+      <section className="mb-4 rounded-3xl border border-gold-300/25 bg-gold-300/[0.05] px-5 py-4 fade-up" aria-labelledby="learn-heading">
+        <h2 id="learn-heading" className="text-[12px] tracking-[0.2em] text-gold-300">
+          この占いでわかること
+        </h2>
+        <ul className="mt-2 space-y-1 text-[14px] text-ink">
+          {item.learn.map((x) => (
+            <li key={x} className="flex gap-2">
+              <span className="text-gold-300" aria-hidden>
+                ✦
+              </span>
+              {x}
+            </li>
+          ))}
+        </ul>
+        <p className="mt-2 text-[11.5px] text-ink-muted">お支払い後、{item.inputLabel}を入力するとすぐに結果が表示されます。</p>
+      </section>
       <PaymentForm
         provider={provider}
         publicKey={publicKey}

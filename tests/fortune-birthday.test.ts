@@ -9,7 +9,8 @@ import { fortuneInputSchema, templateEngine } from "@/lib/fortune/engine";
 import { lifePathNumber, personalDayNumber } from "@/lib/fortune/numerology";
 import { RARITY_KEYS, type BirthdayResultV2, type RarityKey } from "@/lib/fortune/types";
 import { jstDateString } from "@/lib/time";
-import { charCount } from "./helpers/fortune";
+import { birthdayReading, changedShare, charCount } from "./helpers/fortune";
+import { maxSentenceSimilarity } from "@/lib/fortune/similarity";
 
 const START = Date.UTC(2026, 0, 1, 3);
 const nowAt = (day: number, hour = 12) => new Date(START + day * 86_400_000 + (hour - 12) * 3_600_000);
@@ -17,40 +18,7 @@ const nowAt = (day: number, hour = 12) => new Date(START + day * 86_400_000 + (h
 const BIRTHS = Array.from({ length: 300 }, (_, i) => jstDateString(new Date(Date.UTC(1950, 0, 1) + i * 157 * 86_400_000)));
 const BANNED = ["凶", "ハズレ", "はずれ", "宝くじ", "ギャンブル", "投資", "賭け", "必ず", "絶対", "治る", "治ります", "儲か"];
 
-function readingTexts(r: BirthdayResultV2): string[] {
-  return [
-    r.sign.name,
-    `誕生数${r.lifePath}`,
-    r.lifePathTitle,
-    `今日のナンバー${r.personalDay}`,
-    r.theme.keyword,
-    r.typeName,
-    r.typeDescription,
-    r.strengths,
-    r.weakPoints,
-    r.theme.text,
-    r.overall.comment,
-    r.love.comment,
-    r.work.comment,
-    r.money.comment,
-    r.health.comment,
-    r.events,
-    r.action,
-    r.caution,
-    r.luckyColor.name,
-    r.luckyItem,
-    String(r.luckyNumber),
-    r.luckyNumberNote,
-    r.message,
-    r.blessing ?? "",
-    r.care.caution ?? "",
-    r.care.style ?? "",
-    r.care.reset ?? "",
-    r.rarity.tagline,
-    ...r.rarity.reasons,
-    r.rarity.special ?? "",
-  ];
-}
+const readingTexts = birthdayReading;
 
 function allStrings(v: unknown): string[] {
   if (typeof v === "string") return [v];
@@ -161,7 +129,9 @@ describe("生年月日占い v2：固定部分と購入ごとに変わる部分"
     r.rarity.key,
     r.rarity.reasons.join("|"),
     r.personalDay,
-    r.theme.text,
+    r.theme.keyword,
+    birthdayContent.PERSONAL_DAYS[r.personalDay].meaning,
+    r.theme.text.startsWith(birthdayContent.PERSONAL_DAYS[r.personalDay].meaning),
     r.events,
     r.typeName,
     r.typeDescription,
@@ -178,7 +148,7 @@ describe("生年月日占い v2：固定部分と購入ごとに変わる部分"
         const c = generateBirthday(b, { now: nowAt(d, 21), purchaseSeed: "purchase-B" });
         expect(fixed(a)).toEqual(fixed(c));
         total++;
-        if (a.message !== c.message || a.action !== c.action || a.caution !== c.caution || a.luckyItem !== c.luckyItem || a.overall.comment !== c.overall.comment || a.luckyNumber !== c.luckyNumber) changed++;
+        if (a.message !== c.message || a.action !== c.action || a.caution !== c.caution || a.luckyItem !== c.luckyItem || a.overall.comment !== c.overall.comment || a.luckyNumber !== c.luckyNumber || a.themeNote !== c.themeNote) changed++;
       }
     }
     expect(changed / total).toBeGreaterThan(0.95);
@@ -292,6 +262,8 @@ describe("生年月日占い v2：文章の品質と整合性", () => {
         pool.find((x) => x.text === text || new RegExp("^" + x.text.replace(/[.*+?^$()|[\]\\]/g, "\\$&").replace(/\{\w+\}/g, ".+?") + "$").test(text));
       for (const [pool, text] of [
         [birthdayContent.EVENTS[r.personalDay], r.events],
+        [birthdayContent.EVENT_NOTES[r.personalDay], r.eventsNote!],
+        [birthdayContent.THEME_NOTES[r.personalDay], r.themeNote!],
         [birthdayContent.ACTIONS[r.personalDay], r.action],
         [birthdayContent.MESSAGES, r.message],
       ] as const) {
@@ -301,8 +273,10 @@ describe("生年月日占い v2：文章の品質と整合性", () => {
       }
       expect(birthdayContent.CAUTIONS[r.personalDay]).toContain(r.caution);
       // 今日のテーマも★の調子に合わせて選ばれる（★1〜2の日に「成果が形になる」などと言わない）
-      const bridgeText = r.theme.text.slice(birthdayContent.PERSONAL_DAYS[r.personalDay].meaning.length).replace(birthdayContent.SAME_NUMBER_NOTE, "");
-      const bridge = find(birthdayContent.THEME_BRIDGES[r.personalDay], bridgeText);
+      let bridgeText = r.theme.text.slice(birthdayContent.PERSONAL_DAYS[r.personalDay].meaning.length);
+      for (const n of birthdayContent.SAME_NUMBER_NOTES) bridgeText = bridgeText.replace(n.text, "");
+      const group = birthdayContent.LIFE_PATH_GROUP[r.lifePath];
+      const bridge = find([...birthdayContent.THEME_BRIDGES[group][r.personalDay], ...birthdayContent.THEME_BRIDGES_COMMON[r.personalDay]], bridgeText);
       expect(bridge, bridgeText).toBeDefined();
       expect(!bridge!.tone || bridge!.tone.includes(tone), `${bridgeText} @${tone}`).toBe(true);
     }
@@ -325,5 +299,109 @@ describe("生年月日占い v2：文章の品質と整合性", () => {
       if (r.rarity.key !== "MIRACLE") expect(r.blessing).toBeUndefined();
       if (r.rarity.level <= 3) expect(r.rarity.special).toBeUndefined();
     }
+  });
+});
+
+describe("生年月日占い v2：特徴の差し込みは意味の種類ごとに分ける", () => {
+  const { SIGNS, LIFE_PATHS, TRAIT_KINDS } = birthdayContent;
+  const profiles = [...Object.values(SIGNS), ...Object.values(LIFE_PATHS)];
+  /** 動詞の終止形（＝連体形）で終わる句 */
+  const VERB_END = /[うくぐすつぬぶむる]$/;
+  const ENDINGS: Record<(typeof TRAIT_KINDS)[number], RegExp> = {
+    act: VERB_END,
+    people: VERB_END,
+    express: VERB_END,
+    mind: /(力|視点|見方|目|発想|感覚|柔軟さ|速さ|直感|考え方)$/,
+    feel: /(気持ち|思い|心|感)$/,
+  };
+  /** 文章の型の側で、種類ごとに許す続け方 */
+  const FOLLOW: Record<(typeof TRAIT_KINDS)[number], RegExp> = {
+    act: /^こと/,
+    people: /^こと/,
+    express: /^(こと|ように|あなた)/,
+    mind: /^[がはをで]/,
+    feel: /^[がはをに]/,
+  };
+
+  it("星座・誕生数の特徴は、5種類それぞれ決まった形の言葉で書かれている", () => {
+    for (const p of profiles) for (const k of TRAIT_KINDS) expect(p.traits[k], `${k}: ${p.traits[k]}`).toMatch(ENDINGS[k]);
+  });
+
+  it("文章の型は、特徴の種類に合った続け方でだけ差し込む（持ち味の名詞句を何にでも差し込まない）", () => {
+    const templates = allStrings({ ...birthdayContent, SIGNS: undefined, LIFE_PATHS: undefined });
+    for (const t of templates) {
+      expect(t, t).not.toMatch(/\{(lpQuality|signQuality|lpQuality)\}/);
+      for (const m of t.matchAll(/\{(lp|sign)(Act|Mind|People|Feel|Express)\}/g)) {
+        const kind = (m[2][0].toLowerCase() + m[2].slice(1)) as (typeof TRAIT_KINDS)[number];
+        expect(t.slice(m.index! + m[0].length), `${m[0]} in ${t}`).toMatch(FOLLOW[kind]);
+      }
+    }
+  });
+
+  it("監査で見つかった不自然な文は出てこない", () => {
+    const bad = ["を、誰かに頼ることに使ってみて", "慈しみで温めてきた思い", "慈しみがいつも以上に冴える", "積み上げる力を自分の内側に向ける", "に乗せて言葉にすると"];
+    for (let d = 0; d < 60; d++) {
+      for (const b of BIRTHS.slice(0, 120)) {
+        const all = readingTexts(generateBirthday(b, { now: nowAt(d), purchaseSeed: `x${d}` })).join("");
+        for (const w of bad) expect(all.includes(w), w).toBe(false);
+      }
+    }
+  });
+
+  it("持ち味の名詞句（quality）は「基本タイプ」の紹介文だけに出る", () => {
+    for (let d = 0; d < 40; d++) {
+      for (const b of BIRTHS.slice(0, 80)) {
+        const r = generateBirthday(b, { now: nowAt(d), purchaseSeed: `q${d}` });
+        const rest = readingTexts(r).filter((t) => t !== r.typeDescription).join("");
+        expect(rest.includes(LIFE_PATHS[r.lifePath].quality), LIFE_PATHS[r.lifePath].quality).toBe(false);
+        expect(rest.includes(SIGNS[r.sign.key].quality), SIGNS[r.sign.key].quality).toBe(false);
+      }
+    }
+  });
+});
+
+describe("生年月日占い v2：同じ結果の中で繰り返しすぎない", () => {
+  const results = Array.from({ length: 80 }, (_, d) => d).flatMap((d) => BIRTHS.filter((_, i) => (i + d) % 5 === 0).map((b, i) => generateBirthday(b, { now: nowAt(d, (d + i) % 24), purchaseSeed: `r${d}-${i}` })));
+  const traitsOf = (r: BirthdayResultV2) => [...Object.values(birthdayContent.LIFE_PATHS[r.lifePath].traits), ...Object.values(birthdayContent.SIGNS[r.sign.key].traits)];
+
+  it("同じ特徴（行動・考え方・対人・気持ち・表現）は1つの結果で1回まで", () => {
+    for (const r of results) {
+      const all = readingTexts(r).join("\n");
+      for (const t of traitsOf(r)) expect(all.split(t).length - 1, `${t}`).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it("ほぼ同じ意味の文が並ばない（文どうしの類似度 0.7 未満）", () => {
+    for (const r of results) {
+      const texts = readingTexts(r).filter((t) => [...t].length >= 12);
+      for (let i = 0; i < texts.length; i++) for (let j = i + 1; j < texts.length; j++) expect(maxSentenceSimilarity(texts[i], texts[j]), `${texts[i]} / ${texts[j]}`).toBeLessThan(0.7);
+    }
+  });
+
+  it("「あなた」「〜日です」などの言い回しが続きすぎない", () => {
+    const count = (s: string, w: string) => s.split(w).length - 1;
+    const anata = results.map((r) => count(readingTexts(r).join(""), "あなた"));
+    for (const r of results) {
+      const all = readingTexts(r).join("");
+      expect(count(all, "日です"), all).toBeLessThanOrEqual(2);
+      expect(count(all, "あなた")).toBeLessThanOrEqual(6);
+      expect(count(all, "大丈夫")).toBeLessThanOrEqual(2);
+    }
+    expect(anata.reduce((a, b) => a + b, 0) / anata.length).toBeLessThan(3.5);
+  });
+
+  it("再購入すると、読む文章の4割以上が変わる（★・レア度・基本タイプ・今日のナンバーは同じ）", () => {
+    const shares: number[] = [];
+    for (let d = 0; d < 30; d++) {
+      for (const b of BIRTHS.slice(0, 60)) {
+        const a = generateBirthday(b, { now: nowAt(d, 10), purchaseSeed: "buy-1" });
+        const c = generateBirthday(b, { now: nowAt(d, 10), purchaseSeed: "buy-2" });
+        expect([a.rarity.key, a.overall.stars, a.typeName, a.personalDay, a.theme.keyword]).toEqual([c.rarity.key, c.overall.stars, c.typeName, c.personalDay, c.theme.keyword]);
+        shares.push(changedShare(readingTexts(a), readingTexts(c)));
+      }
+    }
+    const avg = shares.reduce((x, y) => x + y, 0) / shares.length;
+    expect(avg).toBeGreaterThanOrEqual(0.4);
+    expect(avg).toBeLessThanOrEqual(0.55);
   });
 });

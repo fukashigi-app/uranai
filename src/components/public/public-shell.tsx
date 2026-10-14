@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Logo } from "@/components/ui/logo";
 import { isTestPaymentEnabled } from "@/lib/env";
+import { CookieHint } from "./cookie-hint";
 
 export function PublicShell({
   children,
@@ -22,6 +23,7 @@ export function PublicShell({
           テストモード：現在テストモードのため決済は発生しません
         </p>
       ) : null}
+      <CookieHint />
       <header className="flex items-center justify-between py-2">
         <Logo />
         {storeName ? (

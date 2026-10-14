@@ -80,7 +80,7 @@ export type PayResult =
 export async function payCheckout(token: string | null, cardToken: string): Promise<PayResult> {
   if (isFirestore()) return fsPay.payCheckout(token, cardToken);
   const found = await getCheckoutByToken(token);
-  if (!found) throw new CheckoutError("not_found", "お支払い情報が見つかりません。お店のQRコードから再度お試しください。", 404);
+  if (!found) throw new CheckoutError("not_found", "お支払い情報が見つかりません。ブラウザのCookieを有効にして、お店のQRコードから再度お試しください。", 404);
   const { checkout } = found;
   if (checkout.status === "SUCCEEDED") return { status: "succeeded" };
   if (found.storeStatus !== "ACTIVE") {

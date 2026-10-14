@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { FortuneTypeValue } from "@/lib/db/schema";
@@ -9,11 +9,14 @@ import { CelestialLoader } from "@/components/ui/spinner";
 
 /** 「占い中」の表示時間（この後、結果画面で今日の月・レア度の演出が続くため短め） */
 const MIN_ANIMATION_MS = 700;
-const READING_LABELS: Record<FortuneTypeValue, string> = {
-  ZODIAC: "今日の星の巡りを読み解いています…",
-  BLOOD: "今日のあなたの運気を読み解いています…",
-  BIRTHDAY: "あなたの数字と星を読み解いています…",
+/** 小さい画面でも「す…」だけが次の行に残らないよう、2行に分けて表示する */
+const READING_LABELS: Record<FortuneTypeValue, readonly [string, string]> = {
+  ZODIAC: ["今日の星の巡りを", "読み解いています…"],
+  BLOOD: ["今日のあなたの運気を", "読み解いています…"],
+  BIRTHDAY: ["あなたの数字と星を", "読み解いています…"],
 };
+/** 通信が切れたときの案内（占う権利は消費されない／結果が作られていても再送で同じ結果が返る） */
+const NETWORK_ERROR = "通信が不安定です。接続を確認して、もう一度お試しください。";
 
 export function FortuneInputForm({ type }: { type: FortuneTypeValue }) {
   const router = useRouter();
@@ -25,6 +28,18 @@ export function FortuneInputForm({ type }: { type: FortuneTypeValue }) {
   const [birthMonth, setBirthMonth] = useState<number | null>(null);
   const [reading, setReading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [networkError, setNetworkError] = useState(false);
+  const submitRef = useRef<HTMLButtonElement>(null);
+
+  /** 選んだあと「占ってみる」ボタンが画面の外にあれば、見える位置までスクロールする */
+  function revealSubmit() {
+    const el = submitRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.bottom <= window.innerHeight - 8) return;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    el.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "nearest" });
+  }
 
   const thisYear = new Date().getFullYear();
   const years = useMemo(
@@ -48,6 +63,12 @@ export function FortuneInputForm({ type }: { type: FortuneTypeValue }) {
     e.preventDefault();
     if (!ready || reading) return;
     setError(null);
+    setNetworkError(false);
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      setError(NETWORK_ERROR);
+      setNetworkError(true);
+      return;
+    }
     if (type === "BIRTHDAY") {
       const picked = new Date(Number(year), Number(month) - 1, Number(day));
       if (picked.getTime() > Date.now()) {
@@ -85,8 +106,11 @@ export function FortuneInputForm({ type }: { type: FortuneTypeValue }) {
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
       router.replace("/fortune/result");
     } catch {
-      // 結果がサーバーに保存されている可能性があるため結果ページで確認する
-      router.replace("/fortune/result");
+      // 通信が切れた：入力はそのまま残して、もう一度送ってもらう。
+      // サーバー側で結果ができていた場合も、再送すれば同じ結果が返る（占う権利を二重に使うことはない）
+      setReading(false);
+      setError(NETWORK_ERROR);
+      setNetworkError(true);
     }
   }
 
@@ -151,7 +175,10 @@ export function FortuneInputForm({ type }: { type: FortuneTypeValue }) {
                   type="button"
                   role="radio"
                   aria-checked={active}
-                  onClick={() => setSign(s.key)}
+                  onClick={() => {
+                    setSign(s.key);
+                    requestAnimationFrame(revealSubmit);
+                  }}
                   className={`glass flex flex-col items-center rounded-2xl px-1 py-3 transition-all active:scale-95 ${active ? "!border-gold-300/80 bg-gold-300/10" : ""}`}
                 >
                   <span
@@ -211,7 +238,10 @@ export function FortuneInputForm({ type }: { type: FortuneTypeValue }) {
                     role="radio"
                     aria-checked={active}
                     aria-label={`${mo}月生まれ`}
-                    onClick={() => setBirthMonth(mo)}
+                    onClick={() => {
+                      setBirthMonth(mo);
+                      if (blood) requestAnimationFrame(revealSubmit);
+                    }}
                     className={`glass flex h-14 items-baseline justify-center gap-0.5 rounded-2xl pt-3.5 transition-all active:scale-95 ${active ? "!border-gold-300/80 bg-gold-300/10" : ""}`}
                   >
                     <span
@@ -237,20 +267,27 @@ export function FortuneInputForm({ type }: { type: FortuneTypeValue }) {
           className="mt-4 rounded-2xl bg-danger/10 px-4 py-3 text-[13px] text-danger"
         >
           {error}
-          <Link
-            href="/"
-            className="mt-2 block text-[12px] text-ink-muted underline underline-offset-4"
-          >
-            最初からやり直す
-          </Link>
+          {networkError ? (
+            <span className="mt-1 block text-[12px] text-ink-muted">
+              入力した内容はそのまま残っています。占う権利も消費されていません。
+            </span>
+          ) : (
+            <Link
+              href="/"
+              className="mt-2 block text-[12px] text-ink-muted underline underline-offset-4"
+            >
+              最初からやり直す
+            </Link>
+          )}
         </div>
       ) : null}
       <button
+        ref={submitRef}
         type="submit"
         disabled={!ready}
         className="btn-gold mt-6 h-14 w-full rounded-2xl text-base font-bold tracking-widest"
       >
-        占ってみる
+        {networkError ? "もう一度占う" : "占ってみる"}
       </button>
       <p className="mt-2 text-center text-[11px] text-ink-faint">
         ※ 1回のお支払いにつき1回占えます

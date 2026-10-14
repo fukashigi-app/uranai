@@ -28,9 +28,9 @@ describe("文章データの品質", () => {
   it("同じリストの中に重複した文章がない", () => {
     const pools: (readonly (string | Tagged)[])[] = [
       common.LUCKY_ITEMS,
-      common.ACTIONS,
-      common.STYLE_TIPS,
-      common.RESET_ACTIONS,
+      zodiacContent.ACTIONS,
+      zodiacContent.STYLE_TIPS,
+      zodiacContent.RESET_ACTIONS,
       rarityContent.FULL_MOON_MESSAGES,
       rarityContent.MIRACLE_MESSAGES,
       zodiacContent.STAR_MESSAGES,
@@ -53,7 +53,7 @@ describe("文章データの品質", () => {
       expect(candidates(zodiacContent.SIGN_POINTS, { tone }).length).toBeGreaterThanOrEqual(3);
     }
     for (const season of SEASONS) expect(candidates(common.LUCKY_ITEMS, { season }).length).toBeGreaterThanOrEqual(25);
-    for (const time of TIMES) expect(candidates(common.ACTIONS, { time }).length).toBeGreaterThanOrEqual(10);
+    for (const time of TIMES) expect(candidates(zodiacContent.ACTIONS, { time }).length).toBeGreaterThanOrEqual(10);
     expect(rarityContent.FULL_MOON_MESSAGES.length).toBeGreaterThanOrEqual(8);
     expect(rarityContent.MIRACLE_MESSAGES.length).toBeGreaterThanOrEqual(8);
   });
@@ -97,7 +97,7 @@ describe("12星座占いの結果の整合性", () => {
       const m = momentOf(now);
       const item = common.LUCKY_ITEMS.find((t) => t.text === r.luckyItem)!;
       expect(!item.season || item.season.includes(m.season), `${r.luckyItem} @${m.season}`).toBe(true);
-      const action = common.ACTIONS.find((t) => t.text === r.action)!;
+      const action = zodiacContent.ACTIONS.find((t) => t.text === r.action)!;
       expect(!action.time || action.time.includes(m.timeOfDay), `${r.action} @${m.timeOfDay}`).toBe(true);
     }
   });

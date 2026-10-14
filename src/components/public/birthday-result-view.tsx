@@ -19,6 +19,7 @@ export function BirthdayResultView({ result: r }: { result: BirthdayResultV2 }) 
             {r.sign.name} × 誕生数{r.lifePath}
           </>
         }
+        typeName={r.typeName}
       />
       {r.blessing ? (
         <p className="reveal rounded-3xl border border-gold-300/40 bg-gradient-to-br from-gold-300/15 to-violet-500/10 px-5 py-4 text-center font-serif text-[14.5px] leading-relaxed text-gold-50" style={revealDelay(0)}>
@@ -36,7 +37,8 @@ export function BirthdayResultView({ result: r }: { result: BirthdayResultV2 }) 
             label="誕生数"
             ring="border-violet-300/60"
             big={<span className="font-display text-[30px] text-violet-300">{r.lifePath}</span>}
-            sub={r.isMaster ? `${r.lifePathTitle}・マスター` : r.lifePathTitle}
+            sub={r.lifePathTitle}
+            note={r.isMaster ? "マスターナンバー" : undefined}
           />
           <Medallion
             label="今日のナンバー"
@@ -71,13 +73,14 @@ export function BirthdayResultView({ result: r }: { result: BirthdayResultV2 }) 
           </p>
         </div>
         <p className="mt-2 text-[14px] leading-relaxed text-ink">{r.theme.text}</p>
+        {r.themeNote ? <p className="mt-2 text-[13.5px] leading-relaxed text-gold-50/85">{r.themeNote}</p> : null}
       </section>
 
       <OverallCard overall={r.overall} delay={4} />
       <CategoryCards love={r.love} work={r.work} money={r.money} health={r.health} delay={5} />
 
       <section className="glass reveal space-y-4 rounded-3xl p-5" style={revealDelay(9)}>
-        <Row label="今日起こりやすいこと" tone="violet" text={r.events} />
+        <Row label="今日起こりやすいこと" tone="violet" text={r.eventsNote ? `${r.events}${r.eventsNote}` : r.events} />
         <div className="hairline" />
         <Row label="今日おすすめの行動" tone="gold" text={r.action} />
         <div className="hairline" />
@@ -105,12 +108,13 @@ export function BirthdayResultView({ result: r }: { result: BirthdayResultV2 }) 
   );
 }
 
-function Medallion({ label, ring, big, sub }: { label: string; ring: string; big: React.ReactNode; sub: string }) {
+function Medallion({ label, ring, big, sub, note }: { label: string; ring: string; big: React.ReactNode; sub: string; note?: string }) {
   return (
     <li className="flex flex-col items-center">
-      <p className="text-[10px] tracking-wider text-ink-faint">{label}</p>
+      <p className="whitespace-nowrap text-[10px] tracking-tight text-ink-faint">{label}</p>
       <div className={`mt-1.5 flex h-16 w-16 items-center justify-center rounded-full border-2 bg-night-900/50 shadow-[0_0_24px_-6px_rgba(223,196,136,0.45)] ${ring}`}>{big}</div>
-      <p className="mt-1.5 text-[11.5px] leading-snug text-ink">{sub}</p>
+      <p className="mt-1.5 text-[11.5px] leading-snug text-ink [word-break:keep-all]">{sub}</p>
+      {note ? <p className="mt-0.5 whitespace-nowrap text-[10px] text-violet-300">{note}</p> : null}
     </li>
   );
 }

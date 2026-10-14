@@ -3,7 +3,7 @@ import { PublicShell } from "@/components/public/public-shell";
 import { Hero } from "@/components/public/hero";
 import { FortuneIcon } from "@/components/public/fortune-icons";
 import { FortuneSelector } from "@/components/public/fortune-selector";
-import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
+import { FORTUNE_CATALOG, FORTUNE_ORDER } from "@/lib/fortune/catalog";
 import { resolveVisitorStore } from "@/lib/services/test-store";
 import { isTestPaymentEnabled } from "@/lib/env";
 
@@ -35,7 +35,7 @@ export default async function HomePage() {
     <PublicShell>
       <Hero />
       <div className="space-y-3">
-        {(["BIRTHDAY", "ZODIAC", "BLOOD"] as const).map((t, i) => (
+        {FORTUNE_ORDER.map((t, i) => (
           <Link
             key={t}
             href="/fortune"
@@ -45,7 +45,7 @@ export default async function HomePage() {
             <FortuneIcon type={t} className="h-10 w-10 shrink-0" />
             <div>
               <p className="font-serif font-bold">{FORTUNE_CATALOG[t].label}</p>
-              <p className="text-[12px] text-ink-muted">{FORTUNE_CATALOG[t].description}</p>
+              <p className="text-[12px] text-ink-muted">{FORTUNE_CATALOG[t].catch}</p>
             </div>
           </Link>
         ))}

@@ -3,12 +3,11 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import type { FortuneTypeValue } from "@/lib/db/schema";
-import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
+import { FORTUNE_CATALOG, FORTUNE_ORDER } from "@/lib/fortune/catalog";
 import { DISPLAY_PRICE_JPY } from "@/config/site";
 import { FortuneIcon } from "./fortune-icons";
 import { Spinner } from "@/components/ui/spinner";
 
-const TYPES: FortuneTypeValue[] = ["BIRTHDAY", "ZODIAC", "BLOOD"];
 
 /**
  * @param testMode ENABLE_TEST_PAYMENT=true のとき true（サーバーで判定して渡す）。決済をスキップして無料で占える
@@ -47,8 +46,8 @@ export function FortuneSelector({ testMode = false }: { testMode?: boolean }) {
 
   return (
     <div className={testMode ? "pb-48" : "pb-36"}>
-      <div role="radiogroup" aria-label="占いの種類" className="space-y-3.5">
-        {TYPES.map((t, i) => {
+      <div role="radiogroup" aria-label="占いの種類" className="space-y-3">
+        {FORTUNE_ORDER.map((t, i) => {
           const item = FORTUNE_CATALOG[t];
           const active = selected === t;
           return (
@@ -62,27 +61,32 @@ export function FortuneSelector({ testMode = false }: { testMode?: boolean }) {
                 e.currentTarget.scrollIntoView({ behavior: "smooth", block: "center" });
               }}
               style={{ animationDelay: `${i * 90}ms` }}
-              className={`fade-up glass relative flex w-full items-center gap-4 rounded-3xl p-5 text-left transition-all duration-200 active:scale-[0.99] ${
+              className={`fade-up glass relative flex w-full items-center rounded-3xl px-4 py-3.5 text-left transition-all duration-200 active:scale-[0.99] ${
                 active ? "!border-gold-300/80 shadow-[0_0_0_1px_rgba(223,196,136,0.5),0_18px_50px_-18px_rgba(207,171,102,0.55)]" : "hover:border-white/25"
               }`}
             >
-              <span
-                className={`flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl border transition-colors ${
-                  active ? "border-gold-300/50 bg-gold-300/10" : "border-white/10 bg-white/5"
-                }`}
-              >
-                <FortuneIcon type={t} className="h-10 w-10" />
-              </span>
               <span className="min-w-0 flex-1">
-                <span className="flex items-center justify-between gap-2">
-                  <span className="font-serif text-lg font-bold tracking-wide text-ink">{item.label}</span>
-                  <span className="shrink-0 rounded-full bg-white/8 px-2 py-0.5 text-[11px] text-gold-200">1回 {DISPLAY_PRICE_JPY}円</span>
+                <span className="flex items-center gap-2.5 pr-6">
+                  <span
+                    className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border transition-colors ${
+                      active ? "border-gold-300/50 bg-gold-300/10" : "border-white/10 bg-white/5"
+                    }`}
+                  >
+                    <FortuneIcon type={t} className="h-7 w-7" />
+                  </span>
+                  <span className="flex-1 font-serif text-lg font-bold tracking-wide text-ink">{item.label}</span>
+                  <span className="shrink-0 rounded-full bg-white/8 px-2 py-0.5 text-[11px] text-gold-200">{DISPLAY_PRICE_JPY}円</span>
                 </span>
-                <span className="mt-1 block text-[13px] leading-relaxed text-ink-muted">{item.description}</span>
+                <span className="mt-2 block text-[13.5px] font-bold leading-snug text-gold-200 [text-wrap:balance]">{item.catch}</span>
+                <span className="mt-1 block text-[12.5px] leading-relaxed text-ink-muted">{item.description}</span>
+                <span className="mt-2 flex flex-wrap gap-1.5 text-[11px]">
+                  <span className="rounded-full border border-white/10 px-2 py-0.5 text-ink-muted">入力：{item.inputHint}</span>
+                  <span className="rounded-full border border-violet-400/30 px-2 py-0.5 text-violet-300">{item.forWhom}</span>
+                </span>
               </span>
               <span
                 aria-hidden
-                className={`absolute right-3 top-3 flex h-5 w-5 items-center justify-center rounded-full border text-[11px] transition-all ${
+                className={`absolute right-3 top-3.5 flex h-5 w-5 items-center justify-center rounded-full border text-[11px] transition-all ${
                   active ? "border-gold-300 bg-gold-300 text-night-900 scale-100" : "border-white/20 scale-90 opacity-0"
                 }`}
               >

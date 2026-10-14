@@ -1,6 +1,7 @@
 import type { ZodiacResultV2 } from "@/lib/fortune/types";
 import { StarRating } from "@/components/ui/stars";
 import { RarityCard } from "./rarity-card";
+import { LuckyColor } from "./result-parts";
 
 const delay = (i: number) => ({ animationDelay: `${120 + i * 70}ms` });
 /** 星座記号を絵文字ではなく文字として表示する */
@@ -24,7 +25,7 @@ export function ZodiacResultView({ result: r }: { result: ZodiacResultV2 }) {
       <RarityCard
         rarity={r.rarity}
         overall={r.overall.stars}
-        typeLabel="12星座占い"
+        typeLabel="星座占い"
         dateLabel={r.dateLabel}
         rank={r.rank}
         subject={
@@ -94,10 +95,7 @@ export function ZodiacResultView({ result: r }: { result: ZodiacResultV2 }) {
 
       <section className="glass reveal grid grid-cols-2 gap-px overflow-hidden rounded-3xl bg-white/5 p-0" style={delay(8)}>
         <Lucky label="ラッキーカラー">
-          <span className="flex items-center justify-center gap-2">
-            <span className="h-4 w-4 rounded-full border border-white/30" style={{ backgroundColor: r.luckyColor.hex }} aria-hidden />
-            {r.luckyColor.name}
-          </span>
+          <LuckyColor color={r.luckyColor} />
         </Lucky>
         <Lucky label="ラッキータイム">{r.luckyTime}</Lucky>
         <Lucky label="ラッキーアイテム" wide>

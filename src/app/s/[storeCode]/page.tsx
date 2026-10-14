@@ -45,7 +45,7 @@ export default async function StoreTopPage(props: PageProps<"/s/[storeCode]">) {
   return (
     <PublicShell storeName={store.name}>
       <Hero storeName={store.name} />
-      <h2 className="mb-3 flex items-center gap-3 font-serif text-base tracking-widest text-ink-muted">
+      <h2 className="mb-2.5 flex items-center gap-3 font-serif text-[15px] tracking-widest text-ink-muted">
         <span className="hairline flex-1" />
         占いを選ぶ
         <span className="hairline flex-1" />

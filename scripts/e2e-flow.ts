@@ -433,7 +433,7 @@ async function main() {
   const [da, dbr] = dRows.map((r) => r.result);
   assert.ok(da.v === 2 && da.kind === "BIRTHDAY" && dbr.v === 2 && dbr.kind === "BIRTHDAY");
   assert.deepEqual([da.sign.name, da.lifePath, da.isMaster, da.birthMonth], ["獅子座", 11, true, 7]); // 1+9+8+8+7+2+3=38 → 11（マスターナンバー）
-  const dFixed = (r: typeof da) => [r.overall.stars, r.love.stars, r.work.stars, r.money.stars, r.health.stars, r.rarity.key, r.personalDay, r.theme.text, r.events];
+  const dFixed = (r: typeof da) => [r.overall.stars, r.love.stars, r.work.stars, r.money.stars, r.health.stars, r.rarity.key, r.personalDay, r.theme.keyword, r.typeName, r.typeDescription, r.events];
   assert.deepEqual(dFixed(da), dFixed(dbr));
   assert.notDeepEqual([da.message, da.action, da.caution, da.luckyItem, da.luckyNumber, da.overall.comment], [dbr.message, dbr.action, dbr.caution, dbr.luckyItem, dbr.luckyNumber, dbr.overall.comment]);
   // 生年月日そのものは結果・占いの権利・決済のどのテーブルにも保存されない

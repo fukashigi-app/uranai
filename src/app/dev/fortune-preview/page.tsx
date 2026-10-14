@@ -18,7 +18,7 @@ export const metadata = { title: "占い結果プレビュー（開発用）", r
 export const dynamic = "force-dynamic";
 
 const MODES: Partial<Record<RevealMode, string>> = { intro: "初回の演出", final: "完成状態", reduced: "動きを減らす設定" };
-const KINDS = { zodiac: "12星座占い", blood: "血液型占い", birthday: "生年月日占い" } as const;
+const KINDS = { zodiac: "星座占い", blood: "血液型占い", birthday: "生年月日占い" } as const;
 type Kind = keyof typeof KINDS;
 
 /**

@@ -55,11 +55,26 @@ export function LuckyCell({ label, children, wide = false }: { label: string; ch
   );
 }
 
+/** 色名の後ろ側（〜ネイビー・〜ゴールドなど）。長い色名はこの境目でだけ改行してよい */
+const COLOR_TAIL = /^(.+?)(ネイビー|ゴールド|グリーン|ホワイト|ブルー|ピンク|イエロー|パープル|グレー|オレンジ)$/;
+
+/** ラッキーカラー。色見本を上に置き、色名は語の途中で折り返さない（「ミッドナイト／ネイビー」の境目でだけ改行） */
 export function LuckyColor({ color }: { color: { name: string; hex: string } }) {
+  const m = COLOR_TAIL.exec(color.name);
   return (
-    <span className="flex items-center justify-center gap-2">
+    <span className="flex flex-col items-center justify-center gap-1.5">
       <span className="h-4 w-4 rounded-full border border-white/30" style={{ backgroundColor: color.hex }} aria-hidden />
-      {color.name}
+      <span className="leading-snug [word-break:keep-all]">
+        {m ? (
+          <>
+            {m[1]}
+            <wbr />
+            {m[2]}
+          </>
+        ) : (
+          color.name
+        )}
+      </span>
     </span>
   );
 }

@@ -11,6 +11,7 @@ export default async function FortuneSelectPage() {
       <PublicShell>
         <Notice title="お店のQRコードから始めてください" action={<Link href="/" className="btn-ghost inline-block rounded-xl px-5 py-2.5 text-sm">トップへ戻る</Link>}>
           この占いは、提携店舗のテーブルやレジ横にあるQRコードからご利用いただけます。
+          <span className="mt-2 block text-[12px]">QRコードから開いてもこの画面になる場合は、ブラウザのCookieを有効にしてください。</span>
         </Notice>
       </PublicShell>
     );
