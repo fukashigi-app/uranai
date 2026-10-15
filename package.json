@@ -17,6 +17,7 @@
     "vercel-build": "tsx scripts/migrate.ts && next build",
     "e2e:firestore": "tsx --conditions=react-server scripts/e2e-firestore.ts",
     "e2e:setup": "tsx --conditions=react-server scripts/e2e-setup.ts",
+    "e2e:admin": "tsx --conditions=react-server scripts/e2e-admin-empty.ts",
     "emulator": "npx -y firebase-tools@15 emulators:start --only firestore --project demo-uranai"
   },
   "dependencies": {

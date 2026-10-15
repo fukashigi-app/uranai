@@ -1,5 +1,5 @@
 import "server-only";
-import { AggregateField, type Query } from "firebase-admin/firestore";
+import type { Query } from "firebase-admin/firestore";
 import type { Range, StoreListRow, StoreSort, Totals } from "@/lib/services/reports";
 import { jstDateString, jstMonthRange, jstYearMonth, shiftYearMonth } from "@/lib/time";
 import { C, fsdb, mustDate } from "./admin";
@@ -13,23 +13,28 @@ import { listAllStores } from "./stores";
  * 検索条件はすべて「1つの等価条件」にしてあるため、Firestore の自動インデックスだけで動作する
  * （複合インデックスの手動作成が不要）。
  *   cYm == 年月 / cStoreYm == 店舗_年月 / cStore == 店舗 / countable == true / cDate == 日付
+ *
+ * 合計は Firestore の集計クエリ（count / sum）を使わず、通常の読み取り＋サーバー側の足し算で計算する。
+ * 本番環境で集計クエリが失敗し管理画面が表示できなかったため（読み取りは /admin/settlements と同じ方式）。
+ * 読むのは金額の4項目だけ（select）。
  */
 
 const tx = () => fsdb().collection(C.transactions);
 const ZERO: Totals = { count: 0, gross: 0, storeShare: 0, operatorShare: 0, fee: 0 };
 
+const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+
 async function aggregate(q: Query): Promise<Totals> {
-  const snap = await q
-    .aggregate({
-      count: AggregateField.count(),
-      gross: AggregateField.sum("amount"),
-      storeShare: AggregateField.sum("storeShare"),
-      operatorShare: AggregateField.sum("operatorShare"),
-      fee: AggregateField.sum("paymentFee"),
-    })
-    .get();
-  const d = snap.data();
-  return { count: Number(d.count ?? 0), gross: Number(d.gross ?? 0), storeShare: Number(d.storeShare ?? 0), operatorShare: Number(d.operatorShare ?? 0), fee: Number(d.fee ?? 0) };
+  const snap = await q.select("amount", "storeShare", "operatorShare", "paymentFee").get();
+  const total: Totals = { ...ZERO };
+  for (const d of snap.docs) {
+    total.count += 1;
+    total.gross += num(d.get("amount"));
+    total.storeShare += num(d.get("storeShare"));
+    total.operatorShare += num(d.get("operatorShare"));
+    total.fee += num(d.get("paymentFee"));
+  }
+  return total;
 }
 
 function monthQuery(yearMonth: string, storeId?: string): Query {
