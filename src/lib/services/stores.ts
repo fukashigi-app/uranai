@@ -10,6 +10,7 @@ import { hashPassword } from "@/lib/auth/password";
 import { DEFAULT_STORE_SHARE_BPS } from "@/config/pricing";
 import type { BankInfo, StoreProfileInput } from "@/lib/validation";
 import { writeAudit } from "./audit";
+import { revokeUserSessions } from "@/lib/auth/session-store";
 
 export type Actor = { userId: string | null; role: "OPERATOR" | "STORE" | "SYSTEM" };
 
@@ -148,10 +149,17 @@ export async function createOperator(input: { name: string; email: string; passw
   return inserted[0].id;
 }
 
-export async function setUserPassword(userId: string, password: string, actor: Actor) {
-  if (isFirestore()) return fsUsers.setUserPassword(userId, password, actor);
-  await db().update(users).set({ passwordHash: await hashPassword(password), failedLoginCount: 0, lockedUntil: null }).where(eq(users.id, userId));
-  await writeAudit({ actorUserId: actor.userId, actorRole: actor.role, action: "user.password.set", targetType: "user", targetId: userId });
+/**
+ * パスワードの変更・再発行。あわせて、そのユーザーのログイン状態を無効にする（他の端末は再ログインが必要）。
+ * 本人が自分で変更した場合は keepSessionHash（今の端末）だけ残す。運営による再発行では全端末を無効にする。
+ */
+export async function setUserPassword(userId: string, password: string, actor: Actor, keepSessionHash?: string | null) {
+  if (isFirestore()) await fsUsers.setUserPassword(userId, password, actor);
+  else {
+    await db().update(users).set({ passwordHash: await hashPassword(password), failedLoginCount: 0, lockedUntil: null }).where(eq(users.id, userId));
+    await writeAudit({ actorUserId: actor.userId, actorRole: actor.role, action: "user.password.set", targetType: "user", targetId: userId });
+  }
+  await revokeUserSessions(userId, keepSessionHash ?? null);
 }
 
 // ===== 画面・アクションから使う読み書き（以前はページ内で直接DBを操作していたもの）=====

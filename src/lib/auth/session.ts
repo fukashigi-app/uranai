@@ -4,11 +4,14 @@ import * as fsUsers from "@/lib/firestore/users";
 import { cache } from "react";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { and, eq, gt, asc } from "drizzle-orm";
+import { eq, asc } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { authSessions, storeUsers, stores, users, type Store } from "@/lib/db/schema";
+import { authSessions, storeUsers, stores, type Store } from "@/lib/db/schema";
 import { randomToken, sha256Hex } from "@/lib/security/crypto";
 import { secureCookiesEnabled } from "@/lib/env";
+import { findSessionUser, saveSessionRecord } from "./session-store";
+
+export { findSessionUser, revokeUserSessions, saveSessionRecord } from "./session-store";
 
 const OPERATOR_TTL_MS = 12 * 60 * 60 * 1000;
 const STORE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
@@ -25,12 +28,17 @@ export type SessionUser = {
   role: "OPERATOR" | "STORE";
 };
 
+/** 今の端末のログイン状態（トークンのハッシュ）。ログインしていなければ null */
+export async function currentSessionHash(): Promise<string | null> {
+  const token = (await cookies()).get(sessionCookieName())?.value;
+  return token && token.length <= 100 ? sha256Hex(token) : null;
+}
+
 export async function createSession(userId: string, role: SessionUser["role"]): Promise<void> {
   const token = randomToken(32);
   const ttl = role === "OPERATOR" ? OPERATOR_TTL_MS : STORE_TTL_MS;
   const expiresAt = new Date(Date.now() + ttl);
-  if (isFirestore()) await fsUsers.createSession(sha256Hex(token), userId, expiresAt);
-  else await db().insert(authSessions).values({ id: sha256Hex(token), userId, expiresAt });
+  await saveSessionRecord(sha256Hex(token), userId, expiresAt);
   const jar = await cookies();
   jar.set(sessionCookieName(), token, {
     httpOnly: true,
@@ -56,14 +64,7 @@ export const getSessionUser = cache(async (): Promise<SessionUser | null> => {
   const jar = await cookies();
   const token = jar.get(sessionCookieName())?.value;
   if (!token || token.length > 100) return null;
-  if (isFirestore()) return fsUsers.getSessionUser(sha256Hex(token));
-  const rows = await db()
-    .select({ id: users.id, email: users.email, name: users.name, role: users.role })
-    .from(authSessions)
-    .innerJoin(users, eq(users.id, authSessions.userId))
-    .where(and(eq(authSessions.id, sha256Hex(token)), gt(authSessions.expiresAt, new Date()), eq(users.isActive, true)))
-    .limit(1);
-  return rows[0] ?? null;
+  return findSessionUser(sha256Hex(token));
 });
 
 export async function requireOperator(): Promise<SessionUser> {

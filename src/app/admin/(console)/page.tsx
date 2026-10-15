@@ -5,6 +5,9 @@ import { requireOperator } from "@/lib/auth/session";
 import { countActiveStores, dailySeries, listStores, monthTotals, totalsBetween } from "@/lib/services/reports";
 import { formatYearMonthJa, jstDateString, jstMonthRange, jstYearMonth } from "@/lib/time";
 import { formatYen } from "@/lib/money";
+import { isTestPaymentEnabled } from "@/lib/env";
+import { testUsageOverall } from "@/lib/services/test-usage";
+import { TestUsagePanel } from "@/components/console/test-usage-panel";
 
 export const metadata = { title: "運営ダッシュボード" };
 
@@ -13,12 +16,13 @@ export default async function AdminDashboard() {
   const ym = jstYearMonth();
   const today = jstDateString();
   const todayStart = new Date(`${today}T00:00:00+09:00`);
-  const [storesCount, todayTotals, month, daily, top] = await Promise.all([
+  const [storesCount, todayTotals, month, daily, top, testUsage] = await Promise.all([
     countActiveStores(),
     totalsBetween(todayStart, new Date(todayStart.getTime() + 86400000)),
     monthTotals(ym),
     dailySeries(ym),
     listStores({ range: jstMonthRange(ym), sort: "count", dir: "desc", page: 1, perPage: 5 }),
+    testUsageOverall(),
   ]);
   const net = month.operatorShare - month.fee;
   const y = (n: number) => n.toLocaleString("ja-JP");
@@ -36,6 +40,12 @@ export default async function AdminDashboard() {
         <Stat label="決済手数料" value={formatYen(month.fee)} sub="推定値" />
         <Stat label="推定運営純売上" value={formatYen(net)} sub="運営売上 − 決済手数料" emphasis />
       </div>
+      <TestUsagePanel
+        usage={testUsage}
+        testModeOn={isTestPaymentEnabled()}
+        className="mt-4"
+        note={`全店舗の合計（うち、店舗に紐づかないテスト店舗「/s/test」での利用：今月 ${testUsage.testStore.thisMonth}回・累計 ${testUsage.testStore.total}回）。店舗ごとの件数は各店舗の詳細画面で確認できます。`}
+      />
       <div className="mt-4 grid gap-4 lg:grid-cols-[1.6fr_1fr]">
         <Card>
           <BarChart title={`日別利用数（${formatYearMonthJa(ym)}・全店舗）`} data={daily.map((d) => ({ label: String(d.day), value: d.count, detail: `${Number(ym.slice(5))}月${d.day}日` }))} tickEvery={5} />

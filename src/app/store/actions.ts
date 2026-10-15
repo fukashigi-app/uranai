@@ -3,7 +3,7 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { performLogin } from "@/lib/auth/login-action";
-import { destroySession, requireStoreUser } from "@/lib/auth/session";
+import { currentSessionHash, destroySession, requireStoreUser } from "@/lib/auth/session";
 import { verifyPassword, validatePasswordStrength } from "@/lib/auth/password";
 import { bankInfoSchema, fieldErrors, storeProfileSchema } from "@/lib/validation";
 import { getUserPasswordHash, setUserPassword, updateBankInfo, updateStoreProfile } from "@/lib/services/stores";
@@ -52,6 +52,7 @@ export async function changeStorePasswordAction(_prev: FormState, fd: FormData):
   if (!hash || !(await verifyPassword(current, hash))) return { errors: { currentPassword: "現在のパスワードが正しくありません" } };
   const weak = validatePasswordStrength(next);
   if (weak) return { errors: { newPassword: weak } };
-  await setUserPassword(user.id, next, { userId: user.id, role: "STORE" });
-  return { ok: true, message: "パスワードを変更しました" };
+  // この端末のログインは残し、他の端末（ログイン中のスマホ・PCなど）はログアウトさせる
+  await setUserPassword(user.id, next, { userId: user.id, role: "STORE" }, await currentSessionHash());
+  return { ok: true, message: "パスワードを変更しました。ほかの端末ではログインし直してください。" };
 }

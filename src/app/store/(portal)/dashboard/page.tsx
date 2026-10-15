@@ -5,6 +5,9 @@ import { requireStoreUser } from "@/lib/auth/session";
 import { dailySeries, monthlySeries, totalsForRange } from "@/lib/services/reports";
 import { formatYearMonthJa, jstYearMonth } from "@/lib/time";
 import { formatYen } from "@/lib/money";
+import { isTestPaymentEnabled } from "@/lib/env";
+import { testUsageForStore } from "@/lib/services/test-usage";
+import { TestUsagePanel } from "@/components/console/test-usage-panel";
 
 export const metadata = { title: "ダッシュボード" };
 
@@ -12,7 +15,13 @@ export default async function StoreDashboard() {
   const { store } = await requireStoreUser();
   const ym = jstYearMonth();
   // storeId は必ずログイン中のアカウントから解決（URL等の値は使わない）
-  const [daily, monthly, allTime] = await Promise.all([dailySeries(ym, store.id), monthlySeries(12, store.id), totalsForRange(null, store.id)]);
+  const [daily, monthly, allTime, testUsage] = await Promise.all([
+    dailySeries(ym, store.id),
+    monthlySeries(12, store.id),
+    totalsForRange(null, store.id),
+    testUsageForStore(store),
+  ]);
+  const testModeOn = isTestPaymentEnabled();
   const cur = monthly[0];
   const shareRate = store.storeShareBps / 100;
 
@@ -43,6 +52,8 @@ export default async function StoreDashboard() {
         <Stat label="累計総売上" value={formatYen(allTime.gross)} />
         <Stat label="累計店舗取り分" value={formatYen(allTime.storeShare)} emphasis />
       </div>
+      {/* テストモードがOFFになっても、過去にテスト利用があれば表示する */}
+      {testModeOn || testUsage.total > 0 ? <TestUsagePanel usage={testUsage} testModeOn={testModeOn} className="mt-4" /> : null}
 
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
         <Card>

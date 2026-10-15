@@ -4,7 +4,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { performLogin } from "@/lib/auth/login-action";
-import { destroySession, requireOperator } from "@/lib/auth/session";
+import { currentSessionHash, destroySession, requireOperator } from "@/lib/auth/session";
 import { validatePasswordStrength, verifyPassword } from "@/lib/auth/password";
 import { bankInfoSchema, fieldErrors, newStoreUserSchema, storeProfileSchema } from "@/lib/validation";
 import {
@@ -160,8 +160,9 @@ export async function resetStoreUserPasswordAction(storeId: string, userId: stri
   assertId(userId);
   if ((await getUserStoreId(userId)) !== storeId) return { message: "アカウントが見つかりません" };
   const temp = `${randomToken(9)}9a`;
+  // 再発行したら、そのアカウントでログイン中の端末はすべてログアウトさせる（他のアカウントには影響しない）
   await setUserPassword(userId, temp, actor);
-  return { ok: true, message: `一時パスワード: ${temp}（この画面を閉じると再表示できません。店舗へ安全な方法で伝え、変更を依頼してください）` };
+  return { ok: true, message: `一時パスワード: ${temp}（この画面を閉じると再表示できません。店舗へ安全な方法で伝え、変更を依頼してください。ログイン中の端末はログアウトされました）` };
 }
 
 export async function toggleStoreUserAction(storeId: string, userId: string, active: boolean, _prev: FormState): Promise<FormState> {
@@ -205,6 +206,6 @@ export async function changeAdminPasswordAction(_prev: FormState, fd: FormData):
   const next = String(fd.get("newPassword") ?? "");
   const weak = validatePasswordStrength(next);
   if (weak) return { errors: { newPassword: weak } };
-  await setUserPassword(user.id, next, actor);
-  return { ok: true, message: "パスワードを変更しました" };
+  await setUserPassword(user.id, next, actor, await currentSessionHash());
+  return { ok: true, message: "パスワードを変更しました。ほかの端末ではログインし直してください。" };
 }

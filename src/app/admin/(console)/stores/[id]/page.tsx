@@ -12,6 +12,9 @@ import { qrSvgDataUrl, storeUrl } from "@/lib/services/qr";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
 import { formatDateJa, formatDateTimeJa, formatYearMonthJa } from "@/lib/time";
 import { formatYen } from "@/lib/money";
+import { isTestPaymentEnabled } from "@/lib/env";
+import { testUsageForStore } from "@/lib/services/test-usage";
+import { TestUsagePanel } from "@/components/console/test-usage-panel";
 import {
   createStoreUserAction,
   reissueQrAction,
@@ -49,13 +52,14 @@ export default async function AdminStoreDetail(props: PageProps<"/admin/stores/[
   const store = await getStoreById(id);
   if (!store) notFound();
 
-  const [monthly, txs, settlementRows, staff, audits, qr] = await Promise.all([
+  const [monthly, txs, settlementRows, staff, audits, qr, testUsage] = await Promise.all([
     monthlySeries(12, id),
     listTransactions({ storeId: id, page: 1, perPage: 15 }),
     listSettlements({ storeId: id, limit: 24 }),
     listStoreStaff(id),
     listStoreAuditLogs(id, 30),
     qrSvgDataUrl(store.storeCode),
+    testUsageForStore(store),
   ]);
   const bank = readBankInfoMasked(store);
   const suspended = store.status === "SUSPENDED";
@@ -127,6 +131,8 @@ export default async function AdminStoreDetail(props: PageProps<"/admin/stores/[
           <ActionButton action={reissueQrAction.bind(null, id)} label="QRを再発行する" variant="danger" confirmMessage="QRを再発行すると、現在設置されているQRコードは使えなくなります。よろしいですか？" />
         </div>
       </div>
+
+      <TestUsagePanel usage={testUsage} testModeOn={isTestPaymentEnabled()} className="mt-4" note="QR再発行前の店舗コードでの利用も含みます。" />
 
       <div className="mt-4 grid gap-4 xl:grid-cols-2">
         <Card title="月別集計">
@@ -209,7 +215,7 @@ export default async function AdminStoreDetail(props: PageProps<"/admin/stores/[
             {audits.map((a) => (
               <li key={a.id} className="py-2.5">
                 <p>
-                  <span className="text-ink">{AUDIT_LABEL[a.action] ?? a.action}</span>
+                  <span className="text-ink">{a.action === "store.bank.update" && !a.before ? "振込先の新規登録" : (AUDIT_LABEL[a.action] ?? a.action)}</span>
                   <span className="ml-2 text-ink-faint">
                     {formatDateTimeJa(a.createdAt)} ／ {a.actorRole === "OPERATOR" ? "運営" : a.actorRole === "STORE" ? "店舗" : "システム"}
                   </span>

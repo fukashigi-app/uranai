@@ -34,6 +34,18 @@ export async function deleteSession(hash: string): Promise<void> {
   await fsdb().collection(C.authSessions).doc(hash).delete();
 }
 
+/** そのユーザーのログイン状態を削除（keepHash の1件だけ残す）。userId の等価条件だけで検索する */
+export async function deleteUserSessions(userId: string, keepHash: string | null): Promise<number> {
+  const snap = await fsdb().collection(C.authSessions).where("userId", "==", userId).get();
+  const targets = snap.docs.filter((d) => d.id !== keepHash);
+  for (let i = 0; i < targets.length; i += 400) {
+    const batch = fsdb().batch();
+    for (const d of targets.slice(i, i + 400)) batch.delete(d.ref);
+    await batch.commit();
+  }
+  return targets.length;
+}
+
 export async function getSessionUser(hash: string): Promise<SessionUser | null> {
   const s = await fsdb().collection(C.authSessions).doc(hash).get();
   if (!s.exists) return null;
