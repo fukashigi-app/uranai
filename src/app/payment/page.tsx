@@ -2,6 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { PublicShell, Notice } from "@/components/public/public-shell";
 import { PaymentForm } from "@/components/public/payment-form";
+import { PurchaseSummary } from "@/components/public/purchase-summary";
 import { FortuneIcon } from "@/components/public/fortune-icons";
 import { getAccessToken } from "@/lib/cookies";
 import { getCheckoutByToken } from "@/lib/services/checkout";
@@ -69,19 +70,12 @@ export default async function PaymentPage() {
         </ul>
         <p className="mt-2 text-[11.5px] text-ink-muted">お支払い後、{item.inputLabel}を入力するとすぐに結果が表示されます。</p>
       </section>
+      <PurchaseSummary fortuneLabel={item.label} inputLabel={item.inputLabel} expiresAt={checkout.expiresAt} testPayment={provider === "mock"} />
       <PaymentForm
         provider={provider}
         publicKey={publicKey}
         initialStatus={checkout.status === "PROCESSING" ? "processing" : checkout.status === "FAILED" ? "failed" : "created"}
       />
-      <ul className="mt-5 space-y-1.5 text-[11px] leading-relaxed text-ink-faint">
-        <li>・カード情報は決済代行会社（PAY.JP）が安全に処理し、当サービスには保存されません。</li>
-        <li>・お支払い後24時間以内に占いをご利用ください。デジタルコンテンツの性質上、返品・返金はお受けできません。</li>
-        <li>
-          ・<Link href="/commercial-transaction" className="underline underline-offset-2">特定商取引法に基づく表記</Link>・
-          <Link href="/terms" className="underline underline-offset-2">利用規約</Link>に同意のうえお支払いください。
-        </li>
-      </ul>
       <p className="mt-4 text-center">
         <Link href="/fortune" className="text-[12px] text-ink-muted underline underline-offset-4">
           占いを選び直す

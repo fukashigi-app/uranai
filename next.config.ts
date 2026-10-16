@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import { readOperatorInfo } from "./src/config/operator";
 
 const isDev = process.env.NODE_ENV !== "production";
 
@@ -29,6 +30,14 @@ const securityHeaders = [
   { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(), payment=(self)" },
   ...(isDev ? [] : [{ key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains; preload" }]),
 ];
+
+// 特商法表記などの運営者情報の設定漏れ（仮の値・形式の誤り）を本番ビルドのログに出す。
+// 本番を止めないよう、ビルドは失敗させない（仮の値は表示に使わず、既定の屋号・問い合わせ先を表示する）。
+if (!isDev) {
+  for (const issue of readOperatorInfo().issues) {
+    if (issue.level === "error") console.warn(`[operator-info] ${issue.message}`);
+  }
+}
 
 const nextConfig: NextConfig = {
   poweredByHeader: false,

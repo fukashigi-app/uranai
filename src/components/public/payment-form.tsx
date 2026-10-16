@@ -4,6 +4,7 @@ import Script from "next/script";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Spinner } from "@/components/ui/spinner";
+import { PAY_BUTTON_LABEL, TEST_PAY_BUTTON_LABEL } from "@/lib/legal/labels";
 
 /* ---- payjp.js v2 の最小型定義 ---- */
 type PayjpElement = { mount(selector: string): void; on(ev: string, cb: (e: { complete?: boolean; error?: { message: string } }) => void): void; unmount?(): void };
@@ -163,15 +164,18 @@ export function PaymentForm({
 
 function PayButton({ busy, label }: { busy: boolean; label: string }) {
   return (
-    <button type="submit" disabled={busy} className="btn-gold mt-5 flex h-14 w-full items-center justify-center gap-2 rounded-2xl text-base font-bold tracking-wide">
-      {busy ? (
-        <>
-          <Spinner /> {label}
-        </>
-      ) : (
-        "100円を支払う"
-      )}
-    </button>
+    <>
+      <button type="submit" disabled={busy} className="btn-gold mt-5 flex h-14 w-full items-center justify-center gap-2 rounded-2xl text-base font-bold tracking-wide">
+        {busy ? (
+          <>
+            <Spinner /> {label}
+          </>
+        ) : (
+          PAY_BUTTON_LABEL
+        )}
+      </button>
+      <p className="mt-2 text-center text-[11.5px] leading-relaxed text-ink-faint">ボタンを押すと、100円（税込）の決済が確定します。</p>
+    </>
   );
 }
 
@@ -283,7 +287,7 @@ function MockCardForm({ busy, onToken }: { busy: boolean; onToken: (t: string) =
               <Spinner /> 処理しています…
             </>
           ) : (
-            "テスト決済で進む（無料）"
+            TEST_PAY_BUTTON_LABEL
           )}
         </button>
       </form>

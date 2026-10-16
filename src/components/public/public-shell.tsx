@@ -35,9 +35,9 @@ export function PublicShell({
       {step ? <StepIndicator step={step} /> : null}
       <main className={`flex-1 ${fade ? "fade-in" : ""}`}>{children}</main>
       <footer className="mt-10 space-y-2 text-center text-[11px] text-ink-faint">
-        <nav className="flex justify-center gap-4">
+        <nav aria-label="規約・表記" className="flex flex-wrap justify-center gap-x-4 gap-y-1">
           <Link href="/terms" className="hover:text-ink-muted">利用規約</Link>
-          <Link href="/privacy" className="hover:text-ink-muted">プライバシー</Link>
+          <Link href="/privacy" className="hover:text-ink-muted">プライバシーポリシー</Link>
           <Link href="/commercial-transaction" className="hover:text-ink-muted">特定商取引法に基づく表記</Link>
         </nav>
         <p>占いの結果はエンターテインメントとしてお楽しみください。</p>

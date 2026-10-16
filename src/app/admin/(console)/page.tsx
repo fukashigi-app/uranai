@@ -8,6 +8,8 @@ import { formatYen } from "@/lib/money";
 import { isTestPaymentEnabled } from "@/lib/env";
 import { testUsageOverall } from "@/lib/services/test-usage";
 import { TestUsagePanel } from "@/components/console/test-usage-panel";
+import { OperatorInfoNotice } from "@/components/console/operator-info-notice";
+import { readOperatorInfo } from "@/config/operator";
 
 export const metadata = { title: "運営ダッシュボード" };
 
@@ -30,6 +32,7 @@ export default async function AdminDashboard() {
   return (
     <>
       <PageHeader title="ダッシュボード" description={`${formatYearMonthJa(ym)}（JST）の集計。返金分は除外しています。`} />
+      <OperatorInfoNotice issues={readOperatorInfo().issues} className="mb-4" />
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat label="全店舗数" value={y(storesCount.total)} unit="店" sub={`稼働中 ${storesCount.active}店`} />
         <Stat label="本日の利用数" value={y(todayTotals.count)} unit="回" />

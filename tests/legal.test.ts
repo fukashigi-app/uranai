@@ -1,0 +1,207 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { OPERATOR_DEFAULTS, readOperatorInfo } from "@/config/operator";
+import CommercialTransactionPage from "@/app/commercial-transaction/page";
+import TermsPage from "@/app/terms/page";
+import PrivacyPage from "@/app/privacy/page";
+import { PurchaseSummary } from "@/components/public/purchase-summary";
+import { PAY_BUTTON_LABEL, TEST_PAY_BUTTON_LABEL } from "@/lib/legal/labels";
+
+const OPERATOR_KEYS = [
+  "OPERATOR_TRADE_NAME",
+  "OPERATOR_EMAIL",
+  "OPERATOR_OWNER_NAME",
+  "OPERATOR_ADDRESS",
+  "OPERATOR_PHONE",
+  "NEXT_PUBLIC_OPERATOR_NAME",
+  "NEXT_PUBLIC_OPERATOR_REPRESENTATIVE",
+  "NEXT_PUBLIC_OPERATOR_ADDRESS",
+  "NEXT_PUBLIC_OPERATOR_PHONE",
+  "NEXT_PUBLIC_OPERATOR_EMAIL",
+];
+
+/** タグを除いた本文 */
+const text = (el: React.ReactElement) =>
+  renderToStaticMarkup(el)
+    .replace(/<[^>]+>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'");
+
+const page = (Page: () => React.ReactElement) => text(createElement(Page));
+
+/** 未確定事項を確定した事実や架空の値として表示していないこと（全ページ共通） */
+const FORBIDDEN = ["example.com", "【", "】", "[要", "要設定", "要確認", "設定してください", "Stripe", "7年", "一切の責任", "専属的合意管轄", "法令に基づき省略", "適法"];
+
+beforeEach(() => {
+  for (const k of OPERATOR_KEYS) vi.stubEnv(k, "");
+});
+afterEach(() => vi.unstubAllEnvs());
+
+describe("運営者情報の設定", () => {
+  it("未設定なら確定済みの屋号・問い合わせ先を使い、氏名・住所・電話は架空の値で埋めない", () => {
+    const { info, issues } = readOperatorInfo(process.env);
+    expect(info.tradeName).toBe("Hobby shop FUKASHIGI");
+    expect(info.email).toBe("koyomi100yen@gmail.com");
+    expect([info.ownerName, info.address, info.phone]).toEqual([null, null, null]);
+    expect(issues.filter((i) => i.level === "error")).toEqual([]);
+    // 請求時開示の表示は「法令上の条件は未確認」として通知される
+    const disclosure = issues.find((i) => i.key === "disclosure");
+    expect(disclosure?.level).toBe("notice");
+    expect(disclosure?.message).toContain("未確認");
+  });
+
+  it("仮の値（example.com・【…】）や不正な形式は表示に使わず、エラーとして報告する（値そのものは出さない）", () => {
+    const { info, issues } = readOperatorInfo({
+      NEXT_PUBLIC_OPERATOR_EMAIL: "support@example.com",
+      NEXT_PUBLIC_OPERATOR_NAME: "【運営事業者名を設定してください】",
+      OPERATOR_ADDRESS: "【所在地（請求があれば遅滞なく開示）】",
+      OPERATOR_PHONE: "電話番号",
+    });
+    expect(info.email).toBe(OPERATOR_DEFAULTS.email);
+    expect(info.tradeName).toBe(OPERATOR_DEFAULTS.tradeName);
+    expect(info.address).toBeNull();
+    expect(info.phone).toBeNull();
+    const errors = issues.filter((i) => i.level === "error").map((i) => i.key);
+    expect(errors.sort()).toEqual(["NEXT_PUBLIC_OPERATOR_EMAIL", "NEXT_PUBLIC_OPERATOR_NAME", "OPERATOR_ADDRESS", "OPERATOR_PHONE"].sort());
+    expect(JSON.stringify(issues)).not.toContain("support@example.com");
+  });
+
+  it("以前の NEXT_PUBLIC_OPERATOR_* の値は使うが、移行を促す通知を出す", () => {
+    const { info, issues } = readOperatorInfo({ NEXT_PUBLIC_OPERATOR_ADDRESS: "東京都千代田区1-1-1" });
+    expect(info.address).toBe("東京都千代田区1-1-1");
+    expect(issues.some((i) => i.level === "notice" && i.key === "NEXT_PUBLIC_OPERATOR_ADDRESS")).toBe(true);
+  });
+
+  it("氏名・住所・電話番号がすべて設定されれば、その値を表示し請求時開示の通知は出ない", () => {
+    vi.stubEnv("OPERATOR_OWNER_NAME", "山田 太郎");
+    vi.stubEnv("OPERATOR_ADDRESS", "東京都千代田区1-1-1");
+    vi.stubEnv("OPERATOR_PHONE", "03-0000-0000");
+    expect(readOperatorInfo(process.env).issues).toEqual([]);
+    const t = page(CommercialTransactionPage);
+    expect(t).toContain("山田 太郎");
+    expect(t).toContain("東京都千代田区1-1-1");
+    expect(t).toContain("03-0000-0000");
+    expect(t).not.toContain("開示のご請求方法");
+    expect(t).not.toContain("ご請求があれば");
+  });
+});
+
+describe("特定商取引法に基づく表記", () => {
+  it("確定した運営方針と実装の値を表示する", () => {
+    const t = page(CommercialTransactionPage);
+    for (const s of [
+      "Hobby shop FUKASHIGI（個人事業主）",
+      "koyomi100yen@gmail.com",
+      "100円占い",
+      "占い1回 100円（税込）",
+      "クレジットカード（決済代行：PAY.JP）",
+      `「${PAY_BUTTON_LABEL}」ボタンを押した時点で決済`,
+      "30分以内にお支払いください",
+      "決済の完了から24時間以内に占いを実行",
+      "占いを実行してから24時間、お支払いをした同じブラウザでのみ再表示",
+      "重複して決済された場合",
+      "占い結果が提供されなかった場合",
+      "重大な誤り",
+      "決済日から30日以内を目安",
+      "法令上お客様に認められる返金・解除などの権利を制限するものではありません",
+      "原則として3営業日以内",
+      "遅滞なく対応すべき場合は、それに従います",
+      "ご請求があれば、遅滞なく開示いたします。",
+      "開示のご請求方法",
+      "販売事業者は上記の運営者",
+    ]) {
+      expect(t, s).toContain(s);
+    }
+    for (const s of FORBIDDEN) expect(t, s).not.toContain(s);
+  });
+});
+
+describe("利用規約", () => {
+  it("娯楽目的・販売者・料金と期限・返金・未成年・責任・規約変更・問い合わせ先を含み、全面免責や合意管轄・賠償上限を定めない", () => {
+    const t = page(TermsPage);
+    for (const s of [
+      "娯楽を目的",
+      "提携店舗はQRコードの設置場所を提供しているものであり、本サービスの販売者ではありません",
+      "利用者と運営者との間で成立",
+      "占い1回につき100円（税込）",
+      "決済の完了から24時間以内に占いを実行",
+      "同じブラウザでのみ再表示",
+      "重複して決済された場合",
+      "決済日から30日以内を目安",
+      "法定代理人の同意",
+      "法令に従ってその損害を賠償",
+      "効力が生じる日を定め、その日より前に",
+      "法令の定めに従い管轄を有する裁判所",
+      "koyomi100yen@gmail.com",
+      "原則として3営業日以内",
+    ]) {
+      expect(t, s).toContain(s);
+    }
+    for (const s of [...FORBIDDEN, "上限", "責任を負いません。通信環境"]) expect(t, s).not.toContain(s);
+  });
+});
+
+describe("プライバシーポリシー", () => {
+  it("実際の保存内容・表示内容に合わせて記載し、未決定の保存期間に架空の期限を書かない", () => {
+    const t = page(PrivacyPage);
+    for (const s of [
+      "生年月日そのものは、データベースに保存せず",
+      "作成から30日を過ぎたものを毎日の定期処理で削除",
+      "取引ごとの日時・占いの種類・金額・店舗の取り分・状態",
+      "占いの入力内容、占い結果の本文、利用者を特定できる情報は、提携店舗に表示・提供しません",
+      "qr_store",
+      "fx_access",
+      "fx_test",
+      "入力した内容（生年月日などを含みます）がこのCookieに含まれ",
+      "localStorage",
+      "Firebase",
+      "Vercel",
+      "Gmail",
+      "PAY.JP",
+      "売上の管理、提携店舗への報酬の精算",
+      "振込先口座は暗号化して保管",
+      "現在は自動で削除する仕組みがなく、保存を続けています",
+      "保存期間を定める予定",
+      "開示、訂正・追加・削除、利用停止・消去",
+      "koyomi100yen@gmail.com",
+    ]) {
+      expect(t, s).toContain(s);
+    }
+    for (const s of [...FORBIDDEN, "集計値のみ"]) expect(t, s).not.toContain(s);
+  });
+});
+
+describe("購入画面の確認事項", () => {
+  const expiresAt = new Date("2026-10-16T03:30:00Z"); // JST 12:30
+  it("購入内容・価格・支払方法と時期・提供時期・期限・キャンセルと返金・未成年・3文書へのリンクを表示する", () => {
+    const html = renderToStaticMarkup(createElement(PurchaseSummary, { fortuneLabel: "星座占い", inputLabel: "星座", expiresAt, testPayment: false }));
+    const t = text(createElement(PurchaseSummary, { fortuneLabel: "星座占い", inputLabel: "星座", expiresAt, testPayment: false }));
+    for (const s of [
+      "星座占い（1回分）",
+      "100円（税込）",
+      "クレジットカード（決済代行：PAY.JP）",
+      `「${PAY_BUTTON_LABEL}」ボタンを押した時点で決済`,
+      "決済の完了後すぐに",
+      "24時間以内",
+      "このブラウザでのみ再表示",
+      "30分以内（12:30まで）",
+      "閉じるだけで料金はかかりません",
+      "重複して決済された場合",
+      "法令上の権利を制限するものではありません",
+      "保護者など法定代理人の同意",
+    ]) {
+      expect(t, s).toContain(s);
+    }
+    for (const href of ["/commercial-transaction", "/terms", "/privacy"]) expect(html).toContain(`href="${href}"`);
+    for (const s of FORBIDDEN) expect(t, s).not.toContain(s);
+  });
+
+  it("テスト用の決済では、請求が発生しないことと実際のボタン名を表示する", () => {
+    const t = text(createElement(PurchaseSummary, { fortuneLabel: "血液型占い", inputLabel: "血液型", expiresAt, testPayment: true }));
+    expect(t).toContain("実際の請求は発生しません");
+    expect(t).toContain(`「${TEST_PAY_BUTTON_LABEL}」ボタン`);
+    expect(t).not.toContain("PAY.JP");
+  });
+});

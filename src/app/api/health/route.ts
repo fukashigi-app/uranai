@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { dataProvider } from "@/lib/data-provider";
+import { readOperatorInfo } from "@/config/operator";
 
 export const dynamic = "force-dynamic";
 
@@ -15,6 +16,11 @@ export async function GET() {
     APP_URL: process.env.APP_URL ? "set" : "auto (Vercel URL)",
     paymentMode: process.env.ENABLE_TEST_PAYMENT === "true" ? "test (ENABLE_TEST_PAYMENT=true)" : process.env.PAYJP_SECRET_KEY ? "payjp" : "none (決済未設定)",
   };
+  // 特商法表記などの運営者情報（値そのものは返さない。表示の可否に影響しないため ok の判定には含めない）
+  const operator = readOperatorInfo().issues;
+  const opErrors = operator.filter((i) => i.level === "error").map((i) => i.key);
+  checks.operatorInfo = opErrors.length ? `error: 仮の値または不正な値を無視しています (${opErrors.join(", ")})` : "ok";
+  checks.operatorDisclosure = operator.some((i) => i.key === "disclosure") ? "on-request (氏名・住所・電話番号は請求時開示の表示。法令上の条件は要確認)" : "listed";
   if (provider === "firestore") {
     checks.FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID ? "set" : "missing";
     checks.FIREBASE_CLIENT_EMAIL = process.env.FIREBASE_CLIENT_EMAIL ? "set" : "missing";
