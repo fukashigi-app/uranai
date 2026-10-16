@@ -5,6 +5,8 @@ import { PAY_BUTTON_LABEL } from "@/lib/legal/labels";
 import {
   CHECKOUT_MINUTES,
   DISCLOSE_ON_REQUEST,
+  DISCLOSURE_CONDITIONS,
+  DISCLOSURE_REPLY_NOTE,
   FORTUNE_USE_HOURS,
   LEGAL_UPDATED,
   operatorInfo,
@@ -18,13 +20,17 @@ import {
 
 export const metadata = { title: "特定商取引法に基づく表記" };
 
-export default function CommercialTransactionPage() {
-  const op = operatorInfo();
-  const mail = (
-    <a href={`mailto:${op.email}`} data-operator-email>
-      {op.email}
+function mailTo(email: string, marker: "data-operator-email" | "data-disclosure-email") {
+  return (
+    <a href={`mailto:${email}`} {...{ [marker]: "" }}>
+      {email}
     </a>
   );
+}
+
+export default function CommercialTransactionPage() {
+  const op = operatorInfo();
+  const mail = mailTo(op.email, "data-operator-email");
   const rows: [string, React.ReactNode][] = [
     [
       "販売事業者",
@@ -45,11 +51,22 @@ export default function CommercialTransactionPage() {
           [
             "開示のご請求方法",
             <>
-              下記のメールアドレスに「特定商取引法に基づく表記の開示請求」と記載してご連絡ください。{REPLY_NOTE}
+              <p className="!mt-0">
+                事業者の氏名・所在地・電話番号は、{mailTo(op.email, "data-disclosure-email")}
+                宛てに、件名または本文に「特定商取引法に基づく表記の開示請求」と記載してご請求ください。
+              </p>
+              <p>{DISCLOSURE_CONDITIONS}</p>
+              <p>{DISCLOSURE_REPLY_NOTE}</p>
             </>,
           ],
         ] as [string, React.ReactNode][])),
-    ["メールアドレス", mail],
+    [
+      "メールアドレス",
+      <>
+        {mail}
+        <span className="mt-1 block">一般のお問い合わせ：{REPLY_NOTE}</span>
+      </>,
+    ],
     ["サービス名", siteConfig.name],
     ["販売価格", `占い1回 ${PRICE_LABEL}`],
     ["商品代金以外の必要料金", "インターネット接続にかかる通信料は、お客様のご負担となります。"],

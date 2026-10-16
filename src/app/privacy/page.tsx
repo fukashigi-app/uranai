@@ -3,6 +3,8 @@ import { LegalPage } from "@/components/public/legal";
 import { siteConfig } from "@/config/site";
 import {
   DISCLOSE_ON_REQUEST,
+  DISCLOSURE_CONDITIONS,
+  DISCLOSURE_REPLY_NOTE,
   FORTUNE_USE_HOURS,
   LEGAL_UPDATED,
   operatorInfo,
@@ -40,6 +42,14 @@ export default function PrivacyPage() {
         </li>
         <li>事業者の氏名：{op.ownerName ?? DISCLOSE_ON_REQUEST}</li>
         <li>住所：{op.address ?? DISCLOSE_ON_REQUEST}</li>
+        {op.ownerName && op.address ? null : (
+          <li data-disclosure-guide>
+            事業者の氏名・住所のご請求は、<a href={`mailto:${op.email}`}>{op.email}</a>
+            宛てにお送りください。{DISCLOSURE_CONDITIONS}
+            {DISCLOSURE_REPLY_NOTE}（ご請求の方法は<Link href="/commercial-transaction">特定商取引法に基づく表記</Link>
+            もご覧ください。）
+          </li>
+        )}
         <li>
           お問い合わせ先：<a href={`mailto:${op.email}`}>{op.email}</a>
         </li>
@@ -142,9 +152,12 @@ export default function PrivacyPage() {
       <h2>10. 開示・訂正・利用停止などのご請求</h2>
       <ul>
         <li>
-          ご本人から、保有個人データの利用目的の通知、開示、訂正・追加・削除、利用停止・消去、第三者への提供の停止などのご請求があった場合は、ご本人であることを確認したうえで、法令に従って対応します。
+          ご本人から、保有個人データの利用目的の通知、開示、訂正・追加・削除、利用停止・消去、第三者への提供の停止などのご請求があった場合は、法令に従って対応します。
         </li>
-        <li>ご請求は、下記のお問い合わせ先にメールでご連絡ください。本人確認の方法などをご案内します。</li>
+        <li>
+          ご請求は、下記のお問い合わせ先にメールでご連絡ください。占いのご購入はご請求の条件ではありません。ご本人の情報を取り違えないよう、ご請求の内容に応じて、確認に必要な範囲で情報をお伺いすることがあります。
+        </li>
+        <li>回答の目安：{REPLY_NOTE}</li>
         <li>占いの利用者については、氏名などをお預かりしていないため、ご請求の内容によっては、ご本人の情報を特定できない場合があります。</li>
       </ul>
 

@@ -18,7 +18,7 @@ export const PAYMENT_PROCESSOR = "PAY.JP";
 
 /** 返金の申し出の目安（決済日から） */
 export const REFUND_REQUEST_DAYS = 30;
-/** 問い合わせ・開示請求への回答の目安 */
+/** 一般の問い合わせ・個人情報の開示等の請求への回答の目安 */
 export const REPLY_BUSINESS_DAYS = 3;
 
 const hours = (ms: number) => Math.round(ms / 3_600_000);
@@ -47,6 +47,14 @@ export const REPLY_NOTE = `原則として${REPLY_BUSINESS_DAYS}営業日以内�
 
 /** 氏名・住所・電話番号を表示していない場合の文言（この方式が法令上の条件を満たすかは未確認：公開前に要確認） */
 export const DISCLOSE_ON_REQUEST = "ご請求があれば、遅滞なく開示いたします。";
+
+/** 事業者情報（氏名・住所・電話番号）の開示請求への回答の目標（一般の問い合わせより早く対応する） */
+export const DISCLOSURE_REPLY_NOTE =
+  "原則として受付当日中、遅くとも翌営業日中に、ご請求いただいたメールアドレスへ回答することを目標としています。法令により遅滞なく対応すべき場合は、それに従います。";
+
+/** 事業者情報の開示請求の条件（購入や本人確認を一律の条件にしない） */
+export const DISCLOSURE_CONDITIONS =
+  "ご購入の前後を問わず、どなたでもご請求いただけます。ご請求にあたって、ご購入や本人確認書類の提出は必要ありません。";
 
 export function operatorInfo() {
   return readOperatorInfo().info;

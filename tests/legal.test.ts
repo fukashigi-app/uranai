@@ -118,6 +118,61 @@ describe("特定商取引法に基づく表記", () => {
   });
 });
 
+describe("事業者情報の開示請求", () => {
+  const html = (Page: () => React.ReactElement) => renderToStaticMarkup(createElement(Page));
+  const DISCLOSURE_MUST = [
+    "ご購入の前後を問わず、どなたでもご請求いただけます",
+    "ご購入や本人確認書類の提出は必要ありません",
+    "原則として受付当日中、遅くとも翌営業日中",
+    "目標としています",
+    "法令により遅滞なく対応すべき場合は、それに従います",
+  ];
+  // 購入・本人確認を一律の条件にする表現、法令上の条件を満たしていると断定する表現は使わない
+  const DISCLOSURE_FORBIDDEN = ["購入者に限り", "ご購入者のみ", "本人確認が必要", "本人確認書類をご提出", "ご本人であることを確認したうえで", "法令上認められて", "省略が認められ", "省略しています"];
+
+  it("特商法表記：開示請求先・条件・回答の目標を表示する", () => {
+    const h = html(CommercialTransactionPage);
+    const t = page(CommercialTransactionPage);
+    expect(h).toMatch(/<a href="mailto:koyomi100yen@gmail.com" data-disclosure-email="">koyomi100yen@gmail.com<\/a>/);
+    expect(t).toContain("事業者の氏名・所在地・電話番号は、koyomi100yen@gmail.com宛てに");
+    expect(t).toContain("「特定商取引法に基づく表記の開示請求」と記載");
+    for (const s of DISCLOSURE_MUST) expect(t, s).toContain(s);
+    for (const s of DISCLOSURE_FORBIDDEN) expect(t, s).not.toContain(s);
+    // 一般の問い合わせは3営業日の目安
+    expect(t).toContain("一般のお問い合わせ：原則として3営業日以内");
+  });
+
+  it("プライバシーポリシー：事業者情報の開示請求の案内が特商法表記と一致し、個人情報の開示請求も購入・本人確認を一律の条件にしない", () => {
+    const h = html(PrivacyPage);
+    const t = page(PrivacyPage);
+    expect(h).toContain('data-disclosure-guide');
+    expect(h).toContain('href="mailto:koyomi100yen@gmail.com"');
+    expect(h).toContain('href="/commercial-transaction"');
+    for (const s of DISCLOSURE_MUST) expect(t, s).toContain(s);
+    expect(t).toContain("占いのご購入はご請求の条件ではありません");
+    expect(t).toContain("確認に必要な範囲で情報をお伺いすることがあります");
+    expect(t).toContain("回答の目安：原則として3営業日以内");
+    for (const s of DISCLOSURE_FORBIDDEN) expect(t, s).not.toContain(s);
+  });
+
+  it("問い合わせ先に仮の値が設定されていても、開示請求先は確定済みのメールアドレスを表示する", () => {
+    vi.stubEnv("OPERATOR_EMAIL", "support@example.com");
+    for (const Page of [CommercialTransactionPage, PrivacyPage, TermsPage]) {
+      const h = html(Page);
+      expect(h).toContain("koyomi100yen@gmail.com");
+      expect(h).not.toContain("example.com");
+    }
+  });
+
+  it("氏名・住所・電話番号をすべて掲載した場合は、開示請求の案内を出さない", () => {
+    vi.stubEnv("OPERATOR_OWNER_NAME", "山田 太郎");
+    vi.stubEnv("OPERATOR_ADDRESS", "東京都千代田区1-1-1");
+    vi.stubEnv("OPERATOR_PHONE", "03-0000-0000");
+    expect(html(CommercialTransactionPage)).not.toContain("data-disclosure-email");
+    expect(html(PrivacyPage)).not.toContain("data-disclosure-guide");
+  });
+});
+
 describe("利用規約", () => {
   it("娯楽目的・販売者・料金と期限・返金・未成年・責任・規約変更・問い合わせ先を含み、全面免責や合意管轄・賠償上限を定めない", () => {
     const t = page(TermsPage);
