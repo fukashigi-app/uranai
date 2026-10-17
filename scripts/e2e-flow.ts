@@ -11,7 +11,7 @@ import { authSessions, checkouts, fortuneResults, fortuneSessions, stores, trans
 import { randomToken, sha256Hex } from "@/lib/security/crypto";
 import { signMockWebhook } from "@/lib/payments/mock";
 import { createOperator, createStore, createStoreUser, setStoreStatus } from "@/lib/services/stores";
-import { listStores, totalsForRange } from "@/lib/services/reports";
+import { listStores, listTransactions, totalsForRange } from "@/lib/services/reports";
 import { resolvePeriod } from "@/lib/period";
 import { formatYen } from "@/lib/money";
 import { generateSettlements } from "@/lib/services/settlements";
@@ -285,8 +285,9 @@ async function main() {
     const sum = all.rows.reduce((a, r) => ({ c: a.c + r.count, g: a.g + r.gross, s: a.s + r.storeShare, o: a.o + r.operatorShare }), { c: 0, g: 0, s: 0, o: 0 });
     assert.deepEqual(sum, { c: grand.count, g: grand.gross, s: grand.storeShare, o: grand.operatorShare }, `${key}: 店舗ごとの合計 = 全店舗合計`);
     assert.equal(grand.storeShare + grand.operatorShare, grand.gross, `${key}: 店舗取り分 + 運営取り分 = 総売上`);
-    // SQLで直接数えた値とも一致
+    // SQLで直接数えた値とも一致（本番環境の決済 ＋ この自動テスト環境では疑似決済。決済代行のテスト決済 livemode=false は数えない）
     const direct = (await db().execute(sql`SELECT count(*)::int AS c, coalesce(sum(amount),0)::int AS g FROM transactions t WHERE payment_status='SUCCEEDED'
+      AND (livemode = true OR payment_provider = 'mock')
       ${period.range ? sql`AND paid_at >= ${period.range.start.toISOString()} AND paid_at < ${period.range.end.toISOString()}` : sql``}`)).rows[0];
     assert.equal(grand.count, Number(direct.c));
     assert.equal(grand.gross, Number(direct.g));
@@ -332,7 +333,7 @@ async function main() {
   const savedProvider = process.env.PAYMENT_PROVIDER;
   process.env.PAYMENT_PROVIDER = "payjp";
   const realOnly = await totalsForRange(null);
-  const nonMock = (await db().execute(sql`SELECT count(*)::int AS c, coalesce(sum(amount),0)::int AS g FROM transactions WHERE payment_status='SUCCEEDED' AND payment_provider <> 'mock'`)).rows[0];
+  const nonMock = (await db().execute(sql`SELECT count(*)::int AS c, coalesce(sum(amount),0)::int AS g FROM transactions WHERE payment_status='SUCCEEDED' AND payment_provider <> 'mock' AND livemode = true`)).rows[0];
   assert.deepEqual([realOnly.count, realOnly.gross], [Number(nonMock.c), Number(nonMock.g)]);
   process.env.PAYMENT_PROVIDER = savedProvider;
   step("集計: 店舗ごと・全店舗合計・期間切り替え（今月/先月/月指定/全期間）が一致、店舗は自店舗の今月・累計のみ表示");
@@ -454,6 +455,43 @@ async function main() {
     assert.deepEqual(await leakOf(form), { r: 0, s: 0, c: 0, t: 0, a: 0, l: 0 }, form);
   }
   step(`生年月日占い v2（PostgreSQL）: 獅子座×誕生数11・今日のナンバー${da.personalDay}（${da.rarity.en}）を保存、再購入で★・レア度・テーマは同じ・文章は変化、生年月日はどのテーブルにも保存なし`);
+
+  // 決済代行のテスト決済（PAY.JP のテストキー・livemode=false）は、売上・店舗取り分・月次精算に入らない（PostgreSQL）
+  {
+    const kStore = await createStore({ name: `E2Eテスト決済店舗 ${Date.now()}`, contactName: "", postalCode: "", address: "", phone: "", email: "" }, { userId: null, role: "SYSTEM" });
+    const mk = async (livemode: boolean, ym: string, tag: string) => {
+      const paidAt = new Date(`${ym}-15T12:00:00+09:00`);
+      const [co] = await db()
+        .insert(checkouts)
+        .values({ storeId: kStore.id, fortuneType: "ZODIAC", amount: 100, status: "SUCCEEDED", provider: "payjp", providerPaymentId: `ch_kind_${tag}_${randomToken(6)}`, accessTokenHash: sha256Hex(randomToken(16)), expiresAt: paidAt })
+        .returning({ id: checkouts.id, pid: checkouts.providerPaymentId });
+      await db().insert(transactions).values({ checkoutId: co.id, paymentProvider: "payjp", providerPaymentId: co.pid!, storeId: kStore.id, fortuneType: "ZODIAC", amount: 100, storeShare: 30, operatorShare: 70, paymentFee: 4, storeShareBps: 3000, fortuneStatus: "COMPLETED", livemode, paidAt });
+    };
+    await mk(true, "2025-01", "live");
+    await mk(false, "2025-01", "test1");
+    await mk(false, "2025-01", "test2");
+    // 2025-02 は、テスト決済を含んだ金額で「支払済」になっている精算（自動で書き換えないこと）
+    await mk(true, "2025-02", "live2");
+    await mk(false, "2025-02", "test3");
+    await db().insert(settlements).values({ storeId: kStore.id, yearMonth: "2025-02", transactionCount: 2, grossSales: 200, storeShare: 60, status: "PAID", paidAt: new Date() });
+
+    const jan = { start: new Date("2025-01-01T00:00:00+09:00"), end: new Date("2025-02-01T00:00:00+09:00") };
+    const t = await totalsForRange(jan, kStore.id);
+    assert.deepEqual([t.count, t.gross, t.storeShare, t.operatorShare], [1, 100, 30, 70]);
+    const all = await totalsForRange(null, kStore.id);
+    assert.deepEqual([all.count, all.storeShare], [2, 60]);
+    const storeRows = await listTransactions({ storeId: kStore.id, yearMonth: "2025-01", page: 1, perPage: 50, audience: "store" });
+    assert.deepEqual(storeRows.rows.map((r) => r.kind), ["live"]);
+    const opRows = await listTransactions({ storeId: kStore.id, yearMonth: "2025-01", page: 1, perPage: 50, audience: "operator" });
+    assert.deepEqual(opRows.rows.map((r) => r.kind).sort(), ["live", "test", "test"]);
+    await generateSettlements("2025-01", { userId: null, role: "SYSTEM" });
+    await generateSettlements("2025-02", { userId: null, role: "SYSTEM" });
+    const [janSet] = await db().select().from(settlements).where(and(eq(settlements.storeId, kStore.id), eq(settlements.yearMonth, "2025-01")));
+    assert.deepEqual([janSet.transactionCount, janSet.grossSales, janSet.storeShare, janSet.status], [1, 100, 30, "UNPAID"]);
+    const [febSet] = await db().select().from(settlements).where(and(eq(settlements.storeId, kStore.id), eq(settlements.yearMonth, "2025-02")));
+    assert.deepEqual([febSet.transactionCount, febSet.grossSales, febSet.storeShare, febSet.status], [2, 200, 60, "PAID"]);
+    step("テスト決済（livemode=false）は売上・店舗取り分・月次精算に入らない。運営の一覧では確認でき、支払済の精算は書き換えない（PostgreSQL）");
+  }
 
   console.log("\nE2E PASSED");
   process.exit(0);

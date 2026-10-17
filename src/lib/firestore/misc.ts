@@ -2,7 +2,7 @@ import "server-only";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import type { FortuneTypeValue } from "@/lib/db/schema";
 import { sha256Hex } from "@/lib/security/crypto";
-import { C, fsdb, inBatches, mustDate } from "./admin";
+import { C, fsdb, inBatches, mustDate, toDate } from "./admin";
 
 /**
  * Rate Limit（固定時間枠）。rateLimits/{キーのハッシュ_枠の開始時刻}
@@ -72,4 +72,26 @@ export async function runMaintenance() {
 export async function ping(): Promise<string> {
   await fsdb().collection(C.stores).limit(1).get();
   return "ok";
+}
+
+// ---------- 定期処理の実行記録（system/maintenance。成功・失敗・最終実行時刻だけ。秘密情報は保存しない） ----------
+
+export type MaintenanceRun = { ok: true; result: Record<string, number> } | { ok: false; errorCode: string };
+
+export async function recordMaintenanceRun(run: MaintenanceRun, startedAt: Date, finishedAt: Date): Promise<void> {
+  const ref = fsdb().collection(C.system).doc("maintenance");
+  const common = { lastRunAt: finishedAt, lastDurationMs: finishedAt.getTime() - startedAt.getTime(), updatedAt: FieldValue.serverTimestamp() };
+  if (run.ok) await ref.set({ ...common, lastStatus: "success", lastSuccessAt: finishedAt, lastResult: run.result, lastErrorCode: null }, { merge: true });
+  else await ref.set({ ...common, lastStatus: "failure", lastFailureAt: finishedAt, lastErrorCode: run.errorCode.slice(0, 80) }, { merge: true });
+}
+
+export async function getMaintenanceStatus(): Promise<{ lastRunAt: Date | null; lastStatus: string | null; lastSuccessAt: Date | null; lastFailureAt: Date | null; lastErrorCode: string | null }> {
+  const d = await fsdb().collection(C.system).doc("maintenance").get();
+  return {
+    lastRunAt: toDate(d.get("lastRunAt")),
+    lastStatus: (d.get("lastStatus") as string | undefined) ?? null,
+    lastSuccessAt: toDate(d.get("lastSuccessAt")),
+    lastFailureAt: toDate(d.get("lastFailureAt")),
+    lastErrorCode: (d.get("lastErrorCode") as string | undefined) ?? null,
+  };
 }

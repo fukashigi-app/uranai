@@ -4,16 +4,19 @@ import * as fsReports from "@/lib/firestore/reports";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { jstMonthRange, jstYearMonth, shiftYearMonth } from "@/lib/time";
+import { mockPaymentsCountable, paymentKind } from "@/lib/payments/kind";
 
 /** 集計は payment_status = 'SUCCEEDED'（返金除外）、JST で日/月を区切る */
 
 /**
- * 本番の売上にテスト用の疑似決済（payment_provider = 'mock'）を含めない条件。
- * 以前のテストモードが transactions に記録した疑似決済も、ここで売上集計から除外される。
- * 例外: 自動テスト環境（PAYMENT_PROVIDER=mock を明示設定）では疑似決済が唯一の決済手段なので集計に含める。
+ * 売上に数える決済だけにする条件（判定は lib/payments/kind.ts の isSalesPayment と同じ）。
+ *  - 本番環境の決済（livemode = true）だけ。決済代行のテスト決済（livemode = false）・疑似決済（mock）は含めない
+ *  - 例外: 自動テスト環境（PAYMENT_PROVIDER=mock を明示し、Vercel の本番ではない）では疑似決済も含める
  */
 function realPaymentsOnly() {
-  return process.env.PAYMENT_PROVIDER === "mock" ? sql`` : sql`AND payment_provider <> 'mock'`;
+  return mockPaymentsCountable()
+    ? sql`AND ((payment_provider <> 'mock' AND livemode = true) OR payment_provider = 'mock')`
+    : sql`AND payment_provider <> 'mock' AND livemode = true`;
 }
 
 export type Totals = { count: number; gross: number; storeShare: number; operatorShare: number; fee: number };
@@ -180,15 +183,18 @@ export async function listStores(opts: {
   };
 }
 
-export async function listTransactions(opts: { storeId?: string; yearMonth?: string; page: number; perPage: number }) {
+/**
+ * 決済の一覧。店舗（audience = "store"）には売上に数える決済だけ、運営（"operator"）にはテスト決済なども含めて種類つきで返す。
+ */
+export async function listTransactions(opts: { storeId?: string; yearMonth?: string; page: number; perPage: number; audience: "store" | "operator" }) {
   if (isFirestore()) return fsReports.listTransactions(opts);
   const range = opts.yearMonth ? jstMonthRange(opts.yearMonth) : null;
-  const where = sql`WHERE 1=1 ${realPaymentsOnly()}
+  const where = sql`WHERE 1=1 ${opts.audience === "operator" ? sql`` : realPaymentsOnly()}
     ${opts.storeId ? sql`AND t.store_id = ${opts.storeId}` : sql``}
     ${range ? sql`AND t.paid_at >= ${range.start.toISOString()} AND t.paid_at < ${range.end.toISOString()}` : sql``}`;
   const rows = await db().execute(sql`
     SELECT t.id, t.paid_at, t.fortune_type, t.amount, t.store_share, t.operator_share, t.payment_fee, t.payment_status,
-      t.fortune_status, t.payment_provider, t.provider_payment_id, s.name AS store_name, s.id AS store_id
+      t.fortune_status, t.payment_provider, t.provider_payment_id, t.livemode, s.name AS store_name, s.id AS store_id
     FROM transactions t JOIN stores s ON s.id = t.store_id
     ${where}
     ORDER BY t.paid_at DESC, t.id
@@ -207,6 +213,7 @@ export async function listTransactions(opts: { storeId?: string; yearMonth?: str
       paymentStatus: String(r.payment_status),
       fortuneStatus: String(r.fortune_status),
       provider: String(r.payment_provider),
+      kind: paymentKind(String(r.payment_provider), r.livemode),
       providerPaymentId: String(r.provider_payment_id),
       storeName: String(r.store_name),
       storeId: String(r.store_id),

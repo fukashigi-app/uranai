@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { guardPost, jsonError, jsonOk, readJson } from "@/lib/api";
+import { isPaidFlowBlocked } from "@/lib/env";
 import { getAccessToken } from "@/lib/cookies";
 import { CheckoutError, payCheckout } from "@/lib/services/checkout";
 
@@ -7,6 +8,8 @@ import { CheckoutError, payCheckout } from "@/lib/services/checkout";
 const bodySchema = z.object({ cardToken: z.string().min(1).max(200).regex(/^[A-Za-z0-9_]+$/) }).strict();
 
 export async function POST(req: Request) {
+  // 本番で危険な設定（ENABLE_TEST_PAYMENT=true・PAYMENT_PROVIDER=mock）のままのときは、実際の課金へ切り替えずに受付を停止する（安全側）
+  if (isPaidFlowBlocked()) return jsonError(503, "service_paused", "ただいま占いの受付を一時停止しています。しばらくしてからお試しください。");
   const blocked = await guardPost(req, "pay", 10, 60);
   if (blocked) return blocked;
   let body;

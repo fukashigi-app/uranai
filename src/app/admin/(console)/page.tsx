@@ -5,7 +5,9 @@ import { requireOperator } from "@/lib/auth/session";
 import { countActiveStores, dailySeries, listStores, monthTotals, totalsBetween } from "@/lib/services/reports";
 import { formatYearMonthJa, jstDateString, jstMonthRange, jstYearMonth } from "@/lib/time";
 import { formatYen } from "@/lib/money";
-import { isTestPaymentEnabled } from "@/lib/env";
+import { isProductionDeployment, isTestPaymentConfigured, productionConfigIssues } from "@/lib/env";
+import { SystemStatusNotice } from "@/components/console/system-status-notice";
+import { getMaintenanceStatus } from "@/lib/services/maintenance-status";
 import { testUsageOverall } from "@/lib/services/test-usage";
 import { TestUsagePanel } from "@/components/console/test-usage-panel";
 import { OperatorInfoNotice } from "@/components/console/operator-info-notice";
@@ -26,12 +28,14 @@ export default async function AdminDashboard() {
     listStores({ range: jstMonthRange(ym), sort: "count", dir: "desc", page: 1, perPage: 5 }),
     testUsageOverall(),
   ]);
+  const maintenance = await getMaintenanceStatus().catch(() => null);
   const net = month.operatorShare - month.fee;
   const y = (n: number) => n.toLocaleString("ja-JP");
 
   return (
     <>
       <PageHeader title="ダッシュボード" description={`${formatYearMonthJa(ym)}（JST）の集計。返金分は除外しています。`} />
+      <SystemStatusNotice issues={productionConfigIssues()} maintenance={maintenance} production={isProductionDeployment()} className="mb-4" />
       <OperatorInfoNotice issues={readOperatorInfo().issues} className="mb-4" />
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat label="全店舗数" value={y(storesCount.total)} unit="店" sub={`稼働中 ${storesCount.active}店`} />
@@ -45,7 +49,7 @@ export default async function AdminDashboard() {
       </div>
       <TestUsagePanel
         usage={testUsage}
-        testModeOn={isTestPaymentEnabled()}
+        testModeOn={isTestPaymentConfigured()}
         className="mt-4"
         note={`全店舗の合計（うち、店舗に紐づかないテスト店舗「/s/test」での利用：今月 ${testUsage.testStore.thisMonth}回・累計 ${testUsage.testStore.total}回）。店舗ごとの件数は各店舗の詳細画面で確認できます。`}
       />

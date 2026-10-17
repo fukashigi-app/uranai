@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { authenticate } from "@/lib/auth/login";
 import { createInitialOperator, isInitialSetupDone } from "@/lib/services/setup";
 import { countActiveStores, dailySeries, listStores, listTransactions, monthTotals, totalsBetween, totalsForRange } from "@/lib/services/reports";
-import { listSettlements } from "@/lib/services/settlements";
+import { generateSettlements, listSettlements } from "@/lib/services/settlements";
 import { jstDateString, jstMonthRange, jstYearMonth, shiftYearMonth } from "@/lib/time";
 import { AggregateField } from "firebase-admin/firestore";
 import { C, fsdb } from "@/lib/firestore/admin";
@@ -67,7 +67,7 @@ async function main() {
   // /admin/stores・/admin/transactions・/admin/settlements と同じ呼び出し
   await check("listStores(全期間)", () => listStores({ range: null, sort: "count", dir: "desc", page: 1, perPage: 20 }));
   await check("totalsForRange(全期間)", () => totalsForRange(null));
-  await check("listTransactions(今月)", () => listTransactions({ yearMonth: ym, page: 1, perPage: 50 }));
+  await check("listTransactions(今月)", () => listTransactions({ yearMonth: ym, page: 1, perPage: 50, audience: "operator" }));
   await check("listSettlements(今月)", () => listSettlements({ yearMonth: ym }));
   ok("店舗一覧・決済履歴・月次精算のデータ取得も0件で動く");
 
@@ -101,8 +101,9 @@ async function main() {
       fortuneStatus: "PENDING",
       fortuneType: "ZODIAC",
       providerPaymentId: `agg-${i}`,
+      livemode: t.provider !== "mock", // 決済代行の本番環境の決済（疑似決済は false）
       paidAt: t.paidAt,
-      ...salesKeys(t.store, t.provider, t.status, t.paidAt),
+      ...salesKeys(t.store, t.provider, t.status, t.paidAt, t.provider !== "mock"),
     });
   });
   await batch.commit();
@@ -146,6 +147,71 @@ async function main() {
   const days = await dailySeries(ym);
   assert.deepEqual(days.slice(0, 4).map((d) => d.count), [1, 1, 1, 0]);
   ok("集計（件数・売上・店舗30%・運営70%・手数料・返金/失敗/疑似決済の除外・月別・店舗別・全期間）が以前の SUM 集計と一致");
+
+  // ---- 3. 決済代行のテスト決済（PAY.JP のテストキー）は売上・取り分・精算に含めない ----
+  const [sc, sd] = [await store("テスト決済確認C"), await store("精算済み確認D")];
+  const testDocs: [string, Record<string, unknown>][] = [];
+  const base = (storeId: string, i: number, paidAt: Date) => ({
+    storeId,
+    amount: 100,
+    storeShare: 30,
+    operatorShare: 70,
+    paymentFee: 4,
+    paymentStatus: "SUCCEEDED",
+    paymentProvider: "payjp",
+    fortuneStatus: "COMPLETED",
+    fortuneType: "ZODIAC",
+    providerPaymentId: `kind-${i}`,
+    paidAt,
+  });
+  for (const [storeId, ym2] of [
+    [sc.id, ym],
+    [sc.id, lastYm],
+    [sd.id, lastYm],
+  ] as const) {
+    const paidAt = at(ym2, 5);
+    const i = testDocs.length;
+    // 本番環境の決済（数える）
+    testDocs.push([`kind-live-${i}`, { ...base(storeId, i, paidAt), livemode: true, ...salesKeys(storeId, "payjp", "SUCCEEDED", paidAt, true) }]);
+    // 今回の修正後に記録されるテスト決済（countable=false で保存される）
+    testDocs.push([`kind-test-${i}`, { ...base(storeId, i + 1, paidAt), livemode: false, ...salesKeys(storeId, "payjp", "SUCCEEDED", paidAt, false) }]);
+    // 修正前に記録されたテスト決済（以前の判定で countable=true のまま保存されている）
+    testDocs.push([`kind-legacy-test-${i}`, { ...base(storeId, i + 2, paidAt), livemode: false, ...salesKeys(storeId, "payjp", "SUCCEEDED", paidAt, true) }]);
+    // livemode が記録されていない（本番の決済と判定できない）
+    testDocs.push([`kind-unknown-${i}`, { ...base(storeId, i + 3, paidAt), ...salesKeys(storeId, "payjp", "SUCCEEDED", paidAt, true) }]);
+  }
+  // 店舗Dの先月分は、テスト決済を含んだ金額で「支払済」になっている精算（自動では変更しない）
+  const paidSettlement = { storeId: sd.id, yearMonth: lastYm, transactionCount: 4, grossSales: 400, storeShare: 120, status: "PAID", paidAt: new Date(), note: "", createdAt: new Date(), updatedAt: new Date() };
+  const b2 = fsdb().batch();
+  for (const [id, doc] of testDocs) b2.set(fsdb().collection(C.transactions).doc(id), doc);
+  b2.set(fsdb().collection(C.settlements).doc(`${sd.id}_${lastYm}`), paidSettlement);
+  await b2.commit();
+
+  const one = { count: 1, gross: 100, storeShare: 30, operatorShare: 70, fee: 4 };
+  assert.deepEqual(await monthTotals(ym, sc.id), one, "今月・店舗C: テスト決済・判定不可を数えている");
+  assert.deepEqual(await monthTotals(lastYm, sc.id), one);
+  assert.deepEqual(await totalsForRange(null, sc.id), { count: 2, gross: 200, storeShare: 60, operatorShare: 140, fee: 8 });
+  assert.deepEqual(await totalsBetween(at(ym, 5, 0), at(ym, 6, 0), sc.id), one);
+  assert.equal((await dailySeries(ym, sc.id))[4].count, 1);
+  const scRow = (await listStores({ range: jstMonthRange(ym), sort: "count", dir: "desc", page: 1, perPage: 50 })).rows.find((r) => r.id === sc.id)!;
+  assert.deepEqual([scRow.count, scRow.storeShare], [1, 30]);
+  ok("テスト決済（新旧の記録とも）・livemode が無い決済は、売上・店舗取り分・日別・店舗一覧に数えない");
+
+  // 店舗の売上画面には本番の決済だけ、運営の決済履歴にはテスト決済も種類つきで表示
+  const storeList = await listTransactions({ storeId: sc.id, yearMonth: ym, page: 1, perPage: 50, audience: "store" });
+  assert.deepEqual(storeList.rows.map((r) => r.kind), ["live"]);
+  const opList = await listTransactions({ storeId: sc.id, yearMonth: ym, page: 1, perPage: 50, audience: "operator" });
+  assert.deepEqual(opList.rows.map((r) => r.kind).sort(), ["live", "test", "test", "unknown"]);
+  ok("店舗の売上画面はテスト決済を表示しない。運営の決済履歴はテスト決済・判定不可も種類つきで確認できる");
+
+  // 月次精算：先月分を作成 → 店舗Cは本番の決済1件だけ。支払済の店舗Dは変更しない
+  await generateSettlements(lastYm, SYSTEM);
+  const sets = (await listSettlements({ yearMonth: lastYm })).map((x) => x.s);
+  const setC = sets.find((x) => x.storeId === sc.id)!;
+  assert.deepEqual([setC.transactionCount, setC.grossSales, setC.storeShare, setC.status], [1, 100, 30, "UNPAID"]);
+  const setD = sets.find((x) => x.storeId === sd.id)!;
+  assert.deepEqual([setD.transactionCount, setD.grossSales, setD.storeShare, setD.status], [4, 400, 120, "PAID"]);
+  ok("月次精算はテスト決済を含めない（店舗C=1件30円）。支払済の精算は自動で書き換えない（店舗D）");
 }
 
 main().then(

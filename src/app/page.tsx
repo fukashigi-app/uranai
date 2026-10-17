@@ -1,16 +1,24 @@
 import Link from "next/link";
-import { PublicShell } from "@/components/public/public-shell";
+import { PublicShell, ServicePausedNotice } from "@/components/public/public-shell";
 import { Hero } from "@/components/public/hero";
 import { FortuneIcon } from "@/components/public/fortune-icons";
 import { FortuneSelector } from "@/components/public/fortune-selector";
 import { FORTUNE_CATALOG, FORTUNE_ORDER } from "@/lib/fortune/catalog";
-import { resolveVisitorStore } from "@/lib/services/test-store";
-import { isTestPaymentEnabled } from "@/lib/env";
+import { resolveVisitorStore, testModeState } from "@/lib/services/test-store";
 
 // QR Cookie・テストモードで表示が変わるため毎回サーバーで描画
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
+  const testMode = await testModeState();
+  if (testMode === "halted") {
+    return (
+      <PublicShell>
+        <Hero />
+        <ServicePausedNotice />
+      </PublicShell>
+    );
+  }
   // QRで来た店舗、またはテストモード時はテスト店舗。どちらもなければ案内のみ
   const store = await resolveVisitorStore().catch((e) => {
     console.error("[home] store resolve failed", (e as Error).message);
@@ -26,7 +34,7 @@ export default async function HomePage() {
           占いを選ぶ
           <span className="hairline flex-1" />
         </h2>
-        <FortuneSelector testMode={isTestPaymentEnabled()} />
+        <FortuneSelector testMode={testMode === "on"} />
       </PublicShell>
     );
   }

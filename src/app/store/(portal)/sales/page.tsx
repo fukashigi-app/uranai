@@ -20,7 +20,7 @@ export default async function StoreSalesPage(props: PageProps<"/store/sales">) {
   const [totals, monthly, txs, allTime] = await Promise.all([
     monthTotals(ym, store.id),
     monthlySeries(12, store.id),
-    listTransactions({ storeId: store.id, yearMonth: ym, page, perPage }),
+    listTransactions({ storeId: store.id, yearMonth: ym, page, perPage, audience: "store" }),
     totalsForRange(null, store.id),
   ]);
 

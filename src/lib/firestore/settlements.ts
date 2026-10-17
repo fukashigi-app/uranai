@@ -6,6 +6,7 @@ import type { SettlementStatus } from "@/lib/services/settlements";
 import { C, fsdb, mustDate, toDate } from "./admin";
 import { writeAudit, type AuditEntry } from "./audit";
 import { getStoresByIds } from "./stores";
+import { isSettlementPayment } from "@/lib/payments/kind";
 
 /**
  * 月次精算（Firestore 版）。売上の計算元ではなく「振込状況（未払い／処理中／支払済）」の管理用。
@@ -37,11 +38,12 @@ export async function generateSettlements(yearMonth: string, actor: Actor): Prom
   if (!isValidYearMonth(yearMonth)) throw new Error("invalid yearMonth");
   if (yearMonth >= jstYearMonth()) throw new Error("当月以降の精算は作成できません（月末締め後に作成してください）");
 
-  // その月の売上（決済成功・返金除外）を店舗ごとに合計。テスト用の疑似決済は振込対象にしない
+  // その月の売上（決済成功・返金除外）を店舗ごとに合計。
+  // 振込対象は本番環境の決済だけ（疑似決済・決済代行のテスト決済・livemode が記録されていない決済は含めない）
   const snap = await fsdb().collection(C.transactions).where("cYm", "==", yearMonth).get();
   const agg = new Map<string, { cnt: number; gross: number; share: number }>();
   for (const d of snap.docs) {
-    if (d.get("paymentProvider") === "mock") continue;
+    if (!isSettlementPayment(String(d.get("paymentProvider")), d.get("livemode"))) continue;
     const sid = String(d.get("storeId"));
     const a = agg.get(sid) ?? { cnt: 0, gross: 0, share: 0 };
     a.cnt += 1;

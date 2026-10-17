@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { guardPost, jsonError, jsonOk, readJson } from "@/lib/api";
+import { isPaidFlowBlocked } from "@/lib/env";
 import { getAccessToken, getQrStoreCode, setAccessCookie } from "@/lib/cookies";
 import { getFortuneSession } from "@/lib/services/fortune";
 import { CheckoutError, createCheckout, getCheckoutByToken } from "@/lib/services/checkout";
@@ -8,6 +9,8 @@ const bodySchema = z.object({ fortuneType: z.enum(["BIRTHDAY", "ZODIAC", "BLOOD"
 
 /** 決済セッション作成。金額・店舗はサーバー側で決定する（body に金額や storeId は受け付けない） */
 export async function POST(req: Request) {
+  // 本番で危険な設定（ENABLE_TEST_PAYMENT=true・PAYMENT_PROVIDER=mock）のままのときは、実際の課金へ切り替えずに受付を停止する（安全側）
+  if (isPaidFlowBlocked()) return jsonError(503, "service_paused", "ただいま占いの受付を一時停止しています。しばらくしてからお試しください。");
   const blocked = await guardPost(req, "checkout", 20, 60);
   if (blocked) return blocked;
   let body;

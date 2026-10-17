@@ -54,8 +54,10 @@ export function env(): Env {
     throw new Error(`Invalid environment variables: ${msg}`);
   }
   const e = parsed.data;
-  const testEnabled = e.ENABLE_TEST_PAYMENT === "true";
-  const mockAllowed = e.NODE_ENV !== "production" || e.ALLOW_MOCK_PAYMENTS_IN_PRODUCTION === "true";
+  const testEnabled = isTestPaymentEnabled();
+  // 疑似決済は Vercel の本番では常に無効（ALLOW_MOCK_PAYMENTS_IN_PRODUCTION も無視）。
+  // 本番の決済へ自動で切り替えることもしない（provider = null → 「お支払いを受け付けていません」で停止）
+  const mockAllowed = !isProductionDeployment() && (e.NODE_ENV !== "production" || e.ALLOW_MOCK_PAYMENTS_IN_PRODUCTION === "true");
 
   let provider: Env["PAYMENT_PROVIDER"] = null;
   if (e.PAYMENT_PROVIDER === "mock") {
@@ -79,9 +81,82 @@ export function env(): Env {
 
 export const isProduction = () => process.env.NODE_ENV === "production";
 
-/** テストモード（ENABLE_TEST_PAYMENT=true）か。DB等の設定が無くても判定できるよう process.env を直接見る */
-export function isTestPaymentEnabled(): boolean {
-  return process.env.ENABLE_TEST_PAYMENT === "true";
+type RawProcessEnv = Record<string, string | undefined>;
+
+/**
+ * Vercel の本番環境（Production デプロイ）か。
+ * ローカルの `next start`（自動テスト）や Preview デプロイは本番扱いにしない（開発用の無料テスト機能を維持するため）。
+ */
+export function isProductionDeployment(e: RawProcessEnv = process.env): boolean {
+  return e.VERCEL_ENV === "production";
+}
+
+/** ENABLE_TEST_PAYMENT=true が設定されているか（本番かどうかに関係なく、設定値そのもの） */
+export function isTestPaymentConfigured(e: RawProcessEnv = process.env): boolean {
+  return e.ENABLE_TEST_PAYMENT === "true";
+}
+
+/**
+ * 無料テストモードを提供するか。DB等の設定が無くても判定できるよう process.env を直接見る。
+ * Vercel の本番では ENABLE_TEST_PAYMENT=true でも常に false（運営・店舗アカウントも含め例外なし）。
+ */
+export function isTestPaymentEnabled(e: RawProcessEnv = process.env): boolean {
+  return isTestPaymentConfigured(e) && !isProductionDeployment(e);
+}
+
+/**
+ * 占いの受付（無料テスト・有料の決済とも）を止めるか。
+ * Vercel の本番で ENABLE_TEST_PAYMENT=true または PAYMENT_PROVIDER=mock のままのときは、
+ * テストのつもりの設定で実際の課金へ切り替わらないよう、運営・店舗アカウントを含め誰にも提供しない（安全側で停止）。
+ * 運営・店舗の管理画面は停止しない。
+ */
+export function isPaidFlowBlocked(e: RawProcessEnv = process.env): boolean {
+  return isProductionDeployment(e) && (isTestPaymentConfigured(e) || e.PAYMENT_PROVIDER === "mock");
+}
+
+export type ProductionConfigIssue = {
+  /** error = 本番で使ってはいけない設定（安全のため一部の機能を停止中）。warning = 確認が必要な設定 */
+  level: "error" | "warning";
+  key: string;
+  message: string;
+};
+
+/**
+ * 本番環境の危険な設定・設定漏れ。値そのもの（秘密鍵など）は返さない。本番以外では空。
+ * /api/health と運営ダッシュボードで表示する。
+ */
+export function productionConfigIssues(e: RawProcessEnv = process.env): ProductionConfigIssue[] {
+  if (!isProductionDeployment(e)) return [];
+  const issues: ProductionConfigIssue[] = [];
+  if (isTestPaymentConfigured(e)) {
+    issues.push({
+      level: "error",
+      key: "ENABLE_TEST_PAYMENT",
+      message: "本番で ENABLE_TEST_PAYMENT=true になっています。安全のため、占いの受付（無料テスト・有料の決済とも、運営・店舗アカウントを含む）を停止しています。削除してください。",
+    });
+  }
+  if (e.PAYMENT_PROVIDER === "mock") {
+    issues.push({ level: "error", key: "PAYMENT_PROVIDER", message: "本番で PAYMENT_PROVIDER=mock になっています。疑似決済は本番では使えないため、占いの受付（無料テスト・有料の決済とも）を停止しています。payjp に変更してください。" });
+  }
+  if (e.ALLOW_MOCK_PAYMENTS_IN_PRODUCTION === "true") {
+    issues.push({ level: "error", key: "ALLOW_MOCK_PAYMENTS_IN_PRODUCTION", message: "本番では無視しています（疑似決済は使えません）。削除してください。" });
+  }
+  if (!e.CRON_SECRET) {
+    issues.push({
+      level: "error",
+      key: "CRON_SECRET",
+      message: "CRON_SECRET が未設定です。定期処理（期限切れの処理・占い結果の30日削除など）が認証できず実行されません。",
+    });
+  }
+  const sk = e.PAYJP_SECRET_KEY ?? "";
+  const pk = e.PAYJP_PUBLIC_KEY ?? "";
+  if (sk.startsWith("sk_test_") || pk.startsWith("pk_test_")) {
+    issues.push({ level: "warning", key: "PAYJP_KEYS", message: "PAY.JP のテスト用キーが設定されています。テスト決済は売上・店舗の取り分・月次精算には含めません。公開時は本番用キーにしてください。" });
+  }
+  if ((sk.startsWith("sk_live_") && pk.startsWith("pk_test_")) || (sk.startsWith("sk_test_") && pk.startsWith("pk_live_"))) {
+    issues.push({ level: "warning", key: "PAYJP_KEYS", message: "PAY.JP の公開鍵と秘密鍵で、本番用とテスト用が混在しています。決済が失敗します。" });
+  }
+  return issues;
 }
 
 /** 本番(HTTPS)では Secure Cookie を必須にする */

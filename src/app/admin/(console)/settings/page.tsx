@@ -1,7 +1,7 @@
 import { Card, PageHeader } from "@/components/console/shell";
 import { PasswordForm } from "@/components/console/store-forms";
 import { requireOperator } from "@/lib/auth/session";
-import { env } from "@/lib/env";
+import { env, isPaidFlowBlocked } from "@/lib/env";
 import { DEFAULT_STORE_SHARE_BPS, PRICE_JPY, defaultFeeRateBps } from "@/config/pricing";
 import { siteConfig } from "@/config/site";
 import { changeAdminPasswordAction } from "../../actions";
@@ -11,7 +11,9 @@ export const metadata = { title: "設定" };
 export default async function AdminSettingsPage() {
   const user = await requireOperator();
   const e = env();
-  const mode = e.TEST_PAYMENT_ENABLED
+  const mode = isPaidFlowBlocked()
+    ? "本番で危険な設定（ENABLE_TEST_PAYMENT=true または PAYMENT_PROVIDER=mock）のため、占いの受付を停止中（運営・店舗アカウントも利用不可）"
+    : e.TEST_PAYMENT_ENABLED
     ? "テストモード（ENABLE_TEST_PAYMENT=true・無料で占える・売上には記録しない）"
     : e.PAYMENT_PROVIDER === "mock"
       ? "自動テスト用の疑似決済（PAYMENT_PROVIDER=mock）"

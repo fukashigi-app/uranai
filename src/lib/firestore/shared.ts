@@ -1,4 +1,5 @@
 import "server-only";
+import { isSalesPayment } from "@/lib/payments/kind";
 import { jstDateString, jstYearMonth } from "@/lib/time";
 
 /**
@@ -6,13 +7,14 @@ import { jstDateString, jstYearMonth } from "@/lib/time";
  * Firestore は「1つの等価条件」の検索なら自動インデックスだけで動くため、
  * 集計で使う組み合わせ（年月・店舗・店舗×年月・日付）をあらかじめ1つの値にしておく。
  *
- * countable … 売上に数えるか（決済成功 かつ テスト用の疑似決済ではない）。返金されたら false にする。
- *             PostgreSQL 版と同じく、PAYMENT_PROVIDER=mock を明示した自動テスト環境だけ疑似決済も数える。
+ * countable … 売上に数えるか（決済成功 かつ 本番環境の決済。返金されたら false にする）。
+ *             テスト決済（livemode=false）・疑似決済は数えない（自動テスト環境の疑似決済だけ例外。lib/payments/kind.ts）。
+ * 以前に保存したデータは countable が古い判定のままなので、集計の読み取り時にも isSalesPayment で必ず確認する。
  */
-export function salesKeys(storeId: string, provider: string, paymentStatus: string, paidAt: Date) {
+export function salesKeys(storeId: string, provider: string, paymentStatus: string, paidAt: Date, livemode: unknown) {
   const yearMonth = jstYearMonth(paidAt);
   const paidDate = jstDateString(paidAt);
-  const countable = paymentStatus === "SUCCEEDED" && (provider !== "mock" || process.env.PAYMENT_PROVIDER === "mock");
+  const countable = paymentStatus === "SUCCEEDED" && isSalesPayment(provider, livemode);
   return {
     yearMonth,
     paidDate,
@@ -25,9 +27,9 @@ export function salesKeys(storeId: string, provider: string, paymentStatus: stri
   };
 }
 
-/** 一覧表示でテスト用の疑似決済を除外するか（PostgreSQL 版の realPaymentsOnly と同じ判定） */
-export function isRealPayment(provider: string): boolean {
-  return provider !== "mock" || process.env.PAYMENT_PROVIDER === "mock";
+/** 集計の読み取り時の確認（以前の判定で countable=true になっているテスト決済などを除く） */
+export function isSalesDoc(d: { get(field: string): unknown }): boolean {
+  return isSalesPayment(String(d.get("paymentProvider")), d.get("livemode"));
 }
 
 /** Firestore の「既に存在する」エラー */

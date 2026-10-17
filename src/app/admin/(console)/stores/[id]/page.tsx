@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Card, PageHeader, StatusBadge, Table } from "@/components/console/shell";
+import { PaymentKindBadge } from "@/components/console/payment-kind-badge";
 import { QrPanel } from "@/components/console/qr-panel";
 import { BankForm } from "@/components/console/store-forms";
 import { ActionButton, NewStoreUserForm, StoreAdminProfileForm } from "@/components/console/admin-forms";
@@ -12,7 +13,7 @@ import { qrSvgDataUrl, storeUrl } from "@/lib/services/qr";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
 import { formatDateJa, formatDateTimeJa, formatYearMonthJa } from "@/lib/time";
 import { formatYen } from "@/lib/money";
-import { isTestPaymentEnabled } from "@/lib/env";
+import { isTestPaymentConfigured } from "@/lib/env";
 import { testUsageForStore } from "@/lib/services/test-usage";
 import { TestUsagePanel } from "@/components/console/test-usage-panel";
 import {
@@ -54,7 +55,7 @@ export default async function AdminStoreDetail(props: PageProps<"/admin/stores/[
 
   const [monthly, txs, settlementRows, staff, audits, qr, testUsage] = await Promise.all([
     monthlySeries(12, id),
-    listTransactions({ storeId: id, page: 1, perPage: 15 }),
+    listTransactions({ storeId: id, page: 1, perPage: 15, audience: "operator" }),
     listSettlements({ storeId: id, limit: 24 }),
     listStoreStaff(id),
     listStoreAuditLogs(id, 30),
@@ -132,7 +133,7 @@ export default async function AdminStoreDetail(props: PageProps<"/admin/stores/[
         </div>
       </div>
 
-      <TestUsagePanel usage={testUsage} testModeOn={isTestPaymentEnabled()} className="mt-4" note="QR再発行前の店舗コードでの利用も含みます。" />
+      <TestUsagePanel usage={testUsage} testModeOn={isTestPaymentConfigured()} className="mt-4" note="QR再発行前の店舗コードでの利用も含みます。" />
 
       <div className="mt-4 grid gap-4 xl:grid-cols-2">
         <Card title="月別集計">
@@ -177,6 +178,7 @@ export default async function AdminStoreDetail(props: PageProps<"/admin/stores/[
               <td className="tabular-nums">{formatYen(t.paymentFee)}</td>
               <td>
                 <StatusBadge status={t.paymentStatus} />
+                <PaymentKindBadge kind={t.kind} />
               </td>
               <td>
                 <StatusBadge status={t.fortuneStatus} />

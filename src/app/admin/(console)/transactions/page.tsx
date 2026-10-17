@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { Card, PageHeader, StatusBadge, Table } from "@/components/console/shell";
+import { PaymentKindBadge } from "@/components/console/payment-kind-badge";
 import { MonthPicker } from "@/components/console/month-picker";
 import { Pagination, one, parsePage } from "@/components/console/pagination";
 import { requireOperator } from "@/lib/auth/session";
@@ -21,7 +22,7 @@ export default async function AdminTransactionsPage(props: PageProps<"/admin/tra
   const page = parsePage(sp.page);
   const perPage = 50;
   const [data, totals, storeRow] = await Promise.all([
-    listTransactions({ storeId, yearMonth: ym, page, perPage }),
+    listTransactions({ storeId, yearMonth: ym, page, perPage, audience: "operator" }),
     monthTotals(ym, storeId),
     storeId ? getStoreById(storeId).then((s) => (s ? [{ name: s.name }] : [])) : Promise.resolve([]),
   ]);
@@ -44,7 +45,7 @@ export default async function AdminTransactionsPage(props: PageProps<"/admin/tra
               </Link>
             </>
           ) : (
-            "Webhookで決済成功を確認した取引のみが計上されます。"
+            "Webhookで決済成功を確認した本番環境の決済のみが計上されます。テスト決済・疑似決済は一覧に印を付けて表示し、売上・精算には含めません。"
           )
         }
         actions={<MonthPicker value={ym} makeHref={(v) => q({ ym: v, page: 1 })} />}
@@ -80,7 +81,7 @@ export default async function AdminTransactionsPage(props: PageProps<"/admin/tra
               <td className="tabular-nums">{formatYen(t.paymentFee)}</td>
               <td>
                 <StatusBadge status={t.paymentStatus} />
-                {t.provider === "mock" ? <span className="ml-1 rounded-full border border-violet-400/40 px-1.5 text-[10px] text-violet-300">テスト</span> : null}
+                <PaymentKindBadge kind={t.kind} />
               </td>
               <td>
                 <StatusBadge status={t.fortuneStatus} />

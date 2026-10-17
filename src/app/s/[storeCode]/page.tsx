@@ -1,18 +1,25 @@
 import type { Metadata } from "next";
-import { PublicShell, Notice, RestartButton } from "@/components/public/public-shell";
+import { PublicShell, Notice, RestartButton, ServicePausedNotice } from "@/components/public/public-shell";
 import { Hero } from "@/components/public/hero";
 import { FortuneSelector } from "@/components/public/fortune-selector";
 import { findActiveStoreByCode } from "@/lib/services/checkout";
 import { isPlausibleStoreCode } from "@/lib/security/crypto";
-import { isTestPaymentEnabled } from "@/lib/env";
-import { isTestStoreCode, TEST_STORE, type VisitorStore } from "@/lib/services/test-store";
+import { isTestStoreCode, TEST_STORE, testModeState, type VisitorStore } from "@/lib/services/test-store";
 
 export const metadata: Metadata = { robots: { index: false } };
 
 /** QRコードの着地ページ = 店舗専用トップ（そのまま占いを選べる）。/s/test はテストモード時のテスト店舗 */
 export default async function StoreTopPage(props: PageProps<"/s/[storeCode]">) {
   const { storeCode } = await props.params;
-  const testMode = isTestPaymentEnabled();
+  const state = await testModeState();
+  if (state === "halted") {
+    return (
+      <PublicShell>
+        <ServicePausedNotice />
+      </PublicShell>
+    );
+  }
+  const testMode = state === "on";
 
   let store: VisitorStore | null = null;
   if (isTestStoreCode(storeCode)) {

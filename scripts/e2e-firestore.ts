@@ -62,7 +62,7 @@ async function loggedIn(userId: string) {
 }
 
 /** 過去の決済を作成（集計の期間テスト用。confirmCharge と同じ形式のドキュメント） */
-async function seedTransaction(storeId: string, paidAt: Date, provider = "payjp") {
+async function seedTransaction(storeId: string, paidAt: Date, provider = "payjp", livemode = provider !== "mock") {
   const id = `ch_seed_${randomToken(8)}`;
   await fsdb()
     .collection(C.transactions)
@@ -80,10 +80,10 @@ async function seedTransaction(storeId: string, paidAt: Date, provider = "payjp"
       storeShareBps: 3000,
       paymentStatus: "SUCCEEDED",
       fortuneStatus: "COMPLETED",
-      livemode: false,
+      livemode,
       paidAt,
       refundedAt: null,
-      ...salesKeys(storeId, provider, "SUCCEEDED", paidAt),
+      ...salesKeys(storeId, provider, "SUCCEEDED", paidAt, livemode),
       createdAt: FieldValue.serverTimestamp(),
     });
   return id;

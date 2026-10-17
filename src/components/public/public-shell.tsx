@@ -1,9 +1,9 @@
 import Link from "next/link";
 import { Logo } from "@/components/ui/logo";
-import { isTestPaymentEnabled } from "@/lib/env";
+import { testModeState } from "@/lib/services/test-store";
 import { CookieHint } from "./cookie-hint";
 
-export function PublicShell({
+export async function PublicShell({
   children,
   storeName,
   step,
@@ -16,9 +16,10 @@ export function PublicShell({
   /** 本文をふわっと表示するか（結果画面はレア度演出で表示するため false） */
   fade?: boolean;
 }) {
+  const testMode = await testModeState();
   return (
     <div className="mx-auto flex min-h-dvh w-full max-w-md flex-col px-5 pb-[max(1.5rem,env(safe-area-inset-bottom))] pt-[max(1rem,env(safe-area-inset-top))]">
-      {isTestPaymentEnabled() ? (
+      {testMode === "on" ? (
         <p role="note" className="mb-2 rounded-xl border border-violet-400/40 bg-violet-500/15 px-3 py-1.5 text-center text-[11px] text-violet-300">
           テストモード：現在テストモードのため決済は発生しません
         </p>
@@ -75,6 +76,15 @@ export function Notice({ title, children, action }: { title: string; children?: 
       {children ? <div className="mt-3 text-sm leading-relaxed text-ink-muted">{children}</div> : null}
       {action ? <div className="mt-6">{action}</div> : null}
     </div>
+  );
+}
+
+/** 本番で危険な設定（テストモード等）のまま公開されたときに、一般の利用者へ表示する案内（無料・有料とも受け付けない） */
+export function ServicePausedNotice() {
+  return (
+    <Notice title="ただいま準備中です">
+      <span data-service-paused>現在、占いの受付を一時停止しています。お手数ですが、しばらくしてからもう一度お試しください。</span>
+    </Notice>
   );
 }
 

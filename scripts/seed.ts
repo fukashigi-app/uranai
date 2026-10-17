@@ -76,8 +76,9 @@ async function main() {
         SELECT ${store.id}, ft, 100, 'SUCCEEDED', 'demo', 'seed_' || g, md5('seed' || g || ${store.id}) || md5(g::text), 1, paid_at, paid_at FROM src
         RETURNING id, provider_payment_id, fortune_type, created_at
       )
-      INSERT INTO transactions (checkout_id, payment_provider, provider_payment_id, store_id, fortune_type, amount, store_share, operator_share, payment_fee, store_share_bps, fortune_status, paid_at)
-      SELECT id, 'demo', provider_payment_id, ${store.id}, fortune_type, 100, 30, 70, 4, 3000, 'COMPLETED', created_at FROM co`);
+      INSERT INTO transactions (checkout_id, payment_provider, provider_payment_id, store_id, fortune_type, amount, store_share, operator_share, payment_fee, store_share_bps, fortune_status, livemode, paid_at)
+      SELECT id, 'demo', provider_payment_id, ${store.id}, fortune_type, 100, 30, 70, 4, 3000, 'COMPLETED', true, created_at FROM co`);
+    // ↑ 開発用のデモ履歴。集計画面に表示されるよう本番決済（livemode = true）として作る（本番では実行できない）
     console.log("  demo history: 260 transactions");
   }
 

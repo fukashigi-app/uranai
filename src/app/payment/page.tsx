@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { PublicShell, Notice } from "@/components/public/public-shell";
+import { PublicShell, Notice, ServicePausedNotice } from "@/components/public/public-shell";
+import { isPaidFlowBlocked } from "@/lib/env";
 import { PaymentForm } from "@/components/public/payment-form";
 import { PurchaseSummary } from "@/components/public/purchase-summary";
 import { FortuneIcon } from "@/components/public/fortune-icons";
@@ -10,6 +11,13 @@ import { activeProvider, PaymentUnavailableError } from "@/lib/payments";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
 
 export default async function PaymentPage() {
+  if (isPaidFlowBlocked()) {
+    return (
+      <PublicShell>
+        <ServicePausedNotice />
+      </PublicShell>
+    );
+  }
   const found = await getCheckoutByToken(await getAccessToken());
   if (!found) redirect("/fortune");
   const { checkout, storeName } = found;

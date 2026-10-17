@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
-import { isTestPaymentEnabled } from "@/lib/env";
 import { fortuneTypeFromSlug } from "@/lib/fortune/catalog";
-import { isSameHostRequest, isSecureRequest, newTestSession, resolveVisitorStore, saveTestSession } from "@/lib/services/test-store";
+import { isSameHostRequest, isSecureRequest, isTestModeActive, newTestSession, resolveVisitorStore, saveTestSession } from "@/lib/services/test-store";
 import type { FortuneTypeValue } from "@/lib/db/schema";
 
 const err = (status: number, code: string, message: string) =>
@@ -12,7 +11,7 @@ const err = (status: number, code: string, message: string) =>
  * 決済・売上のテーブルには何も作らない。
  */
 export async function POST(req: Request) {
-  if (!isTestPaymentEnabled()) return err(404, "not_found", "テストモードは現在無効です。");
+  if (!(await isTestModeActive())) return err(404, "not_found", "テストモードは現在無効です。");
   if (!isSameHostRequest(req)) return err(403, "forbidden_origin", "不正なリクエストです。ページを再読み込みしてください。");
 
   let body: { fortuneType?: unknown };

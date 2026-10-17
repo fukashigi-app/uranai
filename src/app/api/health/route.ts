@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { dataProvider } from "@/lib/data-provider";
 import { readOperatorInfo } from "@/config/operator";
+import { isPaidFlowBlocked, isTestPaymentConfigured, productionConfigIssues } from "@/lib/env";
+import { getMaintenanceStatus } from "@/lib/services/maintenance-status";
 
 export const dynamic = "force-dynamic";
 
@@ -14,8 +16,22 @@ export async function GET() {
     SESSION_SECRET: (process.env.SESSION_SECRET?.length ?? 0) >= 32 ? "set" : "missing (32文字以上が必要)",
     DATA_ENCRYPTION_KEY: process.env.DATA_ENCRYPTION_KEY ? "set" : "missing (振込先の登録に必要)",
     APP_URL: process.env.APP_URL ? "set" : "auto (Vercel URL)",
-    paymentMode: process.env.ENABLE_TEST_PAYMENT === "true" ? "test (ENABLE_TEST_PAYMENT=true)" : process.env.PAYJP_SECRET_KEY ? "payjp" : "none (決済未設定)",
+    environment: process.env.VERCEL_ENV ?? "local",
+    paymentMode: isPaidFlowBlocked()
+      ? "paused (本番の危険な設定のため占いの受付を停止中)"
+      : isTestPaymentConfigured()
+        ? "test (ENABLE_TEST_PAYMENT=true)"
+        : process.env.PAYJP_SECRET_KEY
+          ? process.env.PAYJP_SECRET_KEY.startsWith("sk_live_")
+            ? "payjp (live)"
+            : "payjp (test keys: 売上・精算には含めない)"
+          : "none (決済未設定)",
+    CRON_SECRET: process.env.CRON_SECRET ? "set" : "missing (定期処理が実行されません)",
   };
+  // 本番環境の危険な設定・設定漏れ（値は返さない）。error があれば ok=false
+  const prodIssues = productionConfigIssues();
+  const prodErrors = prodIssues.filter((i) => i.level === "error");
+  checks.productionConfig = prodIssues.length ? prodIssues.map((i) => `${i.level}: ${i.key}`).join(", ") : process.env.VERCEL_ENV === "production" ? "ok" : "not production";
   // 特商法表記などの運営者情報（値そのものは返さない。表示の可否に影響しないため ok の判定には含めない）
   const operator = readOperatorInfo().issues;
   const opErrors = operator.filter((i) => i.level === "error").map((i) => i.key);
@@ -50,6 +66,19 @@ export async function GET() {
     // 秘密情報を含まないよう、エラー文は先頭のみ
     database = `error: ${(e as Error).message.split("\n")[0].slice(0, 160)}`;
   }
-  const ok = database === "ok" && checks.SESSION_SECRET === "set";
+  // 定期処理の最終実行（Firestore のみ記録。時刻と成否だけ）
+  try {
+    const m = await getMaintenanceStatus();
+    checks.maintenance = !m.tracked
+      ? "not tracked (PostgreSQL: Vercel のログで確認)"
+      : m.lastSuccessAt
+        ? `${m.stale ? "stale" : "ok"} (last success ${m.lastSuccessAt.toISOString()}${m.lastStatus === "failure" ? `, last run failed ${m.lastFailureAt?.toISOString() ?? ""}` : ""})`
+        : m.lastStatus === "failure"
+          ? `failing (last failure ${m.lastFailureAt?.toISOString() ?? ""})`
+          : "never run";
+  } catch {
+    checks.maintenance = "unknown";
+  }
+  const ok = database === "ok" && checks.SESSION_SECRET === "set" && prodErrors.length === 0;
   return NextResponse.json({ ok, database, ...checks }, { status: ok ? 200 : 503, headers: { "Cache-Control": "no-store" } });
 }

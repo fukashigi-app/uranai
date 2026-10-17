@@ -3,7 +3,7 @@ import { cookies } from "next/headers";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { FortuneTypeValue } from "@/lib/db/schema";
 import type { FortuneInput } from "@/lib/fortune/engine";
-import { isTestPaymentEnabled } from "@/lib/env";
+import { isPaidFlowBlocked, isTestPaymentEnabled } from "@/lib/env";
 import { hasDatabase, isFirestore } from "@/lib/data-provider";
 import { getQrStoreCode } from "@/lib/cookies";
 import { purchaseSeedFor } from "@/lib/fortune/seed";
@@ -17,6 +17,7 @@ import { purchaseSeedFor } from "@/lib/fortune/seed";
  * - 利用状況は test_fortune_logs（テスト専用テーブル）にだけ記録（DBが無くても動作は止めない）
  * - 状態は署名付きの HttpOnly Cookie に保存するため、DB未接続でも動き、再読み込みしても続きから再開できる
  * - ENABLE_TEST_PAYMENT を false にすると、テスト用の入口・Cookie はすべて無効になる
+ * - Vercel の本番では、ENABLE_TEST_PAYMENT=true でも誰にも提供せず、占いの受付を停止する（testModeState）
  */
 
 /** 開発用テスト店舗（/s/test）。DBには登録しない仮想店舗 */
@@ -79,9 +80,28 @@ function decode(raw: string | undefined): TestSession | null {
   }
 }
 
-/** 有効なテストセッション（テストモード OFF のときは常に null） */
+/**
+ * 無料テストモードと占いの受付の状態（利用者・ログイン状態に関係なく、設定だけで決まる）。
+ *  off    … テストモードではない（通常の有料フロー）
+ *  on     … 開発・Preview・ローカルのテストモード（誰でも無料で体験できる）
+ *  halted … Vercel の本番で危険な設定（ENABLE_TEST_PAYMENT=true・PAYMENT_PROVIDER=mock）が残っている。
+ *           運営・店舗アカウントを含め、無料テストも有料の決済も提供しない（安全側で停止。本番の決済へ自動で切り替えない）
+ */
+export type TestModeState = "off" | "on" | "halted";
+
+export async function testModeState(): Promise<TestModeState> {
+  if (isPaidFlowBlocked()) return "halted";
+  return isTestPaymentEnabled() ? "on" : "off";
+}
+
+/** 無料テストを利用できるか */
+export async function isTestModeActive(): Promise<boolean> {
+  return (await testModeState()) === "on";
+}
+
+/** 有効なテストセッション（テストモードを利用できないときは常に null） */
 export async function getTestSession(): Promise<TestSession | null> {
-  if (!isTestPaymentEnabled()) return null;
+  if (!(await isTestModeActive())) return null;
   return decode((await cookies()).get(COOKIE)?.value);
 }
 
@@ -134,7 +154,7 @@ export type VisitorStore = { storeCode: string; name: string; status: "ACTIVE" |
  */
 export async function resolveVisitorStore(): Promise<VisitorStore | null> {
   const code = await getQrStoreCode();
-  const test = isTestPaymentEnabled();
+  const test = await isTestModeActive();
   if (!code || isTestStoreCode(code)) return test ? TEST_STORE : null;
   const { findActiveStoreByCode } = await import("./checkout");
   try {

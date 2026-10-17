@@ -14,6 +14,7 @@ import { randomToken, sha256Hex } from "@/lib/security/crypto";
 import { CheckoutError, PAID_FLOW_BLOCKED_STORE_CODES, providerOrThrow } from "@/lib/errors";
 import { C, fsdb, mustDate, safeId, toDate } from "./admin";
 import { isAlreadyExists, salesKeys } from "./shared";
+import { isSalesPayment } from "@/lib/payments/kind";
 import { findStoreByCode } from "./stores";
 
 /**
@@ -251,7 +252,7 @@ export async function confirmCharge(providerId: ProviderId, chargeId: string): P
         livemode: charge.livemode,
         paidAt,
         refundedAt: null,
-        ...salesKeys(co.storeId, providerId, "SUCCEEDED", paidAt),
+        ...salesKeys(co.storeId, providerId, "SUCCEEDED", paidAt, charge.livemode),
         createdAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp(),
       });
@@ -266,8 +267,9 @@ export async function confirmCharge(providerId: ProviderId, chargeId: string): P
         createdAt: FieldValue.serverTimestamp(),
       });
       tx.update(checkoutRef(co.id), { status: "SUCCEEDED", providerPaymentId: charge.id, providerPaymentKey: txRef.id, failureCode: null, updatedAt: FieldValue.serverTimestamp() });
+      // 最終利用日はテスト決済では更新しない（売上に数える決済だけ）
       const lastUsed = toDate(st.get("lastUsedAt"));
-      if (!lastUsed || lastUsed < paidAt) tx.update(stRef, { lastUsedAt: paidAt });
+      if (isSalesPayment(providerId, charge.livemode) && (!lastUsed || lastUsed < paidAt)) tx.update(stRef, { lastUsedAt: paidAt });
       return { status: "confirmed", transactionId: txRef.id } as const;
     });
   } catch (e) {
@@ -297,7 +299,7 @@ export async function markRefunded(providerId: ProviderId, chargeId: string): Pr
     tx.update(txRef, {
       paymentStatus: "REFUNDED",
       refundedAt: new Date(),
-      ...salesKeys(String(t.get("storeId")), providerId, "REFUNDED", mustDate(t.get("paidAt"))),
+      ...salesKeys(String(t.get("storeId")), providerId, "REFUNDED", mustDate(t.get("paidAt")), t.get("livemode")),
       updatedAt: FieldValue.serverTimestamp(),
     });
     if (s.exists && s.get("status") === "PAID") tx.update(sessionRef, { status: "EXPIRED" });

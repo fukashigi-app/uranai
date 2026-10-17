@@ -3,7 +3,8 @@ import type { Query } from "firebase-admin/firestore";
 import type { Range, StoreListRow, StoreSort, Totals } from "@/lib/services/reports";
 import { jstDateString, jstMonthRange, jstYearMonth, shiftYearMonth } from "@/lib/time";
 import { C, fsdb, mustDate } from "./admin";
-import { isRealPayment } from "./shared";
+import { isSalesDoc } from "./shared";
+import { paymentKind } from "@/lib/payments/kind";
 import { listAllStores } from "./stores";
 
 /**
@@ -16,7 +17,8 @@ import { listAllStores } from "./stores";
  *
  * 合計は Firestore の集計クエリ（count / sum）を使わず、通常の読み取り＋サーバー側の足し算で計算する。
  * 本番環境で集計クエリが失敗し管理画面が表示できなかったため（読み取りは /admin/settlements と同じ方式）。
- * 読むのは金額の4項目だけ（select）。
+ * 読むのは金額の4項目と、売上に数える決済かの判定に使う2項目だけ（select）。
+ * テスト決済（livemode=false）・判定不可の決済は、保存済みの countable に関係なく読み取り時に除外する（isSalesDoc）。
  */
 
 const tx = () => fsdb().collection(C.transactions);
@@ -25,9 +27,10 @@ const ZERO: Totals = { count: 0, gross: 0, storeShare: 0, operatorShare: 0, fee:
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 
 async function aggregate(q: Query): Promise<Totals> {
-  const snap = await q.select("amount", "storeShare", "operatorShare", "paymentFee").get();
+  const snap = await q.select("amount", "storeShare", "operatorShare", "paymentFee", "paymentProvider", "livemode").get();
   const total: Totals = { ...ZERO };
   for (const d of snap.docs) {
+    if (!isSalesDoc(d)) continue; // 以前の判定で countable になっているテスト決済などを除く
     total.count += 1;
     total.gross += num(d.get("amount"));
     total.storeShare += num(d.get("storeShare"));
@@ -66,7 +69,7 @@ export async function totalsBetween(start: Date, end: Date, storeId?: string): P
     const q = await tx().where("cDate", "==", day).get();
     for (const d of q.docs) {
       const paidAt = mustDate(d.get("paidAt"));
-      if (paidAt < start || paidAt >= end || (storeId && d.get("storeId") !== storeId)) continue;
+      if (paidAt < start || paidAt >= end || (storeId && d.get("storeId") !== storeId) || !isSalesDoc(d)) continue;
       total.count += 1;
       total.gross += Number(d.get("amount"));
       total.storeShare += Number(d.get("storeShare"));
@@ -86,8 +89,9 @@ export async function dailySeries(yearMonth: string, storeId?: string): Promise<
   const { start, end } = jstMonthRange(yearMonth);
   const days = Math.round((end.getTime() - start.getTime()) / 86_400_000);
   const out = Array.from({ length: days }, (_, i) => ({ day: i + 1, count: 0, gross: 0 }));
-  const snap = await monthQuery(yearMonth, storeId).select("paidDate", "amount").get();
+  const snap = await monthQuery(yearMonth, storeId).select("paidDate", "amount", "paymentProvider", "livemode").get();
   for (const d of snap.docs) {
+    if (!isSalesDoc(d)) continue;
     const day = Number(String(d.get("paidDate")).slice(8, 10));
     if (day >= 1 && day <= days) {
       out[day - 1].count += 1;
@@ -177,14 +181,19 @@ export async function listStores(opts: {
   };
 }
 
-export async function listTransactions(opts: { storeId?: string; yearMonth?: string; page: number; perPage: number }) {
+/**
+ * 決済の一覧。
+ *  audience = "store"    … 店舗の売上画面。売上に数える決済だけ（テスト決済・疑似決済・判定不可は表示しない）
+ *  audience = "operator" … 運営画面。テスト決済なども含めてすべて表示し、種類（kind）を返す
+ */
+export async function listTransactions(opts: { storeId?: string; yearMonth?: string; page: number; perPage: number; audience: "store" | "operator" }) {
   let q: Query = tx();
   if (opts.storeId && opts.yearMonth) q = tx().where("storeYm", "==", `${opts.storeId}_${opts.yearMonth}`);
   else if (opts.yearMonth) q = tx().where("yearMonth", "==", opts.yearMonth);
   else if (opts.storeId) q = tx().where("storeId", "==", opts.storeId);
   const snap = await q.get();
   const docs = snap.docs
-    .filter((d) => isRealPayment(String(d.get("paymentProvider"))))
+    .filter((d) => opts.audience === "operator" || isSalesDoc(d))
     .map((d) => ({ d, paidAt: mustDate(d.get("paidAt")) }))
     .sort((a, b) => b.paidAt.getTime() - a.paidAt.getTime() || a.d.id.localeCompare(b.d.id));
   const pageDocs = docs.slice((opts.page - 1) * opts.perPage, opts.page * opts.perPage);
@@ -207,6 +216,7 @@ export async function listTransactions(opts: { storeId?: string; yearMonth?: str
       paymentStatus: String(d.get("paymentStatus")),
       fortuneStatus: String(d.get("fortuneStatus")),
       provider: String(d.get("paymentProvider")),
+      kind: paymentKind(String(d.get("paymentProvider")), d.get("livemode")),
       providerPaymentId: String(d.get("providerPaymentId")),
       storeName: names.get(String(d.get("storeId"))) ?? "",
       storeId: String(d.get("storeId")),

@@ -19,7 +19,8 @@
     "e2e:setup": "tsx --conditions=react-server scripts/e2e-setup.ts",
     "e2e:admin": "tsx --conditions=react-server scripts/e2e-admin-empty.ts",
     "e2e:store": "tsx --conditions=react-server scripts/e2e-store-security.ts",
-    "emulator": "npx -y firebase-tools@15 emulators:start --only firestore --project demo-uranai"
+    "emulator": "npx -y firebase-tools@15 emulators:start --only firestore --project demo-uranai",
+    "check:payments": "tsx --conditions=react-server scripts/check-payment-kinds.ts"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.3",
