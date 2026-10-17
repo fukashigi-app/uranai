@@ -1,6 +1,7 @@
 import "server-only";
 import { cert, getApps, initializeApp, type App } from "firebase-admin/app";
 import { getFirestore, Timestamp, type Firestore } from "firebase-admin/firestore";
+import { assertFirestoreTarget } from "./target-guard";
 
 /**
  * Firebase Admin SDK（サーバー専用）。秘密鍵は環境変数からのみ読み込み、コードやリポジトリには置かない。
@@ -22,6 +23,8 @@ export function normalizePrivateKey(raw: string): string {
 }
 
 function initApp(): App {
+  // Preview から本番の Firebase プロジェクトに接続させない（判定できない場合も接続しない）
+  assertFirestoreTarget();
   const existing = getApps().find((a) => a.name === "uranai");
   if (existing) return existing;
   const projectId = process.env.FIREBASE_PROJECT_ID || process.env.GCLOUD_PROJECT || "demo-uranai";
@@ -37,6 +40,7 @@ function initApp(): App {
 }
 
 export function fsdb(): Firestore {
+  assertFirestoreTarget(); // 環境変数だけの判定なので毎回確認する（接続済みでも安全側に止める）
   if (globalForFs.__uranaiFs) return globalForFs.__uranaiFs;
   const app = globalForFs.__uranaiFsApp ?? initApp();
   globalForFs.__uranaiFsApp = app;

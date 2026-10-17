@@ -80,10 +80,14 @@ export function Notice({ title, children, action }: { title: string; children?: 
 }
 
 /** 本番で危険な設定（テストモード等）のまま公開されたときに、一般の利用者へ表示する案内（無料・有料とも受け付けない） */
-export function ServicePausedNotice() {
+export function ServicePausedNotice({ reason = "halted" }: { reason?: "halted" | "coming_soon" }) {
   return (
     <Notice title="ただいま準備中です">
-      <span data-service-paused>現在、占いの受付を一時停止しています。お手数ですが、しばらくしてからもう一度お試しください。</span>
+      {reason === "coming_soon" ? (
+        <span data-service-paused="coming_soon">公開に向けて準備を進めています。公開まで今しばらくお待ちください。</span>
+      ) : (
+        <span data-service-paused="halted">現在、占いの受付を一時停止しています。お手数ですが、しばらくしてからもう一度お試しください。</span>
+      )}
     </Notice>
   );
 }

@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { dataProvider } from "@/lib/data-provider";
 import { readOperatorInfo } from "@/config/operator";
-import { isPaidFlowBlocked, isTestPaymentConfigured, productionConfigIssues } from "@/lib/env";
+import { isPaidFlowBlocked, isTestPaymentConfigured, productionConfigIssues, siteStatus } from "@/lib/env";
+import { checkFirestoreTarget } from "@/lib/firestore/target-guard";
 import { getMaintenanceStatus } from "@/lib/services/maintenance-status";
 
 export const dynamic = "force-dynamic";
@@ -17,9 +18,12 @@ export async function GET() {
     DATA_ENCRYPTION_KEY: process.env.DATA_ENCRYPTION_KEY ? "set" : "missing (振込先の登録に必要)",
     APP_URL: process.env.APP_URL ? "set" : "auto (Vercel URL)",
     environment: process.env.VERCEL_ENV ?? "local",
+    siteStatus: siteStatus().status + (siteStatus().unknown ? " (SITE_STATUS が不明な値のため準備中として扱っています)" : ""),
     paymentMode: isPaidFlowBlocked()
       ? "paused (本番の危険な設定のため占いの受付を停止中)"
-      : isTestPaymentConfigured()
+      : siteStatus().status === "coming_soon"
+        ? "coming_soon (準備中：無料テスト・決済とも受け付けていません)"
+        : isTestPaymentConfigured()
         ? "test (ENABLE_TEST_PAYMENT=true)"
         : process.env.PAYJP_SECRET_KEY
           ? process.env.PAYJP_SECRET_KEY.startsWith("sk_live_")
@@ -38,6 +42,9 @@ export async function GET() {
   checks.operatorInfo = opErrors.length ? `error: 仮の値または不正な値を無視しています (${opErrors.join(", ")})` : "ok";
   checks.operatorDisclosure = operator.some((i) => i.key === "disclosure") ? "on-request (氏名・住所・電話番号は請求時開示の表示。法令上の条件は要確認)" : "listed";
   if (provider === "firestore") {
+    const target = checkFirestoreTarget();
+    checks.firestoreTarget = target.ok ? "ok" : `blocked (${target.reason})`;
+    checks.PRODUCTION_FIREBASE_PROJECT_ID = process.env.PRODUCTION_FIREBASE_PROJECT_ID ? "set" : "missing";
     checks.FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID ? "set" : "missing";
     checks.FIREBASE_CLIENT_EMAIL = process.env.FIREBASE_CLIENT_EMAIL ? "set" : "missing";
     checks.FIREBASE_PRIVATE_KEY = !process.env.FIREBASE_PRIVATE_KEY

@@ -1,14 +1,17 @@
 import Link from "next/link";
 import { PublicShell, Notice, ServicePausedNotice } from "@/components/public/public-shell";
 import { FortuneSelector } from "@/components/public/fortune-selector";
-import { resolveVisitorStore, testModeState } from "@/lib/services/test-store";
+import { isServiceStopped, resolveVisitorStore, testModeState } from "@/lib/services/test-store";
+
+// QR Cookie・公開状態（準備中など）で表示が変わるため毎回サーバーで描画（ビルド時の状態で固定しない）
+export const dynamic = "force-dynamic";
 
 export default async function FortuneSelectPage() {
   const testMode = await testModeState();
-  if (testMode === "halted") {
+  if (isServiceStopped(testMode)) {
     return (
       <PublicShell>
-        <ServicePausedNotice />
+        <ServicePausedNotice reason={testMode} />
       </PublicShell>
     );
   }

@@ -4,18 +4,18 @@ import { Hero } from "@/components/public/hero";
 import { FortuneIcon } from "@/components/public/fortune-icons";
 import { FortuneSelector } from "@/components/public/fortune-selector";
 import { FORTUNE_CATALOG, FORTUNE_ORDER } from "@/lib/fortune/catalog";
-import { resolveVisitorStore, testModeState } from "@/lib/services/test-store";
+import { isServiceStopped, resolveVisitorStore, testModeState } from "@/lib/services/test-store";
 
 // QR Cookie・テストモードで表示が変わるため毎回サーバーで描画
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
   const testMode = await testModeState();
-  if (testMode === "halted") {
+  if (isServiceStopped(testMode)) {
     return (
       <PublicShell>
         <Hero />
-        <ServicePausedNotice />
+        <ServicePausedNotice reason={testMode} />
       </PublicShell>
     );
   }

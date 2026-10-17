@@ -38,13 +38,6 @@ export type Env = Omit<RawEnv, "APP_URL" | "PAYMENT_PROVIDER" | "MOCK_WEBHOOK_SE
 
 let cached: Env | null = null;
 
-/** Vercel では APP_URL 未設定でも本番ドメインを自動で使う */
-function resolveAppUrl(raw: RawEnv): string {
-  if (raw.APP_URL) return raw.APP_URL.replace(/\/$/, "");
-  const vercel = process.env.VERCEL_PROJECT_PRODUCTION_URL ?? process.env.VERCEL_URL;
-  if (vercel) return `https://${vercel}`;
-  return "http://localhost:3000";
-}
 
 export function env(): Env {
   if (cached) return cached;
@@ -70,7 +63,7 @@ export function env(): Env {
 
   cached = {
     ...e,
-    APP_URL: resolveAppUrl(e),
+    APP_URL: appUrlFromEnv(process.env),
     PAYMENT_PROVIDER: provider,
     TEST_PAYMENT_ENABLED: testEnabled,
     // 未指定ならセッション秘密鍵から派生（テスト決済の署名用。本番決済には使われない）
@@ -114,6 +107,63 @@ export function isPaidFlowBlocked(e: RawProcessEnv = process.env): boolean {
   return isProductionDeployment(e) && (isTestPaymentConfigured(e) || e.PAYMENT_PROVIDER === "mock");
 }
 
+/**
+ * サイトの公開状態（SITE_STATUS）。
+ *  open        … 通常どおり（未設定もこれ）
+ *  coming_soon … 準備中。無料テスト・有料の決済とも受け付けない（運営・店舗の管理画面は使える）
+ * それ以外の値（打ち間違いなど）は、意図せず公開してしまわないよう準備中として扱う（unknown=true）。
+ */
+export type SiteStatus = "open" | "coming_soon";
+
+export function siteStatus(e: RawProcessEnv = process.env): { status: SiteStatus; unknown: boolean } {
+  const v = (e.SITE_STATUS ?? "").trim().toLowerCase();
+  if (v === "" || v === "open") return { status: "open", unknown: false };
+  if (v === "coming_soon") return { status: "coming_soon", unknown: false };
+  return { status: "coming_soon", unknown: true };
+}
+
+/**
+ * 一般向けの占いの受付（無料テスト・有料の決済）を止める理由。止めないときは null。
+ *  dangerous_config … 本番の危険な設定（ENABLE_TEST_PAYMENT=true・PAYMENT_PROVIDER=mock）。設定の誤りとして警告する
+ *  coming_soon      … 準備中モード（SITE_STATUS=coming_soon）。正常な運用状態
+ */
+export function serviceStopReason(e: RawProcessEnv = process.env): "dangerous_config" | "coming_soon" | null {
+  if (isPaidFlowBlocked(e)) return "dangerous_config";
+  if (siteStatus(e).status === "coming_soon") return "coming_soon";
+  return null;
+}
+
+/**
+ * 公開URL（QRコード・Origin 確認に使う）。
+ *  - APP_URL があればそれを使う。ただし Preview では、本番のドメインを指している APP_URL は使わない
+ *    （「全環境」に登録した APP_URL のせいで、Preview で発行した QR コードが本番を指さないように）
+ *  - Production: 本番ドメイン（VERCEL_PROJECT_PRODUCTION_URL）→ デプロイURL
+ *  - Preview / Development: ブランチの固定URL（VERCEL_BRANCH_URL）→ デプロイURL。本番ドメインは決して使わない
+ *  - ローカル: http://localhost:3000
+ */
+export function appUrlFromEnv(e: RawProcessEnv = process.env): string {
+  const prodHost = (e.VERCEL_PROJECT_PRODUCTION_URL ?? "").trim().toLowerCase();
+  const nonProdVercel = e.VERCEL_ENV === "preview" || e.VERCEL_ENV === "development";
+  const explicit = e.APP_URL?.trim().replace(/\/$/, "");
+  if (explicit) {
+    let host = "";
+    try {
+      host = new URL(explicit).host.toLowerCase();
+    } catch {
+      host = "";
+    }
+    if (!(nonProdVercel && prodHost && host === prodHost)) return explicit;
+  }
+  const https = (h: string | undefined) => (h && h.trim() ? `https://${h.trim().replace(/^https?:\/\//, "").replace(/\/$/, "")}` : null);
+  if (nonProdVercel) return https(e.VERCEL_BRANCH_URL) ?? https(e.VERCEL_URL) ?? "http://localhost:3000";
+  return https(e.VERCEL_PROJECT_PRODUCTION_URL) ?? https(e.VERCEL_URL) ?? "http://localhost:3000";
+}
+
+/** Vercel の Preview / Development（開発・テスト環境）か */
+export function isNonProductionVercel(e: RawProcessEnv = process.env): boolean {
+  return e.VERCEL_ENV === "preview" || e.VERCEL_ENV === "development";
+}
+
 export type ProductionConfigIssue = {
   /** error = 本番で使ってはいけない設定（安全のため一部の機能を停止中）。warning = 確認が必要な設定 */
   level: "error" | "warning";
@@ -147,6 +197,13 @@ export function productionConfigIssues(e: RawProcessEnv = process.env): Producti
       key: "CRON_SECRET",
       message: "CRON_SECRET が未設定です。定期処理（期限切れの処理・占い結果の30日削除など）が認証できず実行されません。",
     });
+  }
+  if (siteStatus(e).unknown) {
+    issues.push({ level: "warning", key: "SITE_STATUS", message: "SITE_STATUS に open・coming_soon 以外の値が設定されています。安全のため準備中として扱っています。" });
+  }
+  const prodFs = (e.PRODUCTION_FIREBASE_PROJECT_ID ?? "").trim();
+  if (prodFs && e.FIREBASE_PROJECT_ID && e.FIREBASE_PROJECT_ID.trim().toLowerCase() !== prodFs.toLowerCase()) {
+    issues.push({ level: "warning", key: "FIREBASE_PROJECT_ID", message: "本番の Firebase プロジェクトが PRODUCTION_FIREBASE_PROJECT_ID と一致しません。本番以外のプロジェクトに接続していないか確認してください。" });
   }
   const sk = e.PAYJP_SECRET_KEY ?? "";
   const pk = e.PAYJP_PUBLIC_KEY ?? "";

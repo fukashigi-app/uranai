@@ -4,7 +4,7 @@ import { Hero } from "@/components/public/hero";
 import { FortuneSelector } from "@/components/public/fortune-selector";
 import { findActiveStoreByCode } from "@/lib/services/checkout";
 import { isPlausibleStoreCode } from "@/lib/security/crypto";
-import { isTestStoreCode, TEST_STORE, testModeState, type VisitorStore } from "@/lib/services/test-store";
+import { isServiceStopped, isTestStoreCode, TEST_STORE, testModeState, type VisitorStore } from "@/lib/services/test-store";
 
 export const metadata: Metadata = { robots: { index: false } };
 
@@ -12,10 +12,10 @@ export const metadata: Metadata = { robots: { index: false } };
 export default async function StoreTopPage(props: PageProps<"/s/[storeCode]">) {
   const { storeCode } = await props.params;
   const state = await testModeState();
-  if (state === "halted") {
+  if (isServiceStopped(state)) {
     return (
       <PublicShell>
-        <ServicePausedNotice />
+        <ServicePausedNotice reason={state} />
       </PublicShell>
     );
   }

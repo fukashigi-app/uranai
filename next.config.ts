@@ -1,5 +1,6 @@
 import type { NextConfig } from "next";
 import { readOperatorInfo } from "./src/config/operator";
+import { checkFirestoreTarget, FIRESTORE_TARGET_MESSAGE } from "./src/lib/firestore/target-guard";
 
 const isDev = process.env.NODE_ENV !== "production";
 
@@ -36,6 +37,11 @@ const securityHeaders = [
 if (!isDev) {
   for (const issue of readOperatorInfo().issues) {
     if (issue.level === "error") console.warn(`[operator-info] ${issue.message}`);
+  }
+  // Preview から本番の Firebase に接続する設定になっていないか（実行時はデータベースへのアクセスを停止する）
+  if (process.env.DB_PROVIDER === "firestore" || process.env.FIREBASE_PROJECT_ID) {
+    const target = checkFirestoreTarget();
+    if (!target.ok) console.warn(`[firestore-target] ${FIRESTORE_TARGET_MESSAGE[target.reason]}`);
   }
 }
 

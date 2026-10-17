@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { PublicShell, Notice, ServicePausedNotice } from "@/components/public/public-shell";
-import { isPaidFlowBlocked } from "@/lib/env";
+import { serviceStopReason } from "@/lib/env";
 import { PaymentForm } from "@/components/public/payment-form";
 import { PurchaseSummary } from "@/components/public/purchase-summary";
 import { FortuneIcon } from "@/components/public/fortune-icons";
@@ -10,11 +10,15 @@ import { getCheckoutByToken } from "@/lib/services/checkout";
 import { activeProvider, PaymentUnavailableError } from "@/lib/payments";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
 
+// 決済の状態・公開状態（準備中など）で表示が変わるため毎回サーバーで描画（ビルド時の状態で固定しない）
+export const dynamic = "force-dynamic";
+
 export default async function PaymentPage() {
-  if (isPaidFlowBlocked()) {
+  const stop = serviceStopReason();
+  if (stop) {
     return (
       <PublicShell>
-        <ServicePausedNotice />
+        <ServicePausedNotice reason={stop === "coming_soon" ? "coming_soon" : "halted"} />
       </PublicShell>
     );
   }

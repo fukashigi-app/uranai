@@ -3,7 +3,7 @@ import { cookies } from "next/headers";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { FortuneTypeValue } from "@/lib/db/schema";
 import type { FortuneInput } from "@/lib/fortune/engine";
-import { isPaidFlowBlocked, isTestPaymentEnabled } from "@/lib/env";
+import { isTestPaymentEnabled, serviceStopReason } from "@/lib/env";
 import { hasDatabase, isFirestore } from "@/lib/data-provider";
 import { getQrStoreCode } from "@/lib/cookies";
 import { purchaseSeedFor } from "@/lib/fortune/seed";
@@ -82,16 +82,24 @@ function decode(raw: string | undefined): TestSession | null {
 
 /**
  * 無料テストモードと占いの受付の状態（利用者・ログイン状態に関係なく、設定だけで決まる）。
- *  off    … テストモードではない（通常の有料フロー）
- *  on     … 開発・Preview・ローカルのテストモード（誰でも無料で体験できる）
- *  halted … Vercel の本番で危険な設定（ENABLE_TEST_PAYMENT=true・PAYMENT_PROVIDER=mock）が残っている。
- *           運営・店舗アカウントを含め、無料テストも有料の決済も提供しない（安全側で停止。本番の決済へ自動で切り替えない）
+ *  off         … テストモードではない（通常の有料フロー）
+ *  on          … 開発・Preview・ローカルのテストモード（誰でも無料で体験できる）
+ *  halted      … Vercel の本番で危険な設定（ENABLE_TEST_PAYMENT=true・PAYMENT_PROVIDER=mock）が残っている。
+ *                運営・店舗アカウントを含め、無料テストも有料の決済も提供しない（安全側で停止。本番の決済へ自動で切り替えない）
+ *  coming_soon … 準備中モード（SITE_STATUS=coming_soon）。無料テスト・有料の決済とも提供しない（正常な運用状態）
  */
-export type TestModeState = "off" | "on" | "halted";
+export type TestModeState = "off" | "on" | "halted" | "coming_soon";
 
 export async function testModeState(): Promise<TestModeState> {
-  if (isPaidFlowBlocked()) return "halted";
+  const stop = serviceStopReason();
+  if (stop === "dangerous_config") return "halted";
+  if (stop === "coming_soon") return "coming_soon";
   return isTestPaymentEnabled() ? "on" : "off";
+}
+
+/** 一般向けの占いの受付を止めている状態か（危険な設定・準備中） */
+export function isServiceStopped(state: TestModeState): state is "halted" | "coming_soon" {
+  return state === "halted" || state === "coming_soon";
 }
 
 /** 無料テストを利用できるか */

@@ -10,14 +10,22 @@ export function SystemStatusNotice({
   issues,
   maintenance,
   production,
+  comingSoon = false,
   className = "",
 }: {
   issues: ProductionConfigIssue[];
   maintenance: MaintenanceStatus | null;
   /** Vercel の本番か（定期処理が止まっている警告は本番でだけ出す） */
   production: boolean;
+  /** 準備中モード（SITE_STATUS=coming_soon）。正常な運用状態として、警告とは別に案内だけ表示する */
+  comingSoon?: boolean;
   className?: string;
 }) {
+  const comingSoonInfo = comingSoon ? (
+    <p data-coming-soon-notice className="mb-2 rounded-2xl border border-white/15 bg-white/[0.04] px-4 py-2.5 text-[13px] leading-relaxed text-ink-muted">
+      準備中モード（SITE_STATUS=coming_soon）：一般の方には「ただいま準備中です」と表示し、無料テスト・決済とも受け付けていません。公開するときは SITE_STATUS を削除（または open）して再デプロイしてください。
+    </p>
+  ) : null;
   const lines: { level: "error" | "warning"; text: string }[] = issues.map((i) => ({ level: i.level, text: `${i.key}：${i.message}` }));
   if (production && maintenance?.tracked) {
     if (!maintenance.lastSuccessAt) {
@@ -29,9 +37,11 @@ export function SystemStatusNotice({
       lines.push({ level: "warning", text: `前回の定期処理が失敗しました（${maintenance.lastFailureAt ? formatDateTimeJa(maintenance.lastFailureAt) : "日時不明"}・${maintenance.lastErrorCode ?? "原因不明"}）。Vercel のログを確認してください。` });
     }
   }
-  if (!lines.length) return null;
+  if (!lines.length) return comingSoonInfo ? <div className={className}>{comingSoonInfo}</div> : null;
   const hasError = lines.some((l) => l.level === "error");
   return (
+    <>
+    {comingSoonInfo}
     <section
       aria-label="本番環境の設定と定期処理"
       data-system-status-notice
@@ -45,5 +55,6 @@ export function SystemStatusNotice({
       </ul>
       <p className="mt-1.5 text-[12px] opacity-80">設定は Vercel の環境変数で変更します。状態は /api/health でも確認できます。</p>
     </section>
+    </>
   );
 }
