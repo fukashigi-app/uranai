@@ -4,7 +4,7 @@ import { Hero } from "@/components/public/hero";
 import { FortuneIcon } from "@/components/public/fortune-icons";
 import { FortuneSelector } from "@/components/public/fortune-selector";
 import { FORTUNE_CATALOG, FORTUNE_ORDER } from "@/lib/fortune/catalog";
-import { isServiceStopped, resolveVisitorStore, testModeState } from "@/lib/services/test-store";
+import { isFreeFortuneState, isServiceStopped, resolveVisitorStore, testModeState } from "@/lib/services/test-store";
 
 // QR Cookie・テストモードで表示が変わるため毎回サーバーで描画
 export const dynamic = "force-dynamic";
@@ -34,7 +34,7 @@ export default async function HomePage() {
           占いを選ぶ
           <span className="hairline flex-1" />
         </h2>
-        <FortuneSelector testMode={testMode === "on"} />
+        <FortuneSelector testMode={isFreeFortuneState(testMode)} />
       </PublicShell>
     );
   }

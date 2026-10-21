@@ -1,5 +1,6 @@
 import type { ProductionConfigIssue } from "@/lib/env";
 import type { MaintenanceStatus } from "@/lib/services/maintenance-status";
+import { describeProtection, type ProtectionStatus } from "@/lib/services/vercel-protection";
 import { formatDateTimeJa } from "@/lib/time";
 
 /**
@@ -11,6 +12,7 @@ export function SystemStatusNotice({
   maintenance,
   production,
   comingSoon = false,
+  devMode = null,
   className = "",
 }: {
   issues: ProductionConfigIssue[];
@@ -19,8 +21,21 @@ export function SystemStatusNotice({
   production: boolean;
   /** 準備中モード（SITE_STATUS=coming_soon）。正常な運用状態として、警告とは別に案内だけ表示する */
   comingSoon?: boolean;
+  /** 開発モード（SITE_STATUS=development）のとき、Vercel Authentication の確認結果（確認できなければ unknown＝未確認） */
+  devMode?: { protection: ProtectionStatus } | null;
   className?: string;
 }) {
+  const devInfo = devMode ? (
+    <div data-dev-mode-notice className="mb-2 rounded-2xl border border-sky-400/40 bg-sky-500/10 px-4 py-2.5 text-[13px] leading-relaxed text-sky-100">
+      <p className="font-bold">開発モード（SITE_STATUS=development）</p>
+      <p>
+        一般の方・店舗アカウントには「ただいま準備中です」と表示し、決済は誰に対しても受け付けていません。運営アカウントでログイン中の方だけ、テスト店舗（/s/test）で無料の占いを確認できます（料金・売上・取り分は0円。利用は「無料テスト利用件数」にだけ記録）。
+      </p>
+      <p data-protection-state={devMode.protection.state} className={devMode.protection.state === "unprotected" ? "mt-1 font-bold text-danger" : "mt-1"}>
+        Vercel Authentication：{describeProtection(devMode.protection)} — {devMode.protection.detail}
+      </p>
+    </div>
+  ) : null;
   const comingSoonInfo = comingSoon ? (
     <p data-coming-soon-notice className="mb-2 rounded-2xl border border-white/15 bg-white/[0.04] px-4 py-2.5 text-[13px] leading-relaxed text-ink-muted">
       準備中モード（SITE_STATUS=coming_soon）：一般の方には「ただいま準備中です」と表示し、無料テスト・決済とも受け付けていません。公開するときは SITE_STATUS を削除（または open）して再デプロイしてください。
@@ -37,10 +52,11 @@ export function SystemStatusNotice({
       lines.push({ level: "warning", text: `前回の定期処理が失敗しました（${maintenance.lastFailureAt ? formatDateTimeJa(maintenance.lastFailureAt) : "日時不明"}・${maintenance.lastErrorCode ?? "原因不明"}）。Vercel のログを確認してください。` });
     }
   }
-  if (!lines.length) return comingSoonInfo ? <div className={className}>{comingSoonInfo}</div> : null;
+  if (!lines.length) return comingSoonInfo || devInfo ? <div className={className}>{devInfo}{comingSoonInfo}</div> : null;
   const hasError = lines.some((l) => l.level === "error");
   return (
     <>
+    {devInfo}
     {comingSoonInfo}
     <section
       aria-label="本番環境の設定と定期処理"

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Logo } from "@/components/ui/logo";
 import { testModeState } from "@/lib/services/test-store";
+import { describeProtection, getProtectionStatus } from "@/lib/services/vercel-protection";
 import { CookieHint } from "./cookie-hint";
 
 export async function PublicShell({
@@ -17,12 +18,26 @@ export async function PublicShell({
   fade?: boolean;
 }) {
   const testMode = await testModeState();
+  // 開発モードの運営にだけ、Vercel Authentication の状態を表示する（確認できなければ「未確認」。保護されているとは推測しない）
+  const protection = testMode === "dev" ? await getProtectionStatus() : null;
   return (
     <div className="mx-auto flex min-h-dvh w-full max-w-md flex-col px-5 pb-[max(1.5rem,env(safe-area-inset-bottom))] pt-[max(1rem,env(safe-area-inset-top))]">
       {testMode === "on" ? (
         <p role="note" className="mb-2 rounded-xl border border-violet-400/40 bg-violet-500/15 px-3 py-1.5 text-center text-[11px] text-violet-300">
           テストモード：現在テストモードのため決済は発生しません
         </p>
+      ) : null}
+      {testMode === "dev" ? (
+        <div role="note" data-dev-mode-banner className="mb-2 rounded-xl border border-sky-400/40 bg-sky-500/15 px-3 py-2 text-[11px] leading-relaxed text-sky-200">
+          <p className="text-center font-bold">開発モード（運営アカウントのみ）</p>
+          <p className="text-center">決済は発生しません。料金・売上・店舗/運営の取り分は0円です。テスト店舗（/s/test）だけで使えます。</p>
+          {protection ? (
+            <p data-protection-state={protection.state} className={`mt-1 text-center ${protection.state === "unprotected" ? "font-bold text-danger" : "text-sky-100/80"}`}>
+              Vercel Authentication：{describeProtection(protection)}
+              {protection.state === "unprotected" ? "（一般の方もこのサイトを開けます）" : null}
+            </p>
+          ) : null}
+        </div>
       ) : null}
       <CookieHint />
       <header className="flex items-center justify-between py-2">
@@ -79,12 +94,15 @@ export function Notice({ title, children, action }: { title: string; children?: 
   );
 }
 
-/** 本番で危険な設定（テストモード等）のまま公開されたときに、一般の利用者へ表示する案内（無料・有料とも受け付けない） */
-export function ServicePausedNotice({ reason = "halted" }: { reason?: "halted" | "coming_soon" }) {
+/**
+ * 占いの受付を止めているときに、一般の利用者へ表示する案内（無料・有料とも受け付けない）。
+ * 開発モード（development）は、一般の方には準備中と同じ案内を表示する。
+ */
+export function ServicePausedNotice({ reason = "halted" }: { reason?: "halted" | "coming_soon" | "development" }) {
   return (
     <Notice title="ただいま準備中です">
-      {reason === "coming_soon" ? (
-        <span data-service-paused="coming_soon">公開に向けて準備を進めています。公開まで今しばらくお待ちください。</span>
+      {reason === "coming_soon" || reason === "development" ? (
+        <span data-service-paused={reason}>公開に向けて準備を進めています。公開まで今しばらくお待ちください。</span>
       ) : (
         <span data-service-paused="halted">現在、占いの受付を一時停止しています。お手数ですが、しばらくしてからもう一度お試しください。</span>
       )}
@@ -98,5 +116,16 @@ export function RestartButton({ label = "最初からやり直す" }: { label?: 
     <Link href="/" className="btn-gold inline-flex h-12 items-center justify-center rounded-2xl px-6 text-[15px] font-bold">
       {label}
     </Link>
+  );
+}
+
+/** 開発モードで実店舗の QR から来たとき（開発モードの無料占いはテスト店舗だけ） */
+export function DevTestStoreOnlyNotice() {
+  return (
+    <PublicShell>
+      <Notice title="開発モードではテスト店舗だけ使えます" action={<Link href="/s/test" className="btn-gold inline-block rounded-2xl px-6 py-3 font-bold">テスト店舗（/s/test）で試す</Link>}>
+        <span data-dev-test-store-only>実店舗の QR コードでは、開発モードの無料占いは使えません（実店舗の利用件数・売上には記録しません）。</span>
+      </Notice>
+    </PublicShell>
   );
 }

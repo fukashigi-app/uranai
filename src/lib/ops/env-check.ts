@@ -8,6 +8,7 @@
 import { createPrivateKey } from "node:crypto";
 import { readOperatorInfo } from "../../config/operator";
 import { normalizePrivateKey } from "../firestore/private-key";
+import { isSessionSecretStrong, livePaymentKeyNames } from "../env-rules";
 
 export type CheckLevel = "ok" | "warn" | "error" | "unknown";
 export type CheckResult = { key: string; level: CheckLevel; message: string };
@@ -106,11 +107,15 @@ export function checkProductionEnv(env: Env): CheckResult[] {
   const site = (env.SITE_STATUS ?? "").trim().toLowerCase();
   if (site === "" || site === "open") add("SITE_STATUS", "ok", "未設定または open（一般公開の状態）です。");
   else if (site === "coming_soon") add("SITE_STATUS", "ok", "coming_soon（準備中）です。");
-  else if (site === "development") add("SITE_STATUS", "warn", "development（開発モード）は、まだ実装されていません。今のコードでは準備中として扱われます。");
-  else add("SITE_STATUS", "error", "open・coming_soon 以外の値です（準備中として扱われます）。");
+  else if (site === "development") {
+    const live = livePaymentKeyNames(env);
+    if (live.length) add("SITE_STATUS", "error", `development（開発モード）なのに本番用の決済キー（${live.join("・")}）が登録されています。アプリは占いの受付を全部停止します。開発モード中は本番用の決済キーを削除してください。`);
+    else add("SITE_STATUS", "ok", "development（開発モード）です。一般の方には準備中を表示し、決済は受け付けません。無料の占いは運営アカウントだけ（テスト店舗 /s/test）で使えます。");
+    if (!isSessionSecretStrong(env)) add("SESSION_SECRET", "warn", "開発モードの無料占いには、安全な SESSION_SECRET（32文字以上・推測しにくい値）が必要です。今の値では無料の占いを提供しません。");
+  } else add("SITE_STATUS", "error", "open・coming_soon・development 以外の値です（準備中として扱われます）。");
 
   if (env.ENABLE_TEST_PAYMENT === "true") {
-    add("ENABLE_TEST_PAYMENT", "warn", "true です。今本番で動いているコード（a67ef2c）では無料テストが有効ですが、7478125 以降をデプロイすると本番は「準備中」で停止します（開発モードの実装までは想定どおりか確認してください）。");
+    add("ENABLE_TEST_PAYMENT", "warn", "true です。今本番で動いているコード（a67ef2c）では誰でも無料テストが使えます。新しいコードでは本番は全部停止します（開発モードの無料占いも使えません）。本番の無料確認には SITE_STATUS=development を使い、ENABLE_TEST_PAYMENT は削除してください。");
   } else if (has(env.ENABLE_TEST_PAYMENT) && env.ENABLE_TEST_PAYMENT !== "false") {
     add("ENABLE_TEST_PAYMENT", "warn", "true / false 以外の値です（無効として扱われます）。");
   }

@@ -1,7 +1,8 @@
 import { Card, PageHeader } from "@/components/console/shell";
 import { PasswordForm } from "@/components/console/store-forms";
 import { requireOperator } from "@/lib/auth/session";
-import { env, isPaidFlowBlocked, siteStatus } from "@/lib/env";
+import { env, isDevModeLiveKeyConflict, isPaidFlowBlocked, siteStatus } from "@/lib/env";
+import { describeProtection, getProtectionStatus } from "@/lib/services/vercel-protection";
 import { DEFAULT_STORE_SHARE_BPS, PRICE_JPY, defaultFeeRateBps } from "@/config/pricing";
 import { siteConfig } from "@/config/site";
 import { changeAdminPasswordAction } from "../../actions";
@@ -11,9 +12,14 @@ export const metadata = { title: "設定" };
 export default async function AdminSettingsPage() {
   const user = await requireOperator();
   const e = env();
-  const mode = isPaidFlowBlocked()
+  const status = siteStatus().status;
+  const mode = isDevModeLiveKeyConflict()
+    ? "開発モードなのに本番用の決済キーが設定されているため、占いの受付を停止中（開発モードの無料占いも利用不可）"
+    : isPaidFlowBlocked()
     ? "本番で危険な設定（ENABLE_TEST_PAYMENT=true または PAYMENT_PROVIDER=mock）のため、占いの受付を停止中（運営・店舗アカウントも利用不可）"
-    : siteStatus().status === "coming_soon"
+    : status === "development"
+    ? "開発モード（SITE_STATUS=development）：決済は誰に対しても受け付けていません。運営アカウントだけ、テスト店舗（/s/test）で無料の占いを確認できます（売上・取り分は0円）"
+    : status === "coming_soon"
     ? "準備中（SITE_STATUS=coming_soon）：無料テスト・決済とも受け付けていません"
     : e.TEST_PAYMENT_ENABLED
     ? "テストモード（ENABLE_TEST_PAYMENT=true・無料で占える・売上には記録しない）"
@@ -24,6 +30,7 @@ export default async function AdminSettingsPage() {
       : e.PAYJP_SECRET_KEY?.startsWith("sk_live_")
         ? "本番（ライブ）"
         : "PAY.JP テストモード";
+  const protection = status === "development" ? await getProtectionStatus() : null;
   const rows: [string, string][] = [
     ["サービス名", siteConfig.name],
     ["公開URL", e.APP_URL],
@@ -33,7 +40,10 @@ export default async function AdminSettingsPage() {
     ["決済プロバイダ", e.PAYMENT_PROVIDER ?? "—"],
     ["決済モード", mode],
     ["Webhook URL", e.PAYMENT_PROVIDER ? `${e.APP_URL}/api/webhooks/${e.PAYMENT_PROVIDER}` : "—"],
-    ["公開状態（SITE_STATUS）", siteStatus().status === "coming_soon" ? "準備中（coming_soon）" : "公開中（open）"],
+    ["公開状態（SITE_STATUS）", status === "development" ? "開発モード（development）" : status === "coming_soon" ? "準備中（coming_soon）" : "公開中（open）"],
+    ...(status === "development"
+      ? ([["Vercel Authentication", `${describeProtection(protection!)} — ${protection!.detail}`]] as [string, string][])
+      : []),
     ["定期メンテナンス", e.CRON_SECRET ? "設定済み（/api/cron/maintenance）" : "未設定（CRON_SECRET を設定してください）"],
   ];
   return (

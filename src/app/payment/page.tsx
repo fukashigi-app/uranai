@@ -18,7 +18,7 @@ export default async function PaymentPage() {
   if (stop) {
     return (
       <PublicShell>
-        <ServicePausedNotice reason={stop === "coming_soon" ? "coming_soon" : "halted"} />
+        <ServicePausedNotice reason={stop === "dangerous_config" ? "halted" : stop} />
       </PublicShell>
     );
   }

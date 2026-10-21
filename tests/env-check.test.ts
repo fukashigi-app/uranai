@@ -74,7 +74,9 @@ describe("check:env（本番の環境変数の形式確認）", () => {
     expect(levelOf({ ...good, FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080" }, "FIRESTORE_EMULATOR_HOST")).toEqual(["error"]);
     expect(levelOf({ ...good, APP_URL: "http://uranai.example.jp" }, "APP_URL")).toEqual(["error"]);
     expect(levelOf({ ...good, SITE_STATUS: "comingsoon" }, "SITE_STATUS")).toEqual(["error"]);
-    expect(levelOf({ ...good, SITE_STATUS: "development" }, "SITE_STATUS")).toEqual(["warn"]);
+    expect(levelOf({ ...good, SITE_STATUS: "development" }, "SITE_STATUS")).toEqual(["ok"]);
+    expect(levelOf({ ...good, SITE_STATUS: "development", PAYJP_SECRET_KEY: "sk_live_abcdefgh" }, "SITE_STATUS")).toEqual(["error"]);
+    expect(levelOf({ ...good, SITE_STATUS: "development", SESSION_SECRET: "a".repeat(40) }, "SESSION_SECRET")).toContain("warn");
     expect(levelOf({ ...good, ENABLE_TEST_PAYMENT: "true" }, "ENABLE_TEST_PAYMENT")).toEqual(["warn"]);
     expect(levelOf({ ...good, PRODUCTION_FIREBASE_PROJECT_ID: "other-project" }, "PRODUCTION_FIREBASE_PROJECT_ID")).toEqual(["error"]);
     expect(levelOf({ ...good, NEXT_PUBLIC_OPERATOR_EMAIL: "support@example.com" }, "NEXT_PUBLIC_OPERATOR_EMAIL")).toEqual(["error"]);

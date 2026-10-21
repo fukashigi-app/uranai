@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { dataProvider } from "@/lib/data-provider";
 import { readOperatorInfo } from "@/config/operator";
-import { isPaidFlowBlocked, isTestPaymentConfigured, productionConfigIssues, siteStatus } from "@/lib/env";
+import { dangerousConfigReasons, isPaidFlowBlocked, isTestPaymentConfigured, pausedMessage, productionConfigIssues, siteStatus } from "@/lib/env";
 import { checkFirestoreTarget } from "@/lib/firestore/target-guard";
 import { getMaintenanceStatus } from "@/lib/services/maintenance-status";
 
@@ -20,7 +20,9 @@ export async function GET() {
     environment: process.env.VERCEL_ENV ?? "local",
     siteStatus: siteStatus().status + (siteStatus().unknown ? " (SITE_STATUS が不明な値のため準備中として扱っています)" : ""),
     paymentMode: isPaidFlowBlocked()
-      ? "paused (本番の危険な設定のため占いの受付を停止中)"
+      ? pausedMessage(dangerousConfigReasons())
+      : siteStatus().status === "development"
+        ? "development (開発モード：決済は受け付けていません。無料の占いは運営アカウントのみ)"
       : siteStatus().status === "coming_soon"
         ? "coming_soon (準備中：無料テスト・決済とも受け付けていません)"
         : isTestPaymentConfigured()

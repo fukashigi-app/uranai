@@ -5,7 +5,8 @@ import { requireOperator } from "@/lib/auth/session";
 import { countActiveStores, dailySeries, listStores, monthTotals, totalsBetween } from "@/lib/services/reports";
 import { formatYearMonthJa, jstDateString, jstMonthRange, jstYearMonth } from "@/lib/time";
 import { formatYen } from "@/lib/money";
-import { isProductionDeployment, isTestPaymentConfigured, productionConfigIssues, siteStatus } from "@/lib/env";
+import { isProductionDeployment, isTestPaymentConfigured, productionConfigIssues, serviceStopReason, siteStatus } from "@/lib/env";
+import { getProtectionStatus } from "@/lib/services/vercel-protection";
 import { SystemStatusNotice } from "@/components/console/system-status-notice";
 import { getMaintenanceStatus } from "@/lib/services/maintenance-status";
 import { testUsageOverall } from "@/lib/services/test-usage";
@@ -29,13 +30,14 @@ export default async function AdminDashboard() {
     testUsageOverall(),
   ]);
   const maintenance = await getMaintenanceStatus().catch(() => null);
+  const devMode = serviceStopReason() === "development" ? { protection: await getProtectionStatus() } : null;
   const net = month.operatorShare - month.fee;
   const y = (n: number) => n.toLocaleString("ja-JP");
 
   return (
     <>
       <PageHeader title="ダッシュボード" description={`${formatYearMonthJa(ym)}（JST）の集計。返金分は除外しています。`} />
-      <SystemStatusNotice issues={productionConfigIssues()} maintenance={maintenance} production={isProductionDeployment()} comingSoon={siteStatus().status === "coming_soon"} className="mb-4" />
+      <SystemStatusNotice issues={productionConfigIssues()} maintenance={maintenance} production={isProductionDeployment()} comingSoon={siteStatus().status === "coming_soon"} devMode={devMode} className="mb-4" />
       <OperatorInfoNotice issues={readOperatorInfo().issues} className="mb-4" />
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat label="全店舗数" value={y(storesCount.total)} unit="店" sub={`稼働中 ${storesCount.active}店`} />

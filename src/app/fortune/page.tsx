@@ -1,7 +1,7 @@
 import Link from "next/link";
-import { PublicShell, Notice, ServicePausedNotice } from "@/components/public/public-shell";
+import { DevTestStoreOnlyNotice, PublicShell, Notice, ServicePausedNotice } from "@/components/public/public-shell";
 import { FortuneSelector } from "@/components/public/fortune-selector";
-import { isServiceStopped, resolveVisitorStore, testModeState } from "@/lib/services/test-store";
+import { isFreeFortuneState, isServiceStopped, resolveVisitorStore, testModeState } from "@/lib/services/test-store";
 
 // QR Cookie・公開状態（準備中など）で表示が変わるため毎回サーバーで描画（ビルド時の状態で固定しない）
 export const dynamic = "force-dynamic";
@@ -16,6 +16,7 @@ export default async function FortuneSelectPage() {
     );
   }
   const store = await resolveVisitorStore();
+  if (!store && testMode === "dev") return <DevTestStoreOnlyNotice />;
   if (!store || store.status !== "ACTIVE") {
     return (
       <PublicShell>
@@ -30,7 +31,8 @@ export default async function FortuneSelectPage() {
     <PublicShell storeName={store.name} step={1}>
       <h1 className="mb-1 font-serif text-2xl font-bold tracking-wide">占いを選ぶ</h1>
       <p className="mb-5 text-[13px] text-ink-muted">気になる占いをタップしてください。どれも1回100円です。</p>
-      <FortuneSelector testMode={testMode === "on"} />
+      <FortuneSelector testMode={isFreeFortuneState(testMode)} />
     </PublicShell>
   );
 }
+

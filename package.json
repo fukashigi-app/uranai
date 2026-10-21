@@ -25,7 +25,8 @@
     "backup:firestore": "tsx scripts/firestore-backup.ts backup",
     "backup:verify": "tsx scripts/firestore-backup.ts verify",
     "backup:restore-emulator": "tsx scripts/firestore-backup.ts restore-emulator",
-    "e2e:backup": "tsx scripts/e2e-backup.ts"
+    "e2e:backup": "tsx scripts/e2e-backup.ts",
+    "e2e:dev-mode": "tsx --conditions=react-server scripts/e2e-dev-mode.ts"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.3",

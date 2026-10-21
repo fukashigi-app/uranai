@@ -85,7 +85,7 @@ describe("公開URL（QRコード）：Preview で本番URLを使わない", () 
   });
 
   it("Preview で発行した QR コードのURLは本番を指さない", async () => {
-    vi.stubEnv("SESSION_SECRET", "s".repeat(40));
+    vi.stubEnv("SESSION_SECRET", "unit-test-session-secret-Qx7v2Lr9Tm4Kp8Zw");
     vi.stubEnv("VERCEL_ENV", "preview");
     vi.stubEnv("VERCEL_PROJECT_PRODUCTION_URL", PROD_HOST);
     vi.stubEnv("VERCEL_BRANCH_URL", BRANCH_HOST);
@@ -133,6 +133,7 @@ describe("準備中モード（SITE_STATUS=coming_soon）", () => {
   it("準備中のときは無料テストも提供しない（Preview でテストモードが ON でも）。公開に戻せば無料テストに戻る", async () => {
     const load = async (env: Record<string, string>) => {
       for (const k of ["ENABLE_TEST_PAYMENT", "VERCEL_ENV", "PAYMENT_PROVIDER", "SITE_STATUS"]) vi.stubEnv(k, env[k] ?? "");
+      vi.stubEnv("SESSION_SECRET", "unit-test-session-secret-Qx7v2Lr9Tm4Kp8Zw");
       vi.resetModules();
       return import("@/lib/services/test-store");
     };

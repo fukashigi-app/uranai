@@ -21,9 +21,14 @@ export async function rateLimit(key: string, limit: number, windowSec: number): 
   return count <= limit;
 }
 
-/** テストモードの利用記録（売上とは別のコレクション。個人情報は保存しない） */
-export async function logTestFortune(storeCode: string, type: FortuneTypeValue): Promise<void> {
-  await fsdb().collection(C.testFortuneLogs).add({ storeCode: storeCode.slice(0, 32), fortuneType: type, createdAt: FieldValue.serverTimestamp() });
+/**
+ * テストモードの利用記録（売上とは別のコレクション。個人情報は保存しない）。
+ * 開発モードの記録にだけ mode: "development" を付ける（既存の記録・項目は変更しない）。
+ */
+export async function logTestFortune(storeCode: string, type: FortuneTypeValue, mode?: "development"): Promise<void> {
+  await fsdb()
+    .collection(C.testFortuneLogs)
+    .add({ storeCode: storeCode.slice(0, 32), fortuneType: type, ...(mode ? { mode } : {}), createdAt: FieldValue.serverTimestamp() });
 }
 
 /** 定期メンテナンス（期限切れ処理・不要データの削除）。PostgreSQL 版と同じ内容 */

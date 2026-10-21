@@ -76,6 +76,9 @@ export const isProduction = () => process.env.NODE_ENV === "production";
 
 type RawProcessEnv = Record<string, string | undefined>;
 
+import { isDevModeLiveKeyConflict, livePaymentKeyNames, siteStatus } from "./env-rules";
+export { isDevModeLiveKeyConflict, isSessionSecretStrong, livePaymentKeyNames, siteStatus, type SiteStatus } from "./env-rules";
+
 /**
  * Vercel の本番環境（Production デプロイ）か。
  * ローカルの `next start`（自動テスト）や Preview デプロイは本番扱いにしない（開発用の無料テスト機能を維持するため）。
@@ -98,38 +101,64 @@ export function isTestPaymentEnabled(e: RawProcessEnv = process.env): boolean {
 }
 
 /**
- * 占いの受付（無料テスト・有料の決済とも）を止めるか。
- * Vercel の本番で ENABLE_TEST_PAYMENT=true または PAYMENT_PROVIDER=mock のままのときは、
+ * 占いの受付（無料テスト・開発モード・有料の決済とも）を止めるか。
+ * Vercel の本番で ENABLE_TEST_PAYMENT=true または PAYMENT_PROVIDER=mock のままのとき、
+ * または開発モード（SITE_STATUS=development）で本番用の決済キーが設定されているときは、
  * テストのつもりの設定で実際の課金へ切り替わらないよう、運営・店舗アカウントを含め誰にも提供しない（安全側で停止）。
  * 運営・店舗の管理画面は停止しない。
  */
 export function isPaidFlowBlocked(e: RawProcessEnv = process.env): boolean {
+  if (isDevModeLiveKeyConflict(e)) return true;
   return isProductionDeployment(e) && (isTestPaymentConfigured(e) || e.PAYMENT_PROVIDER === "mock");
 }
 
 /**
- * サイトの公開状態（SITE_STATUS）。
- *  open        … 通常どおり（未設定もこれ）
- *  coming_soon … 準備中。無料テスト・有料の決済とも受け付けない（運営・店舗の管理画面は使える）
- * それ以外の値（打ち間違いなど）は、意図せず公開してしまわないよう準備中として扱う（unknown=true）。
+ * 占いの受付を止めている危険な設定の種類（isPaidFlowBlocked の内訳）。値は返さず、種類と変数名だけ。
+ *  test_payment_in_production … 本番で ENABLE_TEST_PAYMENT=true（無料テストの設定）
+ *  mock_in_production         … 本番で PAYMENT_PROVIDER=mock（疑似決済）
+ *  live_key_in_development    … 開発モードで本番用の決済キーが設定されている（keys に変数名）
  */
-export type SiteStatus = "open" | "coming_soon";
+export type DangerousConfigReason =
+  | { kind: "test_payment_in_production" }
+  | { kind: "mock_in_production" }
+  | { kind: "live_key_in_development"; keys: string[] };
 
-export function siteStatus(e: RawProcessEnv = process.env): { status: SiteStatus; unknown: boolean } {
-  const v = (e.SITE_STATUS ?? "").trim().toLowerCase();
-  if (v === "" || v === "open") return { status: "open", unknown: false };
-  if (v === "coming_soon") return { status: "coming_soon", unknown: false };
-  return { status: "coming_soon", unknown: true };
+export function dangerousConfigReasons(e: RawProcessEnv = process.env): DangerousConfigReason[] {
+  const out: DangerousConfigReason[] = [];
+  if (isProductionDeployment(e) && isTestPaymentConfigured(e)) out.push({ kind: "test_payment_in_production" });
+  if (isProductionDeployment(e) && e.PAYMENT_PROVIDER === "mock") out.push({ kind: "mock_in_production" });
+  if (isDevModeLiveKeyConflict(e)) out.push({ kind: "live_key_in_development", keys: livePaymentKeyNames(e) });
+  return out;
+}
+
+/** 危険な設定で停止しているときの説明（/api/health 用。種類と変数名だけで、値は出さない） */
+export function pausedMessage(reasons: DangerousConfigReason[]): string {
+  const parts = reasons.map((r) =>
+    r.kind === "test_payment_in_production"
+      ? "本番で無料テストの設定（ENABLE_TEST_PAYMENT=true）が有効になっている"
+      : r.kind === "mock_in_production"
+        ? "本番で疑似決済（PAYMENT_PROVIDER=mock）が設定されている"
+        : `開発モードで本番用の決済キー（${r.keys.join("・")}）が設定されている`,
+  );
+  return `paused (${parts.length ? `${parts.join("・")}ため` : "危険な設定のため"}、占いの受付を停止中)`;
 }
 
 /**
  * 一般向けの占いの受付（無料テスト・有料の決済）を止める理由。止めないときは null。
- *  dangerous_config … 本番の危険な設定（ENABLE_TEST_PAYMENT=true・PAYMENT_PROVIDER=mock）。設定の誤りとして警告する
- *  coming_soon      … 準備中モード（SITE_STATUS=coming_soon）。正常な運用状態
+ *  dangerous_config … 危険な設定（本番の ENABLE_TEST_PAYMENT=true・PAYMENT_PROVIDER=mock、開発モードでの本番用決済キー）。
+ *                     設定の誤りとして警告する。開発モードの無料占いも含めて止める（最優先）
+ *  development      … 開発モード（SITE_STATUS=development）。決済は誰に対しても受け付けない。
+ *                     無料の占いは運営アカウントだけ（判定は lib/services/dev-mode.ts。ここでは一般向けとして停止を返す）
+ *  coming_soon      … 準備中モード（SITE_STATUS=coming_soon・不明な値）。正常な運用状態
+ * 決済の API・ページは、null 以外ならどの理由でも受け付けない。
  */
-export function serviceStopReason(e: RawProcessEnv = process.env): "dangerous_config" | "coming_soon" | null {
+export type ServiceStopReason = "dangerous_config" | "development" | "coming_soon";
+
+export function serviceStopReason(e: RawProcessEnv = process.env): ServiceStopReason | null {
   if (isPaidFlowBlocked(e)) return "dangerous_config";
-  if (siteStatus(e).status === "coming_soon") return "coming_soon";
+  const s = siteStatus(e).status;
+  if (s === "development") return "development";
+  if (s === "coming_soon") return "coming_soon";
   return null;
 }
 
@@ -199,7 +228,14 @@ export function productionConfigIssues(e: RawProcessEnv = process.env): Producti
     });
   }
   if (siteStatus(e).unknown) {
-    issues.push({ level: "warning", key: "SITE_STATUS", message: "SITE_STATUS に open・coming_soon 以外の値が設定されています。安全のため準備中として扱っています。" });
+    issues.push({ level: "warning", key: "SITE_STATUS", message: "SITE_STATUS に open・coming_soon・development 以外の値が設定されています。安全のため準備中として扱っています。" });
+  }
+  if (isDevModeLiveKeyConflict(e)) {
+    issues.push({
+      level: "error",
+      key: "SITE_STATUS",
+      message: `開発モードなのに本番用の決済キー（${livePaymentKeyNames(e).join("・")}）が設定されています。安全のため、占いの受付（開発モードの無料占いを含む）を停止しています。開発モード中は本番用の決済キーを削除してください。`,
+    });
   }
   const prodFs = (e.PRODUCTION_FIREBASE_PROJECT_ID ?? "").trim();
   if (prodFs && e.FIREBASE_PROJECT_ID && e.FIREBASE_PROJECT_ID.trim().toLowerCase() !== prodFs.toLowerCase()) {

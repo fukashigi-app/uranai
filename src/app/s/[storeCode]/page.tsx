@@ -1,10 +1,10 @@
 import type { Metadata } from "next";
-import { PublicShell, Notice, RestartButton, ServicePausedNotice } from "@/components/public/public-shell";
+import { DevTestStoreOnlyNotice, PublicShell, Notice, RestartButton, ServicePausedNotice } from "@/components/public/public-shell";
 import { Hero } from "@/components/public/hero";
 import { FortuneSelector } from "@/components/public/fortune-selector";
 import { findActiveStoreByCode } from "@/lib/services/checkout";
 import { isPlausibleStoreCode } from "@/lib/security/crypto";
-import { isServiceStopped, isTestStoreCode, TEST_STORE, testModeState, type VisitorStore } from "@/lib/services/test-store";
+import { isFreeFortuneState, isServiceStopped, isTestStoreCode, TEST_STORE, testModeState, type VisitorStore } from "@/lib/services/test-store";
 
 export const metadata: Metadata = { robots: { index: false } };
 
@@ -19,7 +19,9 @@ export default async function StoreTopPage(props: PageProps<"/s/[storeCode]">) {
       </PublicShell>
     );
   }
-  const testMode = state === "on";
+  const testMode = isFreeFortuneState(state);
+  // 開発モードの無料占いはテスト店舗だけ（実店舗の利用件数・売上に入れない）
+  if (state === "dev" && !isTestStoreCode(storeCode)) return <DevTestStoreOnlyNotice />;
 
   let store: VisitorStore | null = null;
   if (isTestStoreCode(storeCode)) {

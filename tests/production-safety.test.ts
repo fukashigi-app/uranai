@@ -83,7 +83,7 @@ describe("本番での無料テストモード・疑似決済の安全対策", (
   });
 
   it("本番では PAYMENT_PROVIDER=mock・ALLOW_MOCK_PAYMENTS_IN_PRODUCTION=true でも疑似決済を使わず、決済の受付を止める（本番の決済へ自動で切り替えない）", async () => {
-    vi.stubEnv("SESSION_SECRET", "s".repeat(40));
+    vi.stubEnv("SESSION_SECRET", "unit-test-session-secret-Qx7v2Lr9Tm4Kp8Zw");
     vi.stubEnv("VERCEL_ENV", "production");
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("PAYMENT_PROVIDER", "mock");
@@ -109,6 +109,7 @@ describe("本番での無料テストモード・疑似決済の安全対策", (
     const user: object | null = { id: "u1", role: "OPERATOR" };
     const load = async (env: Record<string, string>) => {
       for (const k of ["ENABLE_TEST_PAYMENT", "VERCEL_ENV", "PAYMENT_PROVIDER"]) vi.stubEnv(k, env[k] ?? "");
+      vi.stubEnv("SESSION_SECRET", "unit-test-session-secret-Qx7v2Lr9Tm4Kp8Zw");
       vi.resetModules();
       vi.doMock("@/lib/auth/session", () => ({ getSessionUser: async () => user }));
       return import("@/lib/services/test-store");
@@ -149,7 +150,7 @@ describe("定期処理（/api/cron/maintenance）", () => {
   };
   let logs: string[];
   beforeEach(() => {
-    vi.stubEnv("SESSION_SECRET", "s".repeat(40));
+    vi.stubEnv("SESSION_SECRET", "unit-test-session-secret-Qx7v2Lr9Tm4Kp8Zw");
     logs = [];
     for (const k of ["log", "warn", "error"] as const) vi.spyOn(console, k).mockImplementation((...a: unknown[]) => void logs.push(JSON.stringify(a)));
   });
