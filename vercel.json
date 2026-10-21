@@ -2,7 +2,8 @@
   "crons": [{ "path": "/api/cron/maintenance", "schedule": "17 18 * * *" }],
   "git": {
     "deploymentEnabled": {
-      "backup-tools": false
+      "backup-tools": false,
+      "dev-mode": false
     }
   }
 }
