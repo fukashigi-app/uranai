@@ -20,7 +20,12 @@
     "e2e:admin": "tsx --conditions=react-server scripts/e2e-admin-empty.ts",
     "e2e:store": "tsx --conditions=react-server scripts/e2e-store-security.ts",
     "emulator": "npx -y firebase-tools@15 emulators:start --only firestore --project demo-uranai",
-    "check:payments": "tsx --conditions=react-server scripts/check-payment-kinds.ts"
+    "check:payments": "tsx --conditions=react-server scripts/check-payment-kinds.ts",
+    "check:env": "tsx scripts/check-env.ts",
+    "backup:firestore": "tsx scripts/firestore-backup.ts backup",
+    "backup:verify": "tsx scripts/firestore-backup.ts verify",
+    "backup:restore-emulator": "tsx scripts/firestore-backup.ts restore-emulator",
+    "e2e:backup": "tsx scripts/e2e-backup.ts"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.3",

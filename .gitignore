@@ -50,3 +50,7 @@ next-env.d.ts
 firebase-debug.log
 firestore-debug.log
 ui-debug.log
+
+# Firestore のバックアップ（暗号化済みでも GitHub には上げない）
+/backups/
+*.ufbk

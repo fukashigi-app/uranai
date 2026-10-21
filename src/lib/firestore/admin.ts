@@ -2,6 +2,7 @@ import "server-only";
 import { cert, getApps, initializeApp, type App } from "firebase-admin/app";
 import { getFirestore, Timestamp, type Firestore } from "firebase-admin/firestore";
 import { assertFirestoreTarget } from "./target-guard";
+import { normalizePrivateKey } from "./private-key";
 
 /**
  * Firebase Admin SDK（サーバー専用）。秘密鍵は環境変数からのみ読み込み、コードやリポジトリには置かない。
@@ -14,13 +15,7 @@ import { assertFirestoreTarget } from "./target-guard";
  */
 const globalForFs = globalThis as unknown as { __uranaiFsApp?: App; __uranaiFs?: Firestore };
 
-export function normalizePrivateKey(raw: string): string {
-  let key = raw.trim();
-  // 値全体を "..." で囲んで登録してしまった場合
-  if ((key.startsWith('"') && key.endsWith('"')) || (key.startsWith("'") && key.endsWith("'"))) key = key.slice(1, -1);
-  // "\n"（バックスラッシュ+n）表記を実際の改行に変換
-  return key.replace(/\\n/g, "\n");
-}
+export { normalizePrivateKey };
 
 function initApp(): App {
   // Preview から本番の Firebase プロジェクトに接続させない（判定できない場合も接続しない）
