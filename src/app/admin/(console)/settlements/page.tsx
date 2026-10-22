@@ -6,7 +6,7 @@ import { SettlementRowForm } from "@/components/console/admin-forms";
 import { one } from "@/components/console/pagination";
 import { requireOperator } from "@/lib/auth/session";
 import { listSettlements, type SettlementStatus } from "@/lib/services/settlements";
-import { formatDateJa, formatDateTimeJa, formatYearMonthJa, isValidYearMonth, jstYearMonth, shiftYearMonth } from "@/lib/time";
+import { formatDateJa, formatDateTimeJa, formatYearMonthJa, isValidYearMonth, jstYearMonth } from "@/lib/time";
 import { BANK_CHANGE_WARNING_DAYS, listRecentBankChanges, type BankChange } from "@/lib/services/bank-changes";
 import { getStoresByIds } from "@/lib/services/stores";
 import { formatYen } from "@/lib/money";
@@ -19,8 +19,7 @@ export default async function AdminSettlementsPage(props: PageProps<"/admin/sett
   await requireOperator();
   const sp = await props.searchParams;
   const ymP = one(sp.ym);
-  const lastMonth = shiftYearMonth(jstYearMonth(), -1);
-  const ym = ymP && isValidYearMonth(ymP) && ymP < jstYearMonth() ? ymP : lastMonth;
+  const ym = ymP && isValidYearMonth(ymP) && ymP <= jstYearMonth() ? ymP : jstYearMonth();
   const statusP = one(sp.status);
   const status = (["UNPAID", "PROCESSING", "PAID"] as const).includes(statusP as SettlementStatus) ? (statusP as SettlementStatus) : undefined;
   const [rows, bankChanges] = await Promise.all([listSettlements({ yearMonth: ym, status }), listRecentBankChanges()]);
@@ -35,7 +34,7 @@ export default async function AdminSettlementsPage(props: PageProps<"/admin/sett
       <PageHeader
         title="月次精算"
         description="月末締め後に精算を作成し、振込完了後に「支払済」へ変更してください。"
-        actions={<MonthPicker value={ym} makeHref={(v) => `/admin/settlements?ym=${v < jstYearMonth() ? v : lastMonth}`} />}
+        actions={<MonthPicker value={ym} makeHref={(v) => `/admin/settlements?ym=${v <= jstYearMonth() ? v : jstYearMonth()}`} />}
       />
       <BankChangeNotice changes={bankChanges} names={changeStoreNames} />
       <div className="mb-4 grid gap-4 lg:grid-cols-[1fr_1.4fr]">
