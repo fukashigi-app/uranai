@@ -5,7 +5,6 @@ import {
   isFreeFortuneState,
   isSameHostRequest,
   isSecureRequest,
-  isTestStoreCode,
   limitFreeFortune,
   newTestSession,
   resolveVisitorStore,
@@ -20,7 +19,8 @@ const err = (status: number, code: string, message: string) =>
 /**
  * 無料の占いを開始（決済をスキップ）。
  *  - テストモード（ENABLE_TEST_PAYMENT=true。ローカル・Preview）: 誰でも
- *  - 開発モード（SITE_STATUS=development）: 運営アカウントでログイン中の人だけ・テスト店舗（/s/test）だけ
+ *  - 開発モード（SITE_STATUS=development）: 運営アカウントでログイン中の人だけ。テスト店舗（/s/test）と、
+ *    登録済み・稼働中の実店舗の QR（/s/[storeCode]）。店舗は QR の Cookie からサーバーで決める（リクエストの本文では受け付けない）
  * それ以外は 404。決済・売上のテーブルには何も作らない。回数制限はサーバー側で適用する。
  */
 export async function POST(req: Request) {
@@ -50,9 +50,6 @@ export async function POST(req: Request) {
   } catch (e) {
     console.error("[test-fortune] store resolve failed", (e as Error).message);
     return err(503, "store_unavailable", "店舗情報を確認できませんでした。最初からやり直してください。");
-  }
-  if (access?.ok && (!store || !isTestStoreCode(store.storeCode))) {
-    return err(403, "dev_test_store_only", "開発モードではテスト店舗（/s/test）だけ使えます。/s/test から始めてください。");
   }
   if (!store || store.status !== "ACTIVE") return err(403, "store_unavailable", "こちらの店舗では現在ご利用いただけません。");
 

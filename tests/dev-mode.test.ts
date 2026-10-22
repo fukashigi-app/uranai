@@ -30,6 +30,16 @@ vi.mock("next/headers", () => ({
     set: (k: string, v: string) => void jar.set(k, v),
   }),
 }));
+// 登録済みの店舗（Emulator・データベースには接続しない）。realstore01 = 稼働中、paused01 = 休止中、それ以外 = 未登録
+const storeDb = vi.hoisted(() => ({ fail: false }));
+vi.mock("@/lib/services/checkout", () => ({
+  findActiveStoreByCode: async (code: string) => {
+    if (storeDb.fail) throw new Error("db down");
+    if (code === "realstore01") return { id: "s-1", name: "実店舗A", status: "ACTIVE", storeCode: code };
+    if (code === "paused01") return { id: "s-2", name: "休止店舗", status: "SUSPENDED", storeCode: code };
+    return null;
+  },
+}));
 vi.mock("@/lib/security/rate-limit", () => ({
   rateLimit: async (key: string) => {
     limiter.keys.push(key);
@@ -58,6 +68,7 @@ beforeEach(() => {
   auth.sessionHash = null;
   auth.fail = false;
   jar.clear();
+  storeDb.fail = false;
   limiter.allow = true;
   limiter.fail = false;
   limiter.keys = [];
@@ -158,7 +169,7 @@ describe("開発モードの利用者（サーバー側の判定）", () => {
     expect(await (await load({ VERCEL_ENV: "production", SESSION_SECRET: SECRET })).testModeState()).toBe("off");
   });
 
-  it("開発モードで使える店舗はテスト店舗だけ（実店舗の QR は null）", async () => {
+  it("開発モードの店舗：QR なし・/s/test はテスト店舗、登録済みの実店舗の QR はその店舗、未登録は null", async () => {
     auth.sessionHash = "h-op";
     auth.user = OPERATOR;
     let m = await load(DEV_ENV);
@@ -167,7 +178,33 @@ describe("開発モードの利用者（サーバー側の判定）", () => {
     expect(await m.resolveVisitorStore()).toEqual(m.TEST_STORE);
     jar.set("qr_store", "realstore01");
     m = await load(DEV_ENV);
+    expect(await m.resolveVisitorStore()).toMatchObject({ storeCode: "realstore01", status: "ACTIVE" });
+    jar.set("qr_store", "paused01");
+    expect(await m.resolveVisitorStore()).toMatchObject({ storeCode: "paused01", status: "SUSPENDED" }); // 稼働中かは呼び出し側で確認
+    jar.set("qr_store", "unknown01");
     expect(await m.resolveVisitorStore()).toBeNull();
+  });
+
+  it("開発モードの無料占いに使える店舗：テスト店舗と稼働中の登録店舗だけ（休止・未登録・確認できないときは不可）", async () => {
+    const m = await load(DEV_ENV);
+    expect(await m.isDevModeStoreUsable("test")).toBe(true);
+    expect(await m.isDevModeStoreUsable("realstore01")).toBe(true);
+    expect(await m.isDevModeStoreUsable("paused01")).toBe(false);
+    expect(await m.isDevModeStoreUsable("unknown01")).toBe(false);
+    storeDb.fail = true;
+    expect(await m.isDevModeStoreUsable("realstore01")).toBe(false);
+    expect(await m.isDevModeStoreUsable("test")).toBe(true); // テスト店舗はデータベース不要
+  });
+
+  it("運営以外は、実店舗の QR でも無料の占いの状態にならない", async () => {
+    jar.set("qr_store", "realstore01");
+    expect(await (await load(DEV_ENV)).testModeState()).toBe("development"); // ログインなし
+    auth.sessionHash = "h-store";
+    auth.user = STORE_USER;
+    expect(await (await load(DEV_ENV)).testModeState()).toBe("development"); // 店舗アカウント
+    auth.user = OPERATOR;
+    expect(await (await load({ ...DEV_ENV, SITE_STATUS: "production" })).testModeState()).toBe("coming_soon"); // production は未定義の値＝準備中
+    expect(await (await load({ ...DEV_ENV, SITE_STATUS: "open" })).testModeState()).toBe("off");
   });
 });
 
@@ -219,10 +256,17 @@ describe("開発モード用 Cookie（署名・有効期限・ログイン状態
     expect(jar.has("fx_dev")).toBe(true);
     expect((await m.getTestSession())?.id).toBe(s.id);
 
-    // 実店舗のコードで作られたもの（改ざんなど）は使わない
-    const real = encodeFreeSession({ ...s, storeCode: "realstore01" }, "development", SECRET)!;
-    jar.set("fx_dev", real);
+    // 稼働中の登録店舗で作られたものは使える。休止・未登録の店舗、店舗を確認できないときは使わない
+    jar.set("fx_dev", encodeFreeSession({ ...s, storeCode: "realstore01" }, "development", SECRET)!);
+    expect((await m.getTestSession())?.storeCode).toBe("realstore01");
+    jar.set("fx_dev", encodeFreeSession({ ...s, storeCode: "paused01" }, "development", SECRET)!);
     expect(await m.getTestSession()).toBeNull();
+    jar.set("fx_dev", encodeFreeSession({ ...s, storeCode: "unknown01" }, "development", SECRET)!);
+    expect(await m.getTestSession()).toBeNull();
+    storeDb.fail = true;
+    jar.set("fx_dev", encodeFreeSession({ ...s, storeCode: "realstore01" }, "development", SECRET)!);
+    expect(await m.getTestSession()).toBeNull();
+    storeDb.fail = false;
 
     // 別の運営アカウントでログインし直すと、前の Cookie は使えない
     await m.saveTestSession(s, true);

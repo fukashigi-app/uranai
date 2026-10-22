@@ -16,7 +16,7 @@ import { C, fsdb } from "@/lib/firestore/admin";
 import { salesKeys } from "@/lib/firestore/shared";
 import { transactionDocId } from "@/lib/firestore/payments";
 import { dataProvider } from "@/lib/data-provider";
-import { createOperator, createStore, createStoreUser } from "@/lib/services/stores";
+import { createOperator, createStore, createStoreUser, setStoreStatus } from "@/lib/services/stores";
 import { monthTotals } from "@/lib/services/reports";
 import { testUsageForStore } from "@/lib/services/test-usage";
 import { randomToken, sha256Hex } from "@/lib/security/crypto";
@@ -81,6 +81,10 @@ async function main() {
   // ---- 既存データの代わり：実店舗・本番の決済1件・アカウント ----
   const stamp = Date.now();
   const store = await createStore({ name: `開発モード検証店舗 ${stamp}`, contactName: "", postalCode: "", address: "", phone: "", email: "" }, SYSTEM);
+  // 誤加算の確認用の別店舗と、休止中の店舗
+  const storeB = await createStore({ name: `開発モード検証店舗B ${stamp}`, contactName: "", postalCode: "", address: "", phone: "", email: "" }, SYSTEM);
+  const paused = await createStore({ name: `開発モード休止店舗 ${stamp}`, contactName: "", postalCode: "", address: "", phone: "", email: "" }, SYSTEM);
+  await setStoreStatus(paused.id, "SUSPENDED", SYSTEM);
   const paidAt = new Date();
   const chargeId = `ch_dev_${randomToken(6)}`;
   const txRef = fsdb().collection(C.transactions).doc(transactionDocId("payjp", chargeId));
@@ -109,7 +113,7 @@ async function main() {
   const staffId = await createStoreUser(store.id, { name: "店舗スタッフ", email: `dev-staff-${stamp}@example.com`, password: "DevStaffPass123" }, SYSTEM);
 
   const ym = jstYearMonth(new Date());
-  const before = { counts: await counts(), month: await monthTotals(ym), storeMonth: await monthTotals(ym, store.id), usage: await testUsageForStore(store), tx: (await txRef.get()).data(), storeDoc: (await fsdb().collection(C.stores).doc(store.id).get()).data() };
+  const before = { counts: await counts(), month: await monthTotals(ym), storeMonth: await monthTotals(ym, store.id), usage: await testUsageForStore(store), usageB: await testUsageForStore(storeB), usagePaused: await testUsageForStore(paused), tx: (await txRef.get()).data(), storeDoc: (await fsdb().collection(C.stores).doc(store.id).get()).data() };
   const logsBefore = new Set((await fsdb().collection(C.testFortuneLogs).get()).docs.map((d) => d.id));
 
   if (SCENARIO === "halted") {
@@ -189,14 +193,38 @@ async function main() {
   }
   step("運営の管理画面：開発モードの案内と Vercel Authentication「未確認」を表示");
 
-  // ---- 4. 実店舗の QR では使えない ----
+  // ---- 4. 登録済み・稼働中の実店舗の QR（運営だけ）----
   html = await op.text(`/s/${store.storeCode}`); // qr_store Cookie が実店舗になる
-  assert.match(html, /data-dev-test-store-only/);
+  assert.match(html, /data-dev-mode-banner/);
+  assert.ok(html.includes(store.name), "店舗名が表示されていません");
+  assert.match(html, /テストモード：無料で占う/);
+  r = await op.req("/api/test-fortune", { method: "POST", json: { fortuneType: "zodiac" } });
+  assert.equal(r.status, 200, await r.clone().text());
+  assert.match(await op.text("/fortune/input"), /テストモードのため決済をスキップしました/);
+  r = await op.req("/api/fortune", { method: "POST", json: { type: "ZODIAC", sign: "aries" } });
+  assert.equal(r.status, 200, await r.clone().text());
+  html = await op.text("/fortune/result");
+  assert.match(html, /健康運/);
+  assert.ok(html.includes(store.name), "結果画面に店舗名が表示されていません");
+  // 休止中の店舗・未登録の店舗コードは使えない
+  assert.match(await op.text(`/s/${paused.storeCode}`), /現在ご利用いただけません/);
   r = await op.req("/api/test-fortune", { method: "POST", json: { fortuneType: "zodiac" } });
   assert.equal(r.status, 403);
-  assert.equal(((await r.json()) as { error: { code: string } }).error.code, "dev_test_store_only");
-  assert.match(await op.text("/fortune"), /data-dev-test-store-only/);
-  step("実店舗の QR：開発モードの無料占いは拒否（403 dev_test_store_only）。テスト店舗へ案内");
+  assert.equal(((await r.json()) as { error: { code: string } }).error.code, "store_unavailable");
+  assert.match(await op.text("/s/zz99unknown"), /QRコードを確認できませんでした/);
+  r = await op.req("/api/test-fortune", { method: "POST", json: { fortuneType: "zodiac" } });
+  assert.equal(r.status, 403);
+  // ログインなし・店舗アカウントは、実店舗の QR でも使えない
+  const anon2 = new Client();
+  assert.match(await anon2.text(`/s/${store.storeCode}`), /data-service-paused="development"/);
+  assert.equal((await anon2.req("/api/test-fortune", { method: "POST", json: { fortuneType: "zodiac" } })).status, 404);
+  assert.match(await staff.text(`/s/${store.storeCode}`), /data-service-paused="development"/);
+  assert.equal((await staff.req("/api/test-fortune", { method: "POST", json: { fortuneType: "zodiac" } })).status, 404);
+  // 最後にテスト店舗の Cookie に戻す（下の Cookie の確認用）
+  await op.req("/s/test");
+  r = await op.req("/api/test-fortune", { method: "POST", json: { fortuneType: "zodiac" } });
+  assert.equal(r.status, 200);
+  step("実店舗の QR：運営は稼働中の登録店舗で無料の占い → 結果まで表示。休止中・未登録の店舗は 403、ログインなし・店舗アカウントは 404");
 
   // ---- 5. Cookie の使い回し・偽造・ログアウト ----
   const devCookie = op.jar.get("fx_dev")!;
@@ -213,7 +241,7 @@ async function main() {
   tampered.jar = new Map(op.jar);
   const [body, sig] = devCookie.split(".");
   const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
-  tampered.jar.set("fx_dev", `${Buffer.from(JSON.stringify({ ...payload, storeCode: store.storeCode })).toString("base64url")}.${sig}`);
+  tampered.jar.set("fx_dev", `${Buffer.from(JSON.stringify({ ...payload, storeCode: storeB.storeCode })).toString("base64url")}.${sig}`); // 別の店舗に書き換え
   r = await tampered.req("/api/fortune", { method: "POST", json: { type: "ZODIAC", sign: "leo" } });
   assert.notEqual(r.status, 200, "改ざんした Cookie が通ってしまいました");
   // 開発モード以外の Cookie 名（テストモード用）に入れても使えない
@@ -247,15 +275,18 @@ async function main() {
   assert.deepEqual(before.storeMonth, { count: 1, gross: 100, storeShare: 30, operatorShare: 70, fee: 3 }); // 既存の本番決済1件だけ
   assert.deepEqual((await txRef.get()).data(), before.tx);
   assert.deepEqual((await fsdb().collection(C.stores).doc(store.id).get()).data(), before.storeDoc);
-  assert.deepEqual(await testUsageForStore(store), before.usage); // 実店舗の無料テスト件数も変わらない
+  // 実店舗の無料テスト利用件数は、占った店舗だけ1回増える（他の店舗・休止中の店舗は変わらない）
+  assert.deepEqual(await testUsageForStore(store), { thisMonth: before.usage.thisMonth + 1, total: before.usage.total + 1 });
+  assert.deepEqual(await testUsageForStore(storeB), before.usageB);
+  assert.deepEqual(await testUsageForStore(paused), before.usagePaused);
   const newLogs = (await fsdb().collection(C.testFortuneLogs).get()).docs.filter((d) => !logsBefore.has(d.id));
-  assert.equal(newLogs.length, 2, "占った回数（星座・生年月日）だけ記録されていません");
+  assert.equal(newLogs.length, 3, "占った回数（テスト店舗で星座・生年月日、実店舗で星座）だけ記録されていません");
+  assert.deepEqual(newLogs.map((d) => d.get("storeCode")).sort(), [store.storeCode, "test", "test"].sort());
   for (const d of newLogs) {
     assert.equal(d.get("mode"), "development");
-    assert.equal(d.get("storeCode"), "test");
     assert.deepEqual(Object.keys(d.data()).sort(), ["createdAt", "fortuneType", "mode", "storeCode"]); // 生年月日・アカウントなどは保存しない
   }
-  step("データ：注文・決済・占い権利・占い結果・精算・店舗は件数も内容も変化なし（売上・店舗30%・運営70%は既存分のまま、開発モード分は0円）。記録は testFortuneLogs に mode=development で2件だけ");
+  step("データ：注文・決済・占い権利・占い結果・精算・店舗は件数も内容も変化なし（売上・店舗30%・運営70%・手数料は既存分のまま、開発モード分は0円）。記録は testFortuneLogs に mode=development で3件（実店舗の無料テスト利用件数は+1、他店舗は変化なし）");
 
   console.log("\nDEV MODE E2E PASSED");
 }

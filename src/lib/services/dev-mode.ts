@@ -8,7 +8,7 @@ import type { SessionUser } from "@/lib/auth/session";
  * ===== 開発モード（SITE_STATUS=development）=====
  *
  * - 一般の方には「ただいま準備中です」を表示し、決済の API は誰に対しても受け付けない（lib/env.ts の serviceStopReason）
- * - 無料の占いを使えるのは、運営アカウント（OPERATOR）でログイン中の人だけ。テスト店舗（/s/test）だけで使える
+ * - 無料の占いを使えるのは、運営アカウント（OPERATOR）でログイン中の人だけ。テスト店舗（/s/test）と、登録済み・稼働中の実店舗の QR で使える
  * - 判定は毎回のリクエストでサーバー側で行う（画面側の表示や Cookie だけでは使えない）
  * - 危険な設定（本番の ENABLE_TEST_PAYMENT=true・PAYMENT_PROVIDER=mock、開発モードでの本番用決済キー）があれば、
  *   運営アカウントでも使えない（serviceStopReason が dangerous_config を優先して返す）

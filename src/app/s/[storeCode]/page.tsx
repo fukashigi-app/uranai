@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { DevTestStoreOnlyNotice, PublicShell, Notice, RestartButton, ServicePausedNotice } from "@/components/public/public-shell";
+import { PublicShell, Notice, RestartButton, ServicePausedNotice } from "@/components/public/public-shell";
 import { Hero } from "@/components/public/hero";
 import { FortuneSelector } from "@/components/public/fortune-selector";
 import { findActiveStoreByCode } from "@/lib/services/checkout";
@@ -8,7 +8,10 @@ import { isFreeFortuneState, isServiceStopped, isTestStoreCode, TEST_STORE, test
 
 export const metadata: Metadata = { robots: { index: false } };
 
-/** QRコードの着地ページ = 店舗専用トップ（そのまま占いを選べる）。/s/test はテストモード時のテスト店舗 */
+/**
+ * QRコードの着地ページ = 店舗専用トップ（そのまま占いを選べる）。/s/test はテストモード・開発モード時のテスト店舗。
+ * 開発モードの運営は、登録済み・稼働中の実店舗の QR からも無料で占える（その店舗の無料テスト利用件数に数える）
+ */
 export default async function StoreTopPage(props: PageProps<"/s/[storeCode]">) {
   const { storeCode } = await props.params;
   const state = await testModeState();
@@ -20,8 +23,6 @@ export default async function StoreTopPage(props: PageProps<"/s/[storeCode]">) {
     );
   }
   const testMode = isFreeFortuneState(state);
-  // 開発モードの無料占いはテスト店舗だけ（実店舗の利用件数・売上に入れない）
-  if (state === "dev" && !isTestStoreCode(storeCode)) return <DevTestStoreOnlyNotice />;
 
   let store: VisitorStore | null = null;
   if (isTestStoreCode(storeCode)) {

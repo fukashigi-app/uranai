@@ -110,7 +110,7 @@ export function checkProductionEnv(env: Env): CheckResult[] {
   else if (site === "development") {
     const live = livePaymentKeyNames(env);
     if (live.length) add("SITE_STATUS", "error", `development（開発モード）なのに本番用の決済キー（${live.join("・")}）が登録されています。アプリは占いの受付を全部停止します。開発モード中は本番用の決済キーを削除してください。`);
-    else add("SITE_STATUS", "ok", "development（開発モード）です。一般の方には準備中を表示し、決済は受け付けません。無料の占いは運営アカウントだけ（テスト店舗 /s/test）で使えます。");
+    else add("SITE_STATUS", "ok", "development（開発モード）です。一般の方には準備中を表示し、決済は受け付けません。無料の占いは運営アカウントだけ（テスト店舗 /s/test と、稼働中の登録店舗の QR）で使えます。");
     if (!isSessionSecretStrong(env)) add("SESSION_SECRET", "warn", "開発モードの無料占いには、安全な SESSION_SECRET（32文字以上・推測しにくい値）が必要です。今の値では無料の占いを提供しません。");
   } else add("SITE_STATUS", "error", "open・coming_soon・development 以外の値です（準備中として扱われます）。");
 

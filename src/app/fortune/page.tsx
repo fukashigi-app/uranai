@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { DevTestStoreOnlyNotice, PublicShell, Notice, ServicePausedNotice } from "@/components/public/public-shell";
+import { PublicShell, Notice, ServicePausedNotice } from "@/components/public/public-shell";
 import { FortuneSelector } from "@/components/public/fortune-selector";
 import { isFreeFortuneState, isServiceStopped, resolveVisitorStore, testModeState } from "@/lib/services/test-store";
 
@@ -16,7 +16,6 @@ export default async function FortuneSelectPage() {
     );
   }
   const store = await resolveVisitorStore();
-  if (!store && testMode === "dev") return <DevTestStoreOnlyNotice />;
   if (!store || store.status !== "ACTIVE") {
     return (
       <PublicShell>

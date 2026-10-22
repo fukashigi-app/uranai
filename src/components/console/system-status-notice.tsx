@@ -29,7 +29,7 @@ export function SystemStatusNotice({
     <div data-dev-mode-notice className="mb-2 rounded-2xl border border-sky-400/40 bg-sky-500/10 px-4 py-2.5 text-[13px] leading-relaxed text-sky-100">
       <p className="font-bold">開発モード（SITE_STATUS=development）</p>
       <p>
-        一般の方・店舗アカウントには「ただいま準備中です」と表示し、決済は誰に対しても受け付けていません。運営アカウントでログイン中の方だけ、テスト店舗（/s/test）で無料の占いを確認できます（料金・売上・取り分は0円。利用は「無料テスト利用件数」にだけ記録）。
+        一般の方・店舗アカウントには「ただいま準備中です」と表示し、決済は誰に対しても受け付けていません。運営アカウントでログイン中の方だけ、テスト店舗（/s/test）と、稼働中の登録店舗の QR（/s/店舗コード）で無料の占いを確認できます（料金・売上・取り分・手数料は0円。利用は各店舗の「無料テスト利用件数」にだけ記録）。
       </p>
       <p data-protection-state={devMode.protection.state} className={devMode.protection.state === "unprotected" ? "mt-1 font-bold text-danger" : "mt-1"}>
         Vercel Authentication：{describeProtection(devMode.protection)} — {devMode.protection.detail}

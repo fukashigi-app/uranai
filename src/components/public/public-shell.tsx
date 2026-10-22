@@ -30,7 +30,7 @@ export async function PublicShell({
       {testMode === "dev" ? (
         <div role="note" data-dev-mode-banner className="mb-2 rounded-xl border border-sky-400/40 bg-sky-500/15 px-3 py-2 text-[11px] leading-relaxed text-sky-200">
           <p className="text-center font-bold">開発モード（運営アカウントのみ）</p>
-          <p className="text-center">決済は発生しません。料金・売上・店舗/運営の取り分は0円です。テスト店舗（/s/test）だけで使えます。</p>
+          <p className="text-center">決済は発生しません。料金・売上・店舗/運営の取り分は0円です。テスト店舗（/s/test）と、稼働中の登録店舗の QR で使えます（店舗の無料テスト利用件数に記録）。</p>
           {protection ? (
             <p data-protection-state={protection.state} className={`mt-1 text-center ${protection.state === "unprotected" ? "font-bold text-danger" : "text-sky-100/80"}`}>
               Vercel Authentication：{describeProtection(protection)}
@@ -116,16 +116,5 @@ export function RestartButton({ label = "最初からやり直す" }: { label?: 
     <Link href="/" className="btn-gold inline-flex h-12 items-center justify-center rounded-2xl px-6 text-[15px] font-bold">
       {label}
     </Link>
-  );
-}
-
-/** 開発モードで実店舗の QR から来たとき（開発モードの無料占いはテスト店舗だけ） */
-export function DevTestStoreOnlyNotice() {
-  return (
-    <PublicShell>
-      <Notice title="開発モードではテスト店舗だけ使えます" action={<Link href="/s/test" className="btn-gold inline-block rounded-2xl px-6 py-3 font-bold">テスト店舗（/s/test）で試す</Link>}>
-        <span data-dev-test-store-only>実店舗の QR コードでは、開発モードの無料占いは使えません（実店舗の利用件数・売上には記録しません）。</span>
-      </Notice>
-    </PublicShell>
   );
 }

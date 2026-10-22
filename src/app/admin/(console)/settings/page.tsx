@@ -18,7 +18,7 @@ export default async function AdminSettingsPage() {
     : isPaidFlowBlocked()
     ? "本番で危険な設定（ENABLE_TEST_PAYMENT=true または PAYMENT_PROVIDER=mock）のため、占いの受付を停止中（運営・店舗アカウントも利用不可）"
     : status === "development"
-    ? "開発モード（SITE_STATUS=development）：決済は誰に対しても受け付けていません。運営アカウントだけ、テスト店舗（/s/test）で無料の占いを確認できます（売上・取り分は0円）"
+    ? "開発モード（SITE_STATUS=development）：決済は誰に対しても受け付けていません。運営アカウントだけ、テスト店舗（/s/test）と稼働中の登録店舗の QR で無料の占いを確認できます（売上・取り分は0円。店舗の無料テスト利用件数に記録）"
     : status === "coming_soon"
     ? "準備中（SITE_STATUS=coming_soon）：無料テスト・決済とも受け付けていません"
     : e.TEST_PAYMENT_ENABLED

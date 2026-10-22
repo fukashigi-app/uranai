@@ -22,7 +22,8 @@ export type { TestSession } from "./free-session-token";
  * - Vercel の本番では、ENABLE_TEST_PAYMENT=true でも誰にも提供せず、占いの受付を停止する（testModeState）
  *
  * 開発モード（SITE_STATUS=development。本番でも使える）
- * - 運営アカウント（OPERATOR）でログイン中の人だけ、テスト店舗（/s/test）で無料の占いを確認できる（lib/services/dev-mode.ts）
+ * - 運営アカウント（OPERATOR）でログイン中の人だけ、テスト店舗（/s/test）と、登録済み・稼働中の実店舗の QR（/s/[storeCode]）で
+ *   無料の占いを確認できる（lib/services/dev-mode.ts）。実店舗の分はその店舗の「無料テスト利用件数」に数える（売上には入らない）
  * - 一般の方・店舗アカウントには準備中を表示する。決済は誰に対しても受け付けない
  *
  * 共通
@@ -80,7 +81,7 @@ export async function isTestModeActive(): Promise<boolean> {
 
 /**
  * 有効な無料の占いの状態（利用できないときは常に null）。
- * 開発モードでは、運営アカウント・ログイン状態・テスト店舗であることを毎回確認する。
+ * 開発モードでは、運営アカウント・ログイン状態・店舗（テスト店舗、または登録済みで稼働中の実店舗）を毎回確認する。
  */
 export async function getTestSession(): Promise<TestSession | null> {
   const state = await testModeState();
@@ -93,9 +94,25 @@ export async function getTestSession(): Promise<TestSession | null> {
       userId: access.user.id,
       sessionHash: access.sessionHash,
     });
-    return s && isTestStoreCode(s.storeCode) ? s : null;
+    return s && (await isDevModeStoreUsable(s.storeCode)) ? s : null;
   }
   return null;
+}
+
+/**
+ * 開発モードの無料占いに使える店舗か。テスト店舗、または登録済みで稼働中（ACTIVE）の実店舗だけ。
+ * 毎回データベースで確認する（休止・QR の再発行・削除のあとは使えない）。確認できないときは使わせない。
+ */
+export async function isDevModeStoreUsable(storeCode: string): Promise<boolean> {
+  if (isTestStoreCode(storeCode)) return true;
+  try {
+    const { findActiveStoreByCode } = await import("./checkout");
+    const store = await findActiveStoreByCode(storeCode);
+    return store?.status === "ACTIVE" && store.storeCode === storeCode;
+  } catch (e) {
+    console.error("[dev-mode] store check failed", (e as Error).name);
+    return false;
+  }
 }
 
 /** 保存する。SESSION_SECRET が安全でないなど、署名できないときは false（保存しない） */
@@ -179,15 +196,19 @@ export type VisitorStore = { storeCode: string; name: string; status: "ACTIVE" |
 
 /**
  * 利用者の店舗を決める。QR（qr_store Cookie）が最優先。
- * - 開発モード（運営）: テスト店舗だけ。実店舗の QR では null
+ * - 開発モード（運営）: QRなし or /s/test → テスト店舗。実店舗の QR は登録されていればその店舗（稼働中かは呼び出し側で status を確認）
  * - テストモード: QRなし or /s/test → テスト店舗。実店舗QRも利用可（テスト利用として記録、売上には入らない）
  * - 本番: QR必須。テスト店舗は利用不可
  */
 export async function resolveVisitorStore(): Promise<VisitorStore | null> {
   const code = await getQrStoreCode();
   const state = await testModeState();
-  // 開発モードではテスト店舗だけ（実店舗の QR では無料の占いを使わない＝実店舗の利用件数に入らない）
-  if (state === "dev") return !code || isTestStoreCode(code) ? TEST_STORE : null;
+  if (state === "dev") {
+    if (!code || isTestStoreCode(code)) return TEST_STORE;
+    // 登録済みの実店舗（未登録なら null。データベースの障害は呼び出し側でエラーとして扱う）
+    const { findActiveStoreByCode } = await import("./checkout");
+    return findActiveStoreByCode(code);
+  }
   const test = state === "on";
   if (!code || isTestStoreCode(code)) return test ? TEST_STORE : null;
   const { findActiveStoreByCode } = await import("./checkout");

@@ -9,7 +9,7 @@ type RawProcessEnv = Record<string, string | undefined>;
  *  open        … 通常どおり（未設定もこれ）
  *  coming_soon … 準備中。無料テスト・有料の決済とも受け付けない（運営・店舗の管理画面は使える）
  *  development … 開発モード。一般の方には準備中を表示し、決済は誰に対しても受け付けない。
- *                運営アカウント（OPERATOR）でログイン中の人だけが、テスト店舗（/s/test）で無料の占いを確認できる（lib/services/dev-mode.ts）
+ *                運営アカウント（OPERATOR）でログイン中の人だけが、テスト店舗（/s/test）と稼働中の登録店舗の QR で無料の占いを確認できる（lib/services/dev-mode.ts）
  * それ以外の値（打ち間違いなど）は、意図せず公開してしまわないよう準備中として扱う（unknown=true）。
  */
 export type SiteStatus = "open" | "coming_soon" | "development";
