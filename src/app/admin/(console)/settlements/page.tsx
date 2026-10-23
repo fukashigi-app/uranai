@@ -6,7 +6,7 @@ import { SettlementRowForm } from "@/components/console/admin-forms";
 import { one } from "@/components/console/pagination";
 import { requireOperator } from "@/lib/auth/session";
 import { listSettlements, type SettlementStatus } from "@/lib/services/settlements";
-import { formatDateJa, formatDateTimeJa, formatYearMonthJa, isValidYearMonth, jstYearMonth, shiftYearMonth } from "@/lib/time";
+import { formatDateJa, formatDateTimeJa, formatYearMonthJa, isValidYearMonth, jstYearMonth } from "@/lib/time";
 import { BANK_CHANGE_WARNING_DAYS, listRecentBankChanges, type BankChange } from "@/lib/services/bank-changes";
 import { getStoresByIds } from "@/lib/services/stores";
 import { formatYen } from "@/lib/money";
@@ -19,8 +19,7 @@ export default async function AdminSettlementsPage(props: PageProps<"/admin/sett
   await requireOperator();
   const sp = await props.searchParams;
   const ymP = one(sp.ym);
-  const lastMonth = shiftYearMonth(jstYearMonth(), -1);
-  const ym = ymP && isValidYearMonth(ymP) && ymP < jstYearMonth() ? ymP : lastMonth;
+  const ym = ymP && isValidYearMonth(ymP) && ymP <= jstYearMonth() ? ymP : jstYearMonth();
   const statusP = one(sp.status);
   const status = (["UNPAID", "PROCESSING", "PAID"] as const).includes(statusP as SettlementStatus) ? (statusP as SettlementStatus) : undefined;
   const [rows, bankChanges] = await Promise.all([listSettlements({ yearMonth: ym, status }), listRecentBankChanges()]);
@@ -35,15 +34,25 @@ export default async function AdminSettlementsPage(props: PageProps<"/admin/sett
       <PageHeader
         title="月次精算"
         description="月末締め後に精算を作成し、振込完了後に「支払済」へ変更してください。"
-        actions={<MonthPicker value={ym} makeHref={(v) => `/admin/settlements?ym=${v < jstYearMonth() ? v : lastMonth}`} />}
+        actions={<MonthPicker value={ym} makeHref={(v) => `/admin/settlements?ym=${v <= jstYearMonth() ? v : jstYearMonth()}`} />}
       />
       <BankChangeNotice changes={bankChanges} names={changeStoreNames} />
       <div className="mb-4 grid gap-4 lg:grid-cols-[1fr_1.4fr]">
         <Card title={`${formatYearMonthJa(ym)}の精算を作成・更新`}>
           <p className="text-[13px] leading-relaxed text-ink-muted">決済成功（返金除外）の取引を店舗ごとに集計します。「未払い」の行は最新の集計で上書きされ、「処理中」「支払済」の行は変更されません。</p>
-          <ActionForm action={generateSettlementsAction} submitLabel="集計して精算を作成" confirmMessage={`${formatYearMonthJa(ym)}の精算を作成/更新します。よろしいですか？`}>
-            <input type="hidden" name="yearMonth" value={ym} />
-          </ActionForm>
+          {ym < jstYearMonth() ? (
+  <ActionForm
+    action={generateSettlementsAction}
+    submitLabel="集計して精算を作成"
+    confirmMessage={`${formatYearMonthJa(ym)}の精算を作成/更新します。よろしいですか？`}
+  >
+    <input type="hidden" name="yearMonth" value={ym} />
+  </ActionForm>
+) : (
+  <p className="mt-4 text-sm text-ink-muted">
+    当月の精算は月末締め後に作成できます。
+  </p>
+)}
         </Card>
         <Card title="合計">
           <dl className="grid grid-cols-2 gap-3 text-[13px] sm:grid-cols-4">

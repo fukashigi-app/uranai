@@ -146,3 +146,4 @@ npm run e2e         # 起動中のアプリに対し QR→100円決済→Webhook
 - CSP / HSTS / X-Frame-Options 等をヘッダーで付与。口座情報は AES-256-GCM 暗号化、閲覧・変更は監査ログに記録
 - カード情報は payjp.js（PAY.JP の iframe）でのみ扱い、自社サーバー・DBには保存しない
 - 生年月日はDBに保存しない（占いの seed 計算にのみ使用）
+<!-- Trigger Build Check for PR #3 -->
