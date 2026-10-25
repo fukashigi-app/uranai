@@ -305,3 +305,18 @@ describe("Stripe のテスト決済を使える人", () => {
     expect(await load({ ...LOCAL, STRIPE_WEBHOOK_SECRET: "" })).toEqual({ ok: false, reason: "webhook_secret_missing" });
   });
 });
+
+// ---- 占いの選択画面の Stripe テスト決済の入口（/fortune?pay=stripe-test） ----
+describe("Stripe テスト決済の専用の入口", () => {
+  it("pay=stripe-test・テスト決済を使える人（運営）・止めていない・実店舗のときだけ開く", async () => {
+    const { stripeTestEntry } = await import("@/lib/payments/stripe-test-entry");
+    const base = { pay: "stripe-test", stripeOk: true, halted: false, realStoreCode: true };
+    expect(stripeTestEntry(base)).toBe("stripe-test");
+    expect(stripeTestEntry({ ...base, realStoreCode: false })).toBe("real_store_required"); // テスト店舗・QR なし
+    // パラメーターが違う・無い、運営以外（テスト決済を使えない）、危険な設定で停止中は今までどおり
+    for (const pay of [undefined, "", "stripe", "STRIPE-TEST", ["stripe-test"], "stripe-test "]) expect(stripeTestEntry({ ...base, pay }), String(pay)).toBe("off");
+    expect(stripeTestEntry({ ...base, stripeOk: false })).toBe("off");
+    expect(stripeTestEntry({ ...base, stripeOk: false, realStoreCode: false })).toBe("off"); // 運営以外には案内も出さない
+    expect(stripeTestEntry({ ...base, halted: true })).toBe("off");
+  });
+});

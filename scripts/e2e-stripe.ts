@@ -568,6 +568,65 @@ async function main() {
   assert.equal(r.status, 200, await r.clone().text());
   step("返金の失敗：refundStatus=failed・要確認として管理画面に表示。処理中は戻せない。管理者が戻すと権利が PAID に戻り占える（監査ログ1件。2回目は何もしない）");
 
+  // ---- 17. /fortune?pay=stripe-test：運営だけの入口。無料の占いは今までどおり。無料の Cookie（fx_dev）は有料の権利を妨げない ----
+  const STRIPE_LABEL = "円で始める（Stripeテスト決済）";
+  const FREE_LABEL = "テストモード：無料で占う";
+  for (const c of [anon, staff]) {
+    await c.req(`/s/${storeA.storeCode}`);
+    const html = await (await c.req("/fortune?pay=stripe-test")).text();
+    assert.ok(!html.includes(STRIPE_LABEL) && !html.includes("実店舗のQRコードから開いてください"), "運営以外に Stripe の入口が見えました");
+  }
+  const opF = await loggedIn(opId);
+  await opF.req("/s/test");
+  assert.match(await (await opF.req("/fortune?pay=stripe-test")).text(), /実店舗のQRコードから開いてください/);
+  await opF.req(`/s/${storeA.storeCode}`);
+  for (const path of ["/fortune", "/fortune?pay=other", "/fortune?pay=STRIPE-TEST"]) {
+    const html = await (await opF.req(path)).text();
+    assert.ok(html.includes(FREE_LABEL) && !html.includes(STRIPE_LABEL), `${path} が無料の占いのままではありません`);
+  }
+  let html17 = await (await opF.req("/fortune?pay=stripe-test")).text();
+  assert.ok(html17.includes(STRIPE_LABEL) && !html17.includes(FREE_LABEL), "Stripe の入口が表示されません");
+  // (a) 無料の占いを済ませた後に Stripe で購入：注文を作ると fx_dev を消す → 支払い後は有料の入力画面
+  r = await opF.req("/api/test-fortune", { method: "POST", json: { fortuneType: "BLOOD" } });
+  assert.equal(r.status, 200, await r.clone().text());
+  assert.ok(opF.jar.get("fx_dev"), "無料の占いの Cookie がありません");
+  r = await opF.req("/api/fortune", { method: "POST", json: { type: "BLOOD", bloodType: "A", birthMonth: 5 } });
+  assert.equal(r.status, 200, await r.clone().text());
+  const pF = await startPurchase(opF, storeA.storeCode, "ZODIAC");
+  assert.ok(!opF.jar.get("fx_dev"), "Stripe の注文を作っても fx_dev が残っています");
+  await ctl(`pay/${pF.sessionId}`);
+  r = await opF.req(`/payment/return?session_id=${pF.sessionId}`);
+  assert.match(r.headers.get("location") ?? "", /\/fortune\/input$/);
+  html17 = await (await opF.req("/fortune/input")).text();
+  assert.ok(!html17.includes("テストモードのため決済をスキップしました"), "有料の入力画面になりません");
+  r = await opF.req("/api/fortune", { method: "POST", json: { type: "ZODIAC", sign: "leo" } });
+  assert.equal(r.status, 200, await r.clone().text());
+  const [tF] = await txOf(pF.checkoutId);
+  assert.equal((await fsdb().collection(C.fortuneSessions).doc(tF.id).get()).get("status"), "USED");
+  assert.match(await (await opF.req("/fortune/result")).text(), /健康運/);
+  // (b) 支払いの確認中に無料の占いを始めても、確定後は有料の権利が優先される。未使用の権利があれば無料の占いは始めない
+  const pG = await startPurchase(opF, storeA.storeCode, "ZODIAC");
+  r = await opF.req("/api/test-fortune", { method: "POST", json: { fortuneType: "BLOOD" } });
+  assert.equal(r.status, 200, "支払いの確認中に無料の占いを始められません");
+  assert.ok(opF.jar.get("fx_dev"));
+  await ctl(`pay/${pG.sessionId}`);
+  r = await webhook("checkout.session.completed", { id: pG.sessionId, object: "checkout.session" });
+  assert.equal(((await r.json()) as { outcome: string }).outcome, "confirmed");
+  html17 = await (await opF.req("/fortune/input")).text();
+  assert.ok(!html17.includes("テストモードのため決済をスキップしました"), "無料の占いの Cookie が有料の権利を隠しました");
+  r = await opF.req("/api/test-fortune", { method: "POST", json: { fortuneType: "BLOOD" } });
+  assert.equal(r.status, 409);
+  assert.equal(((await r.json()) as { error: { code: string } }).error.code, "paid_session_exists");
+  r = await opF.req("/api/fortune", { method: "POST", json: { type: "ZODIAC", sign: "virgo" } });
+  assert.equal(r.status, 200, await r.clone().text());
+  const [tG] = await txOf(pG.checkoutId);
+  assert.equal((await fsdb().collection(C.fortuneSessions).doc(tG.id).get()).get("status"), "USED");
+  assert.deepEqual([tG.get("livemode"), tG.get("countable")], [false, false]);
+  // 有料の権利を使った後は、無料の占いを今までどおり始められる
+  r = await opF.req("/api/test-fortune", { method: "POST", json: { fortuneType: "ZODIAC" } });
+  assert.equal(r.status, 200);
+  step("/fortune?pay=stripe-test：運営だけに Stripe の入口（テスト店舗では実店舗の案内）。パラメーターなしは無料のまま。fx_dev は注文時に消し、確認中に作られても確定後は有料の権利を優先。未使用の権利があれば無料は 409");
+
   // ---- 11. 売上・精算に含めない（テスト決済） ----
   assert.deepEqual(await monthTotals(ym), before.month);
   assert.deepEqual(await monthTotals(ym, storeA.id), before.monthA);

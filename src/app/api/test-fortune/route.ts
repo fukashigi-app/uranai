@@ -10,6 +10,7 @@ import {
   resolveVisitorStore,
   saveTestSession,
   testModeState,
+  hasUnusedPaidEntitlement,
 } from "@/lib/services/test-store";
 import type { FortuneTypeValue } from "@/lib/db/schema";
 
@@ -52,6 +53,9 @@ export async function POST(req: Request) {
     return err(503, "store_unavailable", "店舗情報を確認できませんでした。最初からやり直してください。");
   }
   if (!store || store.status !== "ACTIVE") return err(403, "store_unavailable", "こちらの店舗では現在ご利用いただけません。");
+
+  // 支払い済みで未使用の占い権利があれば、無料の占いを始めない（先に有料の占いへ。画面は入力へ移動する）
+  if (await hasUnusedPaidEntitlement()) return err(409, "paid_session_exists", "お支払い済みの占いがあります。先にそちらをお楽しみください。");
 
   const session = newTestSession(store, type, access?.ok ? { userId: access.user.id, sessionHash: access.sessionHash } : undefined);
   if (!(await saveTestSession(session, isSecureRequest(req)))) return err(503, "unavailable", "ただいま利用できません。しばらくしてからお試しください。");

@@ -6,6 +6,7 @@ import { getFortuneSession } from "@/lib/services/fortune";
 import { CheckoutError, createCheckout, getCheckoutByToken } from "@/lib/services/checkout";
 import { stripeTestAccess } from "@/lib/payments/stripe-access";
 import { STRIPE_SESSION_TTL_MS } from "@/lib/payments/stripe-checkout";
+import { clearFreeSessions } from "@/lib/services/test-store";
 
 const bodySchema = z.object({ fortuneType: z.enum(["BIRTHDAY", "ZODIAC", "BLOOD"]) }).strict();
 
@@ -45,6 +46,9 @@ export async function POST(req: Request) {
       stripe.ok ? { provider: "stripe", ttlMs: STRIPE_SESSION_TTL_MS } : {},
     );
     await setAccessCookie(accessToken);
+    // Stripe のテスト決済：無料の占いの Cookie（fx_dev など）が残っていると、支払い後の入力・結果の画面で
+    // 無料の占いが優先されてしまうため消す（有料の占い権利を確実に使えるように）
+    if (stripe.ok) await clearFreeSessions();
     return jsonOk({ checkoutId }, 201);
   } catch (e) {
     if (e instanceof CheckoutError) return jsonError(e.httpStatus, e.code, e.userMessage);

@@ -94,9 +94,25 @@ export async function getTestSession(): Promise<TestSession | null> {
       userId: access.user.id,
       sessionHash: access.sessionHash,
     });
-    return s && (await isDevModeStoreUsable(s.storeCode)) ? s : null;
+    if (!s || !(await isDevModeStoreUsable(s.storeCode))) return null;
+    // 支払い済みで未使用の占い権利（Stripe のテスト決済）があれば、そちらを優先する（無料の占いの Cookie で隠さない）
+    return (await hasUnusedPaidEntitlement()) ? null : s;
   }
   return null;
+}
+
+/** このブラウザの注文（fx_access）に、支払い済みで未使用の占い権利があるか。確認できないときは false */
+export async function hasUnusedPaidEntitlement(): Promise<boolean> {
+  const { getAccessToken } = await import("@/lib/cookies");
+  const token = await getAccessToken();
+  if (!token || !hasDatabase()) return false;
+  try {
+    const { getFortuneSession } = await import("./fortune");
+    return (await getFortuneSession(token)).state === "paid";
+  } catch (e) {
+    console.error("[test-store] paid entitlement check failed", (e as Error).name);
+    return false;
+  }
 }
 
 /**
@@ -116,6 +132,12 @@ export async function isDevModeStoreUsable(storeCode: string): Promise<boolean> 
 }
 
 /** 保存する。SESSION_SECRET が安全でないなど、署名できないときは false（保存しない） */
+/** 無料の占いの Cookie（テストモード・開発モード）を消す。Stripe のテスト決済の注文を作るとき、有料の占い権利を優先させるため */
+export async function clearFreeSessions(): Promise<void> {
+  const jar = await cookies();
+  for (const name of Object.values(FREE_COOKIE)) if (jar.get(name)) jar.delete(name);
+}
+
 export async function saveTestSession(s: TestSession, secure: boolean): Promise<boolean> {
   const mode = s.mode === "development" ? "development" : "test";
   const value = encodeFreeSession(s, mode, process.env.SESSION_SECRET);
