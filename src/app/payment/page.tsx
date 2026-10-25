@@ -9,13 +9,18 @@ import { getAccessToken } from "@/lib/cookies";
 import { getCheckoutByToken } from "@/lib/services/checkout";
 import { activeProvider, PaymentUnavailableError } from "@/lib/payments";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
+import { stripeTestAccess } from "@/lib/payments/stripe-access";
+import { StripeCheckoutButton } from "@/components/public/stripe-checkout-button";
 
 // 決済の状態・公開状態（準備中など）で表示が変わるため毎回サーバーで描画（ビルド時の状態で固定しない）
 export const dynamic = "force-dynamic";
 
-export default async function PaymentPage() {
+export default async function PaymentPage(props: PageProps<"/payment">) {
+  const canceled = (await props.searchParams).canceled === "1";
+  // Stripe のテスト決済（Preview・運営アカウントだけ）は、開発モード・準備中でも使える（危険な設定・設定の不足では使えない）
+  const stripe = await stripeTestAccess();
   const stop = serviceStopReason();
-  if (stop) {
+  if (stop && !stripe.ok) {
     return (
       <PublicShell>
         <ServicePausedNotice reason={stop === "dangerous_config" ? "halted" : stop} />
@@ -38,6 +43,37 @@ export default async function PaymentPage() {
     );
   }
 
+  const item = FORTUNE_CATALOG[checkout.fortuneType];
+  if (checkout.provider === "stripe") {
+    if (!stripe.ok) {
+      return (
+        <PublicShell storeName={storeName}>
+          <Notice title="ただいまお支払いを受け付けていません">お支払いは行われていません。お手数ですが、占いの選択からやり直してください。</Notice>
+        </PublicShell>
+      );
+    }
+    return (
+      <PublicShell storeName={storeName} step={2}>
+        <h1 className="mb-4 font-serif text-2xl font-bold tracking-wide">お支払い</h1>
+        <PaymentHeader fortuneType={checkout.fortuneType} label={item.label} storeName={storeName} amount={checkout.amount} />
+        <PurchaseSummary fortuneLabel={item.label} inputLabel={item.inputLabel} expiresAt={checkout.expiresAt} testPayment />
+        <StripeCheckoutButton canceled={canceled} />
+        <p className="mt-4 text-center">
+          <Link href="/fortune" className="text-[12px] text-ink-muted underline underline-offset-4">
+            占いを選び直す
+          </Link>
+        </p>
+      </PublicShell>
+    );
+  }
+  if (stop) {
+    return (
+      <PublicShell>
+        <ServicePausedNotice reason={stop === "dangerous_config" ? "halted" : stop} />
+      </PublicShell>
+    );
+  }
+
   let config: ReturnType<ReturnType<typeof activeProvider>["publicConfig"]>;
   try {
     config = activeProvider().publicConfig();
@@ -50,22 +86,10 @@ export default async function PaymentPage() {
     );
   }
   const { provider, publicKey } = config;
-  const item = FORTUNE_CATALOG[checkout.fortuneType];
   return (
     <PublicShell storeName={storeName} step={2}>
       <h1 className="mb-4 font-serif text-2xl font-bold tracking-wide">お支払い</h1>
-      <div className="glass mb-4 flex items-center gap-4 rounded-3xl p-4 fade-up">
-        <FortuneIcon type={checkout.fortuneType} className="h-11 w-11 shrink-0" />
-        <div className="flex-1">
-          <p className="font-serif font-bold">{item.label}</p>
-          <p className="text-[12px] text-ink-muted">{storeName}</p>
-        </div>
-        <p className="text-right">
-          <span className="font-display text-3xl font-semibold text-gold-200">{checkout.amount}</span>
-          <span className="text-sm text-gold-200">円</span>
-          <span className="block text-[10px] text-ink-faint">税込</span>
-        </p>
-      </div>
+      <PaymentHeader fortuneType={checkout.fortuneType} label={item.label} storeName={storeName} amount={checkout.amount} />
       <section className="mb-4 rounded-3xl border border-gold-300/25 bg-gold-300/[0.05] px-5 py-4 fade-up" aria-labelledby="learn-heading">
         <h2 id="learn-heading" className="text-[12px] tracking-[0.2em] text-gold-300">
           この占いでわかること
@@ -94,5 +118,22 @@ export default async function PaymentPage() {
         </Link>
       </p>
     </PublicShell>
+  );
+}
+
+function PaymentHeader({ fortuneType, label, storeName, amount }: { fortuneType: Parameters<typeof FortuneIcon>[0]["type"]; label: string; storeName: string; amount: number }) {
+  return (
+    <div className="glass mb-4 flex items-center gap-4 rounded-3xl p-4 fade-up">
+      <FortuneIcon type={fortuneType} className="h-11 w-11 shrink-0" />
+      <div className="flex-1">
+        <p className="font-serif font-bold">{label}</p>
+        <p className="text-[12px] text-ink-muted">{storeName}</p>
+      </div>
+      <p className="text-right">
+        <span className="font-display text-3xl font-semibold text-gold-200">{amount}</span>
+        <span className="text-sm text-gold-200">円</span>
+        <span className="block text-[10px] text-ink-faint">税込</span>
+      </p>
+    </div>
   );
 }

@@ -31,8 +31,10 @@ export async function findActiveStoreByCode(storeCode: string) {
  * 店舗はクライアントが送る storeId ではなく、QR由来の storeCode を DB で再照会して決定する。
  * 金額はサーバーの固定価格のみを使う。
  */
-export async function createCheckout(storeCode: string | null, fortuneType: FortuneTypeValue) {
-  if (isFirestore()) return fsPay.createCheckout(storeCode, fortuneType);
+export async function createCheckout(storeCode: string | null, fortuneType: FortuneTypeValue, opts: { provider?: "stripe"; ttlMs?: number } = {}) {
+  if (isFirestore()) return fsPay.createCheckout(storeCode, fortuneType, opts);
+  // Stripe のテスト決済は Firestore 版だけ（PostgreSQL 版では受け付けない）
+  if (opts.provider) throw new CheckoutError("payment_unavailable", "ただいまお支払いを受け付けていません。", 503);
   if (!storeCode) {
     throw new CheckoutError("no_store", "店舗のQRコードを読み込んでからご利用ください。");
   }

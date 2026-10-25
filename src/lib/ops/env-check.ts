@@ -127,6 +127,16 @@ export function checkProductionEnv(env: Env): CheckResult[] {
     add(k, "warn", /_live_/.test(env[k]!) ? "PAY.JP の本番キーが登録されています。PAY.JP を使わない方針なら削除してください（本当の課金が起こり得ます）。" : "PAY.JP の設定が残っています。使わない方針なら削除してください。");
   }
 
+  // ---- Stripe（テスト決済は Preview だけ。本番では使わない） ----
+  if (has(env.STRIPE_TEST_CHECKOUT)) add("STRIPE_TEST_CHECKOUT", "error", "Stripe のテスト決済の設定が本番にあります（本番では常に無効）。Preview だけに設定し、本番からは削除してください。");
+  if (has(env.STRIPE_API_BASE)) add("STRIPE_API_BASE", "error", "ローカルの自動テスト用の設定です。本番から削除してください。");
+  for (const k of ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_TEST_FIREBASE_PROJECT_ID"]) {
+    if (has(env[k])) add(k, "warn", "Stripe の設定が本番にあります。Stripe の本番決済は未実装です。テスト用の値なら Preview だけに設定してください。");
+  }
+
+  // ---- Preview 専用の診断（本番では常に無効。値が残っていれば削除を促す） ----
+  if (has(env.OPS_DIAGNOSTICS_TOKEN)) add("OPS_DIAGNOSTICS_TOKEN", "warn", "Preview 専用の診断トークンが本番にあります（本番では使われません）。Preview だけに設定し、本番からは削除してください。");
+
   // ---- 取り違え・公開してはいけない値 ----
   for (const [k, v] of Object.entries(env)) {
     if (!has(v)) continue;

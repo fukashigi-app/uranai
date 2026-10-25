@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Card, PageHeader, StatusBadge, Table } from "@/components/console/shell";
 import { PaymentKindBadge } from "@/components/console/payment-kind-badge";
 import { MonthPicker } from "@/components/console/month-picker";
+import { StripeRefundReviews } from "@/components/console/stripe-refund-reviews";
 import { Pagination, one, parsePage } from "@/components/console/pagination";
 import { requireOperator } from "@/lib/auth/session";
 import { getStoreById } from "@/lib/services/stores";
@@ -63,6 +64,9 @@ export default async function AdminTransactionsPage(props: PageProps<"/admin/tra
             <p className="font-bold tabular-nums">{v}</p>
           </div>
         ))}
+      </div>
+      <div className="mb-4">
+        <StripeRefundReviews />
       </div>
       <Card>
         <Table head={["日時", "店舗", "占い", "金額", "店舗取り分", "運営取り分", "手数料", "決済", "占い", "決済ID"]} empty={data.rows.length === 0}>

@@ -1,0 +1,26 @@
+import { guardPost, jsonError, jsonOk } from "@/lib/api";
+import { env } from "@/lib/env";
+import { getAccessToken } from "@/lib/cookies";
+import { CheckoutError } from "@/lib/errors";
+import { stripeTestAccess } from "@/lib/payments/stripe-access";
+import { startStripeCheckout } from "@/lib/payments/stripe-confirm";
+
+/**
+ * Stripe の決済画面（Checkout）の URL を返す。Stripe のテスト決済が使えて、運営アカウントでログイン中のときだけ。
+ * 注文はブラウザの Cookie から見つける（注文IDや金額はリクエストで受け付けない）。注文と Session を紐付けてから URL を返す。
+ */
+export async function POST(req: Request) {
+  const access = await stripeTestAccess();
+  if (!access.ok) return jsonError(404, "not_found", "ただいまお支払いを受け付けていません。");
+  const blocked = await guardPost(req, "stripe-session", 10, 60);
+  if (blocked) return blocked;
+  try {
+    const r = await startStripeCheckout(await getAccessToken(), env().APP_URL);
+    // pending … Stripe 側で支払いの確定待ち（PayPay など）。新しい決済画面には移動させず、確認中の画面へ
+    return jsonOk(r.status === "succeeded" ? { status: "succeeded" } : r.status === "pending" ? { status: "pending", url: r.returnUrl } : { status: "redirect", url: r.url });
+  } catch (e) {
+    if (e instanceof CheckoutError) return jsonError(e.httpStatus, e.code, e.userMessage);
+    console.error("[api/checkout/stripe-session] failed", (e as Error).name);
+    return jsonError(502, "stripe_unavailable", "決済画面を開けませんでした。少し時間をおいてから、もう一度お試しください。");
+  }
+}

@@ -4,14 +4,20 @@ import { serviceStopReason } from "@/lib/env";
 import { getAccessToken, getQrStoreCode, setAccessCookie } from "@/lib/cookies";
 import { getFortuneSession } from "@/lib/services/fortune";
 import { CheckoutError, createCheckout, getCheckoutByToken } from "@/lib/services/checkout";
+import { stripeTestAccess } from "@/lib/payments/stripe-access";
+import { STRIPE_SESSION_TTL_MS } from "@/lib/payments/stripe-checkout";
 
 const bodySchema = z.object({ fortuneType: z.enum(["BIRTHDAY", "ZODIAC", "BLOOD"]) }).strict();
 
 /** 決済セッション作成。金額・店舗はサーバー側で決定する（body に金額や storeId は受け付けない） */
 export async function POST(req: Request) {
-  // 危険な設定・開発モード・準備中のときは、誰に対しても決済を受け付けない（サーバー側で判定。運営アカウントも例外なし）
-  const stopped = paymentStopResponse(serviceStopReason());
-  if (stopped) return stopped;
+  // Stripe のテスト決済（Preview・運営アカウントだけ。設定が欠けていたら使わない）。
+  // それ以外は、危険な設定・開発モード・準備中のとき、誰に対しても決済を受け付けない（サーバー側で判定）
+  const stripe = await stripeTestAccess();
+  if (!stripe.ok) {
+    const stopped = paymentStopResponse(serviceStopReason());
+    if (stopped) return stopped;
+  }
   const blocked = await guardPost(req, "checkout", 20, 60);
   if (blocked) return blocked;
   let body;
@@ -33,7 +39,11 @@ export async function POST(req: Request) {
   }
   try {
     // 有料フローは店舗QR必須（テストモードは /api/test-fortune を使う）
-    const { checkoutId, accessToken } = await createCheckout(await getQrStoreCode(), body.fortuneType);
+    const { checkoutId, accessToken } = await createCheckout(
+      await getQrStoreCode(),
+      body.fortuneType,
+      stripe.ok ? { provider: "stripe", ttlMs: STRIPE_SESSION_TTL_MS } : {},
+    );
     await setAccessCookie(accessToken);
     return jsonOk({ checkoutId }, 201);
   } catch (e) {

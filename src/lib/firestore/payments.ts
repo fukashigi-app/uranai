@@ -53,14 +53,18 @@ function toCheckout(id: string, d: DocumentData): Checkout {
 
 // ---------- 注文 ----------
 
-export async function createCheckout(storeCode: string | null, fortuneType: FortuneTypeValue) {
+/**
+ * 注文を作る。opts.provider = "stripe" のときは Stripe Checkout のテスト決済用（呼び出し側でテスト決済の条件と運営アカウントを確認済み）。
+ * 有効期限は Stripe の Checkout Session と同じにする（opts.ttlMs）。
+ */
+export async function createCheckout(storeCode: string | null, fortuneType: FortuneTypeValue, opts: { provider?: "stripe"; ttlMs?: number } = {}) {
   if (!storeCode) throw new CheckoutError("no_store", "店舗のQRコードを読み込んでからご利用ください。");
   const store = await findStoreByCode(storeCode);
   if (!store) throw new CheckoutError("store_not_found", "店舗情報が見つかりません。お店のQRコードをもう一度読み込んでください。", 404);
   if (store.status !== "ACTIVE" || PAID_FLOW_BLOCKED_STORE_CODES.has(store.storeCode)) {
     throw new CheckoutError("store_suspended", "こちらの店舗では現在ご利用いただけません。", 403);
   }
-  const provider = providerOrThrow();
+  const providerId = opts.provider ?? providerOrThrow().id;
   const token = randomToken(32);
   const id = randomUUID();
   await checkoutRef(id).set({
@@ -68,13 +72,13 @@ export async function createCheckout(storeCode: string | null, fortuneType: Fort
     fortuneType,
     amount: PRICE_JPY, // 金額はサーバーの固定価格のみ
     status: "CREATED",
-    provider: provider.id,
+    provider: providerId,
     providerPaymentId: null,
     providerPaymentKey: null,
     accessTokenHash: sha256Hex(token),
     attemptCount: 0,
     failureCode: null,
-    expiresAt: new Date(Date.now() + CHECKOUT_TTL_MS),
+    expiresAt: new Date(Date.now() + (opts.ttlMs ?? CHECKOUT_TTL_MS)),
     processingStartedAt: null,
     createdAt: FieldValue.serverTimestamp(),
     updatedAt: FieldValue.serverTimestamp(),
@@ -164,6 +168,10 @@ export async function getCheckoutStatus(token: string | null): Promise<{ status:
   const found = await getCheckoutByToken(token);
   if (!found) return { status: "expired" };
   const { checkout } = found;
+  if (checkout.provider === "stripe") {
+    const { stripeCheckoutStatus } = await import("@/lib/payments/stripe-confirm");
+    return stripeCheckoutStatus(checkout);
+  }
   switch (checkout.status) {
     case "SUCCEEDED":
       return { status: "succeeded" };
@@ -309,7 +317,7 @@ export async function markRefunded(providerId: ProviderId, chargeId: string): Pr
 
 // ---------- Webhook の冪等性 ----------
 
-export async function beginWebhookEvent(provider: ProviderId, eventId: string, type: string): Promise<boolean> {
+export async function beginWebhookEvent(provider: ProviderId | "stripe", eventId: string, type: string): Promise<boolean> {
   const ref = fsdb().collection(C.webhookEvents).doc(safeId(provider, eventId));
   try {
     await ref.create({ provider, eventId, type, processedAt: null, createdAt: FieldValue.serverTimestamp() });
@@ -320,6 +328,6 @@ export async function beginWebhookEvent(provider: ProviderId, eventId: string, t
   return !snap.get("processedAt");
 }
 
-export async function finishWebhookEvent(provider: ProviderId, eventId: string): Promise<void> {
+export async function finishWebhookEvent(provider: ProviderId | "stripe", eventId: string): Promise<void> {
   await fsdb().collection(C.webhookEvents).doc(safeId(provider, eventId)).update({ processedAt: FieldValue.serverTimestamp() });
 }

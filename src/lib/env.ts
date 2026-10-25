@@ -237,6 +237,12 @@ export function productionConfigIssues(e: RawProcessEnv = process.env): Producti
       message: `開発モードなのに本番用の決済キー（${livePaymentKeyNames(e).join("・")}）が設定されています。安全のため、占いの受付（開発モードの無料占いを含む）を停止しています。開発モード中は本番用の決済キーを削除してください。`,
     });
   }
+  if ((e.STRIPE_TEST_CHECKOUT ?? "").trim()) {
+    issues.push({ level: "error", key: "STRIPE_TEST_CHECKOUT", message: "Stripe のテスト決済の設定が本番にあります（本番では常に無効にしています）。Preview だけに設定し、本番からは削除してください。" });
+  }
+  if ((e.STRIPE_SECRET_KEY ?? "").startsWith("sk_test_") || (e.STRIPE_API_BASE ?? "").trim()) {
+    issues.push({ level: "warning", key: "STRIPE_KEYS", message: "Stripe のテスト用の設定が本番にあります。本番では使いません。Preview だけに設定してください。" });
+  }
   const prodFs = (e.PRODUCTION_FIREBASE_PROJECT_ID ?? "").trim();
   if (prodFs && e.FIREBASE_PROJECT_ID && e.FIREBASE_PROJECT_ID.trim().toLowerCase() !== prodFs.toLowerCase()) {
     issues.push({ level: "warning", key: "FIREBASE_PROJECT_ID", message: "本番の Firebase プロジェクトが PRODUCTION_FIREBASE_PROJECT_ID と一致しません。本番以外のプロジェクトに接続していないか確認してください。" });

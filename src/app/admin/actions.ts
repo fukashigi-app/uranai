@@ -209,3 +209,33 @@ export async function changeAdminPasswordAction(_prev: FormState, fd: FormData):
   await setUserPassword(user.id, next, actor, await currentSessionHash());
   return { ok: true, message: "パスワードを変更しました。ほかの端末ではログインし直してください。" };
 }
+
+const stripeTxId = z.string().regex(/^stripe_[A-Za-z0-9_]{1,200}$/);
+
+/** Stripe のテスト決済：返金に失敗した決済の占い権利を戻す（Stripe API で返金の状態を取り直してから。監査ログに記録） */
+export async function restoreStripeEntitlementAction(transactionId: string, _prev: FormState): Promise<FormState> {
+  const { actor } = await operator();
+  if (!stripeTxId.safeParse(transactionId).success) throw new Error("invalid id");
+  const { restoreStripeEntitlement } = await import("@/lib/payments/stripe-confirm");
+  let r: Awaited<ReturnType<typeof restoreStripeEntitlement>>;
+  try {
+    r = await restoreStripeEntitlement(transactionId, actor);
+  } catch (e) {
+    console.error("[admin] stripe entitlement restore failed", (e as Error).name);
+    return { message: "Stripe で返金の状態を確認できませんでした。少し時間をおいてから、もう一度お試しください。" };
+  }
+  revalidatePath("/admin/transactions");
+  if (r === "restored") return { ok: true, message: "占い権利を戻しました（有効期限は今から24時間）。" };
+  if (r === "refund_not_failed") return { message: "返金が失敗の状態ではないため、戻せません（返金が処理中・成功の可能性があります）。" };
+  return { message: "戻せる占い権利がありません（使用済み・返金で止めたものではない・すでに戻した、など）。" };
+}
+
+/** Stripe のテスト決済：返金の確認を終える（権利は戻さない。監査ログに記録） */
+export async function dismissStripeRefundReviewAction(transactionId: string, _prev: FormState): Promise<FormState> {
+  const { actor } = await operator();
+  if (!stripeTxId.safeParse(transactionId).success) throw new Error("invalid id");
+  const { dismissStripeRefundReview } = await import("@/lib/payments/stripe-confirm");
+  const done = await dismissStripeRefundReview(transactionId, actor);
+  revalidatePath("/admin/transactions");
+  return done ? { ok: true, message: "確認済みにしました。" } : { message: "すでに確認済みです。" };
+}
