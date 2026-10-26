@@ -43,8 +43,16 @@ export function stripeWebhookSecret(): string {
   return cfg.webhookSecret;
 }
 
-/** Stripe の Checkout Session の有効期限（Stripe の下限は30分）。注文の有効期限もこれに合わせる */
+/** Stripe の Checkout Session の有効期限（Stripe の下限は作成から30分）。注文の有効期限もこれに合わせる */
 export const STRIPE_SESSION_TTL_MS = 31 * 60 * 1000;
+
+/**
+ * Session の有効期限（Session を作る時刻が基準。Stripe は「作成から30分〜24時間後」だけを受け付ける）。
+ * 分単位に切り上げるので、同じ分のうちの連打では同じ値になり、冪等キーも同じになる（Session が増えない）。
+ */
+export function stripeSessionExpiry(now: number = Date.now()): Date {
+  return new Date(Math.ceil((now + STRIPE_SESSION_TTL_MS) / 60_000) * 60_000);
+}
 
 /**
  * Session で使える支払い方法（allowed_payment_method_types。Stripe が自動で選ぶ候補から、この中のものだけを表示する）。
@@ -63,19 +71,26 @@ export type StripeSessionInput = {
   productName: string;
   /** 戻り先のサイトの URL（https。ローカルの自動テストだけ http を許可） */
   origin: string;
+  /** Session の有効期限（stripeSessionExpiry。Session を作る時刻から30分より後） */
   expiresAt: Date;
 };
 
 /**
- * Checkout Session を作成する。冪等キーは注文IDから作るので、同じ注文で何度呼んでも同じ Session が返る
- * （画面の連打・通信の再試行で Session が増えない）。注文IDは metadata と client_reference_id の両方に入れる。
+ * Checkout Session を作成する。冪等キーは注文IDと有効期限から作るので、同じ注文・同じ期限で何度呼んでも同じ Session が返る
+ * （画面の連打・通信の再試行で Session が増えない。期限が変われば別の要求になり、冪等キーの食い違いのエラーにならない）。
+ * 注文IDは metadata と client_reference_id の両方に入れる。
+ *
+ * Managed Payments（Stripe が販売者になる仕組み）は使わない。このアプリは運営が販売者で、店舗の取り分はアプリ内で計算・記録し、
+ * 運営が銀行振込する。アカウントの既定で有効になっていても、Session ごとに managed_payments.enabled=false を明示する。
  */
-export async function createStripeCheckoutSession(input: StripeSessionInput): Promise<{ id: string; url: string }> {
+export async function createStripeCheckoutSession(input: StripeSessionInput): Promise<{ id: string; url: string; expiresAt: Date }> {
   const cfg = stripeTestConfig();
   if (!cfg.ok) throw new StripeUnavailableError(STRIPE_TEST_DENY_MESSAGE[cfg.reason]);
   const origin = new URL(input.origin);
   if (origin.protocol !== "https:" && !(cfg.mode === "local" && origin.protocol === "http:")) throw new Error("checkout origin must be https");
   const metadata = { checkoutId: input.checkoutId, storeId: input.storeId, fortuneType: input.fortuneType };
+  const expiresAt = Math.floor(input.expiresAt.getTime() / 1000);
+  if (expiresAt * 1000 < Date.now() + 30 * 60 * 1000) throw new Error("checkout session expiry is too early");
   const session = await stripeClient().checkout.sessions.create(
     {
       mode: "payment",
@@ -87,19 +102,30 @@ export async function createStripeCheckoutSession(input: StripeSessionInput): Pr
       payment_intent_data: { metadata },
       success_url: `${origin.origin}/payment/return?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${origin.origin}/payment?canceled=1`,
-      expires_at: Math.floor(input.expiresAt.getTime() / 1000),
+      expires_at: expiresAt,
       allowed_payment_method_types: [...STRIPE_ALLOWED_PAYMENT_METHOD_TYPES],
+      managed_payments: { enabled: false },
     },
-    { idempotencyKey: `uranai-checkout-${input.checkoutId}` },
+    { idempotencyKey: `uranai-checkout-v2-${input.checkoutId}-${expiresAt}` },
   );
   if (!session.id.startsWith("cs_test_") || session.livemode || !session.url) throw new Error("unexpected checkout session");
   if (session.client_reference_id !== input.checkoutId || session.metadata?.checkoutId !== input.checkoutId) throw new Error("checkout session is not linked to the order");
+  // Managed Payments が有効な Session（販売者が Stripe になる）には移動させない
+  if (session.managed_payments?.enabled === true) throw new Error("checkout session uses managed payments");
+  if (session.expires_at !== expiresAt) throw new Error("checkout session expiry mismatch");
   // Stripe が実際に表示する支払い方法がカード・PayPay の範囲に収まっているか（絞り込みが効いていなければ、決済画面に移動させない）
   const allowed = new Set<string>(STRIPE_ALLOWED_PAYMENT_METHOD_TYPES);
   if (!Array.isArray(session.payment_method_types) || session.payment_method_types.length === 0 || session.payment_method_types.some((t) => !allowed.has(t))) {
     throw new Error("checkout session offers unexpected payment methods");
   }
-  return { id: session.id, url: session.url };
+  return { id: session.id, url: session.url, expiresAt: new Date(session.expires_at * 1000) };
+}
+
+/** Stripe のエラーのうち、原因の特定に必要で秘密情報を含まない項目だけ（ログ用。エラー文は含めない） */
+export function stripeErrorSummary(e: unknown): Record<string, string | number | null> {
+  const x = (e ?? {}) as { name?: unknown; type?: unknown; code?: unknown; param?: unknown; statusCode?: unknown; requestId?: unknown };
+  const str = (v: unknown) => (typeof v === "string" && v.length <= 120 && /^[\w.\-\[\]]+$/.test(v) ? v : null);
+  return { name: str(x.name), type: str(x.type), code: str(x.code), param: str(x.param), statusCode: typeof x.statusCode === "number" ? x.statusCode : null, requestId: str(x.requestId) };
 }
 
 /** 決済の確認に必要な情報を Stripe API から取り直す（PaymentIntent・Charge・手数料の明細まで） */
@@ -153,6 +179,8 @@ const idOf = (v: unknown): string | null => (typeof v === "string" ? v : v && ty
 export function validateStripeSession(session: Stripe.Checkout.Session): StripeValidation {
   if (session.object !== "checkout.session" || !isStripeTestSessionId(session.id)) return { ok: false, status: "rejected", reason: "not_test_session" };
   if (session.livemode) return { ok: false, status: "rejected", reason: "livemode" };
+  // Managed Payments（Stripe が販売者）の決済は記録しない（このアプリは運営が販売者。店舗の取り分の前提が変わる）
+  if (session.managed_payments?.enabled === true) return { ok: false, status: "rejected", reason: "managed_payments_not_allowed" };
   if (session.mode !== "payment") return { ok: false, status: "rejected", reason: "mode" };
   if (session.status !== "complete" || session.payment_status !== "paid") return { ok: false, status: "not_paid", reason: `session_${session.status}_${session.payment_status}` };
   if (session.currency !== CURRENCY) return { ok: false, status: "rejected", reason: "currency_mismatch" };

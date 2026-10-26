@@ -4,6 +4,7 @@ import { getAccessToken } from "@/lib/cookies";
 import { CheckoutError } from "@/lib/errors";
 import { stripeTestAccess } from "@/lib/payments/stripe-access";
 import { startStripeCheckout } from "@/lib/payments/stripe-confirm";
+import { stripeErrorSummary } from "@/lib/payments/stripe-checkout";
 
 /**
  * Stripe の決済画面（Checkout）の URL を返す。Stripe のテスト決済が使えて、運営アカウントでログイン中のときだけ。
@@ -20,7 +21,8 @@ export async function POST(req: Request) {
     return jsonOk(r.status === "succeeded" ? { status: "succeeded" } : r.status === "pending" ? { status: "pending", url: r.returnUrl } : { status: "redirect", url: r.url });
   } catch (e) {
     if (e instanceof CheckoutError) return jsonError(e.httpStatus, e.code, e.userMessage);
-    console.error("[api/checkout/stripe-session] failed", (e as Error).name);
+    // Stripe のエラーは種類・コード・項目名・リクエストID だけを残す（エラー文・秘密情報は出さない。Stripe のログで照合できる）
+    console.error("[api/checkout/stripe-session] failed", stripeErrorSummary(e));
     return jsonError(502, "stripe_unavailable", "決済画面を開けませんでした。少し時間をおいてから、もう一度お試しください。");
   }
 }

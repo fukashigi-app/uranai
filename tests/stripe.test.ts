@@ -320,3 +320,32 @@ describe("Stripe テスト決済の専用の入口", () => {
     expect(stripeTestEntry({ ...base, halted: true })).toBe("off");
   });
 });
+
+describe("Managed Payments は使わない・Session の期限・エラーのログ", () => {
+  it("確定時に取り直した Session が Managed Payments なら記録しない", async () => {
+    const { validateStripeSession } = await import("@/lib/payments/stripe-checkout");
+    expect(validateStripeSession(session({ managed_payments: { enabled: true } }))).toEqual({ ok: false, status: "rejected", reason: "managed_payments_not_allowed" });
+    expect(validateStripeSession(session({ managed_payments: { enabled: false } }))).toMatchObject({ ok: true });
+    expect(validateStripeSession(session({ managed_payments: null }))).toMatchObject({ ok: true });
+  });
+
+  it("Session の期限は作る時刻から31分以上・分単位（同じ分の連打は同じ値）", async () => {
+    const { stripeSessionExpiry } = await import("@/lib/payments/stripe-checkout");
+    const now = Date.UTC(2026, 9, 26, 3, 15, 20);
+    const e = stripeSessionExpiry(now).getTime();
+    expect(e - now).toBeGreaterThanOrEqual(31 * 60_000);
+    expect(e - now).toBeLessThan(32 * 60_000);
+    expect(e % 60_000).toBe(0);
+    expect(stripeSessionExpiry(now + 30_000).getTime()).toBe(e);
+  });
+
+  it("Stripe のエラーのログは種類・コード・項目名・リクエストID だけ（エラー文やキーを含めない）", async () => {
+    const { stripeErrorSummary } = await import("@/lib/payments/stripe-checkout");
+    const err = Object.assign(new Error("Invalid API Key provided: sk_test_****abcd"), { name: "StripeInvalidRequestError", type: "invalid_request_error", code: "parameter_unknown", param: "allowed_payment_method_types", statusCode: 400, requestId: "req_test_123" });
+    const s = stripeErrorSummary(err);
+    expect(s).toEqual({ name: "StripeInvalidRequestError", type: "invalid_request_error", code: "parameter_unknown", param: "allowed_payment_method_types", statusCode: 400, requestId: "req_test_123" });
+    expect(JSON.stringify(s)).not.toContain("sk_test");
+    expect(stripeErrorSummary(Object.assign(new Error("x"), { param: "a b sk_test_123 <script>" })).param).toBeNull();
+    expect(stripeErrorSummary(null)).toMatchObject({ name: null, statusCode: null });
+  });
+});

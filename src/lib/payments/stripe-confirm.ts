@@ -18,6 +18,7 @@ import {
   retrieveStripeCharge,
   retrieveStripeSession,
   STRIPE_SESSION_TTL_MS,
+  stripeSessionExpiry,
   stripeSessionState,
   summarizeRefunds,
   validateStripeSession,
@@ -66,7 +67,9 @@ async function stripeCheckoutByToken(token: string | null): Promise<{ id: string
 
 /**
  * 決済画面（Stripe）へ移動するための URL を返す。
- *  - 同じ注文では同じ Session（冪等キー）。注文に Session の ID を保存してから URL を返す（紐付けてから移動する）
+ *  - 1つの注文に紐付く Session は1つだけ。注文に Session の ID を保存してから URL を返す（紐付けてから移動する）
+ *  - 紐付いた Session がまだ支払える（open）なら、作り直さずにその URL を返す（二重の決済を防ぐ）
+ *  - Session の有効期限は、Session を作る時刻から31分後（Stripe の下限は作成から30分）。注文の有効期限も同じ値にそろえる
  *  - すでに別の Session が紐付いていたら拒否する
  */
 const EXPIRED_ERROR = () => new CheckoutError("expired", "お支払いの有効期限が切れました。お手数ですが占いの選択からやり直してください。", 410);
@@ -87,17 +90,22 @@ export async function startStripeCheckout(token: string | null, origin: string):
     // すでに閉じた注文（失敗・期限切れ）は、支払いが確定していなければ選び直しを案内する
     if (d.status === "FAILED") throw FAILED_ERROR();
     if (d.status === "EXPIRED") throw EXPIRED_ERROR();
-    const state = await stripeSessionStateOf(d.providerPaymentId);
-    // Stripe 側で確定待ち：新しい決済画面には移動させない（二重の支払いを防ぐ）。確認中の画面へ
-    if (state === "awaiting" || state === "failed_candidate") {
-      return { status: "pending", returnUrl: `/payment/return?session_id=${encodeURIComponent(d.providerPaymentId)}` };
+    const linkedSession = await retrieveStripeSession(d.providerPaymentId);
+    const state = stripeSessionState(linkedSession);
+    // まだ支払える Session（カードの拒否の後なども含む）：同じ決済画面へ戻す
+    if (state === "retryable") {
+      if (!linkedSession.url) throw new CheckoutError("checkout_conflict", "お支払い情報を確認できませんでした。占いの選択からやり直してください。", 409);
+      return { status: "redirect", url: linkedSession.url };
     }
     if (state === "canceled" || state === "expired") {
       await closeStripeCheckout(d.providerPaymentId);
       throw state === "canceled" ? FAILED_ERROR() : EXPIRED_ERROR();
     }
+    // それ以外（Stripe 側で確定待ち・支払い済みで確定の処理待ちなど）：新しい Session は作らない（二重の支払いを防ぐ）。確認中の画面へ
+    return { status: "pending", returnUrl: `/payment/return?session_id=${encodeURIComponent(d.providerPaymentId)}` };
   }
   if (d.status === "FAILED") throw FAILED_ERROR();
+  // 注文の期限が過ぎていたら Session を作らない（注文の期限は、占いを選んだ時刻から31分）
   if (!["CREATED", "PROCESSING"].includes(d.status) || mustDate(d.expiresAt) <= new Date()) throw EXPIRED_ERROR();
   const store = await fsdb().collection(C.stores).doc(String(d.storeId)).get();
   if (!store.exists || store.get("status") !== "ACTIVE") throw new CheckoutError("store_suspended", "こちらの店舗では現在ご利用いただけません。", 403);
@@ -108,7 +116,7 @@ export async function startStripeCheckout(token: string | null, origin: string):
     fortuneType: String(d.fortuneType),
     productName: `${siteConfig.name} ${FORTUNE_CATALOG[d.fortuneType as keyof typeof FORTUNE_CATALOG]?.label ?? "占い"}（テスト決済）`,
     origin,
-    expiresAt: mustDate(d.expiresAt),
+    expiresAt: stripeSessionExpiry(),
   });
   const linked = await fsdb().runTransaction(async (tx) => {
     const snap = await tx.get(checkoutRef(found.id));
@@ -121,6 +129,8 @@ export async function startStripeCheckout(token: string | null, origin: string):
       tx.update(checkoutRef(found.id), {
         status: "PROCESSING",
         providerPaymentId: session.id,
+        // 注文の期限を Session の期限にそろえる（注文の期限切れの判断と、Stripe の期限切れを一致させる）
+        expiresAt: session.expiresAt,
         attemptCount: Number(cur.attemptCount ?? 0) + 1,
         processingStartedAt: new Date(),
         failureCode: null,
@@ -234,10 +244,6 @@ export async function confirmStripeCheckout(sessionId: string): Promise<StripeCo
     if (isAlreadyExists(e)) return { status: "duplicate", transactionId: txId };
     throw e;
   }
-}
-
-async function stripeSessionStateOf(sessionId: string) {
-  return stripeSessionState(await retrieveStripeSession(sessionId));
 }
 
 /**

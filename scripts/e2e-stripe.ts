@@ -35,7 +35,7 @@ type FakeSession = Record<string, unknown> & { id: string; metadata: Record<stri
 const fake = {
   n: 0,
   sessions: new Map<string, FakeSession>(),
-  idem: new Map<string, string>(),
+  idem: new Map<string, { sessionId: string; body: string }>(),
   pis: new Map<string, Record<string, unknown>>(),
   charges: new Map<string, Record<string, unknown>>(),
   refunds: new Map<string, Record<string, unknown>>(),
@@ -43,7 +43,15 @@ const fake = {
   /** Stripe 側で表示される支払い方法（ダッシュボードの設定で有効なもの）。絞り込みの確認用に増やせる */
   eligible: ["card", "paypay", "link", "konbini"],
   extraMethods: [] as string[],
+  /** 利用者の Sandbox と同じく、アカウントの既定で Managed Payments が有効（Session で enabled=false を明示しないと付く） */
+  managedPaymentsDefault: true,
+  /** 応答の managed_payments.enabled を強制的に true にする（アプリが移動を止めるかの確認用） */
+  forceManagedResponse: false,
+  /** 作成時の expires_at（ID ごと）と作成時刻 */
+  created: new Map<string, number>(),
 };
+const stripeError = (res: ServerResponse, status: number, type: string, message: string, param?: string, code?: string) =>
+  send(res, status, { error: { type, message, ...(param ? { param } : {}), ...(code ? { code } : {}) } });
 // 本物の Stripe の ID は世界で一意。Emulator のデータは実行をまたいで残るので、実行ごとに異なる ID にする
 const RUN = Date.now().toString(36);
 const id = (p: string) => `${p}_test_${RUN}${(++fake.n).toString().padStart(6, "0")}`;
@@ -77,11 +85,24 @@ const stripeServer = createServer(async (req, res) => {
   const m = (re: RegExp) => re.exec(url.pathname);
   if (req.method === "POST" && url.pathname === "/v1/checkout/sessions") {
     const key = String(req.headers["idempotency-key"] ?? "");
-    if (key && fake.idem.has(key)) return send(res, 200, sessionView(fake.sessions.get(fake.idem.get(key)!)!));
-    fake.createCalls++;
+    const prev = key ? fake.idem.get(key) : undefined;
+    if (prev) {
+      // 本物の Stripe と同じく、同じ冪等キーで別の内容を送ると 400
+      if (prev.body !== body) return stripeError(res, 400, "idempotency_error", "Keys for idempotent requests can only be used with the same parameters they were first used with.");
+      return send(res, 200, sessionView(fake.sessions.get(prev.sessionId)!));
+    }
     const f = new URLSearchParams(body);
     const allowed = [...f.entries()].filter(([k]) => /^allowed_payment_method_types\[\d+\]$/.test(k)).map(([, v]) => v);
     if (f.has("payment_method_types[0]")) return send(res, 400, { error: { type: "invalid_request_error", message: "payment_method_types is not supported" } });
+    // 検証に失敗した要求は冪等キーの結果として保存しない（本物の Stripe と同じ）
+    const managed = f.has("managed_payments[enabled]") ? f.get("managed_payments[enabled]") === "true" : fake.managedPaymentsDefault;
+    if (managed && allowed.length) return stripeError(res, 400, "invalid_request_error", "allowed_payment_method_types cannot be used with Managed Payments", "allowed_payment_method_types");
+    const now = Math.floor(Date.now() / 1000);
+    const exp = Number(f.get("expires_at"));
+    if (!Number.isInteger(exp) || exp < now + 30 * 60 || exp > now + 24 * 60 * 60) {
+      return stripeError(res, 400, "invalid_request_error", "The `expires_at` timestamp must be between 30 minutes and 24 hours from Checkout Session creation.", "expires_at", "parameter_invalid_integer");
+    }
+    fake.createCalls++;
     const s: FakeSession = {
       id: id("cs"),
       object: "checkout.session",
@@ -98,12 +119,15 @@ const stripeServer = createServer(async (req, res) => {
       expires_at: Number(f.get("expires_at")),
       payment_intent: null,
       allowed_payment_method_types: allowed.length ? allowed : null,
+      managed_payments_param: f.get("managed_payments[enabled]"),
+      managed_payments: { enabled: fake.forceManagedResponse ? true : managed },
       // allowed_payment_method_types は「表示できる支払い方法」を絞り込む（指定が無ければ有効なものすべて）
       payment_method_types: [...(allowed.length ? fake.eligible.filter((t) => allowed.includes(t)) : fake.eligible), ...fake.extraMethods],
     };
     s.url = `http://127.0.0.1:${STRIPE_PORT}/pay/${s.id}`;
     fake.sessions.set(s.id, s);
-    if (key) fake.idem.set(key, s.id);
+    if (key) fake.idem.set(key, { sessionId: s.id, body });
+    fake.created.set(s.id, now);
     return send(res, 200, sessionView(s));
   }
   let r = m(/^\/v1\/checkout\/sessions\/([^/]+)$/);
@@ -254,6 +278,16 @@ async function startPurchase(op: Client, storeCode: string, fortuneType: "ZODIAC
 }
 
 const stripeTxIdOf = (pi: string) => `stripe_${pi}`;
+/** 注文だけを作る（決済画面への移動はしない） */
+async function createOrder(c: Client, storeCode: string) {
+  c.jar.delete("fx_access");
+  c.ip = `198.51.100.${Math.floor(Math.random() * 250) + 1}`;
+  await c.req(`/s/${storeCode}`);
+  const r = await c.req("/api/checkout", { method: "POST", json: { fortuneType: "ZODIAC" } });
+  assert.equal(r.status, 201, await r.clone().text());
+  return ((await r.json()) as { checkoutId: string }).checkoutId;
+}
+
 const txOf = async (checkoutId: string) => (await fsdb().collection(C.transactions).where("checkoutId", "==", checkoutId).get()).docs;
 
 async function main() {
@@ -307,6 +341,7 @@ async function main() {
   assert.match(String(s1.success_url), /\/payment\/return\?session_id=\{CHECKOUT_SESSION_ID\}$/);
   assert.deepEqual(s1.allowed_payment_method_types, ["card", "paypay"], "支払い方法がカード・PayPay に絞り込まれていません");
   assert.deepEqual(s1.payment_method_types, ["card", "paypay"]);
+  assert.equal(s1.managed_payments_param, "false", "managed_payments.enabled=false を明示していません");
   assert.match(await (await op.req("/payment")).text(), /Stripe のテスト決済です/);
   step("運営：注文（provider=stripe）→ Session 作成。注文IDを metadata・client_reference_id に入れ、Session の ID を注文に保存。再度押しても同じ Session");
 
@@ -626,6 +661,53 @@ async function main() {
   r = await opF.req("/api/test-fortune", { method: "POST", json: { fortuneType: "ZODIAC" } });
   assert.equal(r.status, 200);
   step("/fortune?pay=stripe-test：運営だけに Stripe の入口（テスト店舗では実店舗の案内）。パラメーターなしは無料のまま。fx_dev は注文時に消し、確認中に作られても確定後は有料の権利を優先。未使用の権利があれば無料は 409");
+
+  // ---- 18. Managed Payments を使わない・Session の期限は作成時刻から・既存の Session の再利用 ----
+  // (a) 占いを選んでから時間がたってボタンを押しても開ける（期限は押した時刻から31分。注文の期限も同じ値にそろう）
+  const cA = await createOrder(op, storeA.storeCode);
+  await fsdb().collection(C.checkouts).doc(cA).update({ expiresAt: new Date(Date.now() + 26 * 60_000) }); // 選んでから5分たった状態
+  r = await op.req("/api/checkout/stripe-session", { method: "POST", json: {} });
+  assert.equal(r.status, 200, `時間がたつと決済画面を開けません: ${await r.clone().text()}`);
+  const jA = (await r.json()) as { status: string; url: string };
+  assert.equal(jA.status, "redirect");
+  const sA = fake.sessions.get(jA.url.split("/").pop()!)!;
+  assert.ok(Number(sA.expires_at) >= Math.floor(Date.now() / 1000) + 30 * 60, "Session の期限が作成から30分未満です");
+  assert.equal(sA.managed_payments_param, "false");
+  assert.deepEqual(sA.managed_payments, { enabled: false });
+  const coA = (await fsdb().collection(C.checkouts).doc(cA).get()).data()!;
+  assert.equal(coA.providerPaymentId, sA.id);
+  assert.equal(coA.expiresAt.toDate().getTime(), Number(sA.expires_at) * 1000, "注文の期限が Session の期限とそろっていません");
+  // もう一度押しても Session を作り直さない（同じ決済画面。冪等キーの食い違いにもならない）。
+  // 冪等キーの記録を消して「数分後に押した（期限・冪等キーが変わる）」状態にしても、紐付いた Session を使う
+  const callsA = fake.createCalls;
+  fake.idem.clear();
+  for (let i = 0; i < 2; i++) {
+    r = await op.req("/api/checkout/stripe-session", { method: "POST", json: {} });
+    assert.equal(((await r.json()) as { url: string }).url, jA.url);
+  }
+  assert.equal(fake.createCalls, callsA);
+  // (b) 注文の期限が過ぎてから押したら Session を作らない（410）
+  const cB = await createOrder(op, storeA.storeCode);
+  await fsdb().collection(C.checkouts).doc(cB).update({ expiresAt: new Date(Date.now() - 1000) });
+  r = await op.req("/api/checkout/stripe-session", { method: "POST", json: {} });
+  assert.equal(r.status, 410);
+  assert.equal(fake.createCalls, callsA);
+  assert.equal((await fsdb().collection(C.checkouts).doc(cB).get()).get("providerPaymentId") ?? null, null);
+  // (c) Stripe の応答で Managed Payments が有効なら、決済画面に移動しない（注文にも紐付けない）
+  fake.forceManagedResponse = true;
+  const cC = await createOrder(op, storeA.storeCode);
+  r = await op.req("/api/checkout/stripe-session", { method: "POST", json: {} });
+  assert.equal(r.status, 502);
+  assert.equal((await fsdb().collection(C.checkouts).doc(cC).get()).get("providerPaymentId") ?? null, null);
+  fake.forceManagedResponse = false;
+  // (d) 確定時に取り直した Session が Managed Payments なら記録しない
+  const pM = await startPurchase(op, storeA.storeCode, "ZODIAC");
+  await ctl(`pay/${pM.sessionId}`);
+  fake.sessions.get(pM.sessionId)!.managed_payments = { enabled: true };
+  r = await webhook("checkout.session.completed", { id: pM.sessionId, object: "checkout.session" });
+  assert.equal(((await r.json()) as { outcome: string }).outcome, "rejected");
+  assert.equal((await txOf(pM.checkoutId)).length, 0);
+  step("Managed Payments：enabled=false を明示（アカウントの既定が有効でも決済画面を開ける）。応答・確定時に有効なら移動・記録しない。期限は押した時刻から31分で注文の期限もそろう。再度押しても同じ Session。期限切れの注文では作らない");
 
   // ---- 11. 売上・精算に含めない（テスト決済） ----
   assert.deepEqual(await monthTotals(ym), before.month);
