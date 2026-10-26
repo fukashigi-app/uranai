@@ -9,6 +9,7 @@ import { createPrivateKey } from "node:crypto";
 import { readOperatorInfo } from "../../config/operator";
 import { normalizePrivateKey } from "../firestore/private-key";
 import { isSessionSecretStrong, livePaymentKeyNames } from "../env-rules";
+import { STRIPE_LIVE_DENY_MESSAGE, stripeLiveConfig } from "../payments/stripe-guard";
 
 export type CheckLevel = "ok" | "warn" | "error" | "unknown";
 export type CheckResult = { key: string; level: CheckLevel; message: string };
@@ -132,6 +133,12 @@ export function checkProductionEnv(env: Env): CheckResult[] {
   if (has(env.STRIPE_API_BASE)) add("STRIPE_API_BASE", "error", "ローカルの自動テスト用の設定です。本番から削除してください。");
   for (const k of ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_TEST_FIREBASE_PROJECT_ID"]) {
     if (has(env[k])) add(k, "warn", "Stripe の設定が本番にあります。Stripe の本番決済は未実装です。テスト用の値なら Preview だけに設定してください。");
+  }
+  // 本番決済のスイッチがあれば、本番の条件（sk_live_・Firebase の接続先など）がそろっているか確かめる（値は出さない）
+  if (has(env.STRIPE_LIVE_CHECKOUT) || has(env.STRIPE_LIVE_OPERATOR_TEST)) {
+    const live = stripeLiveConfig({ ...env, VERCEL_ENV: "production" });
+    if (live.ok) add("STRIPE_LIVE_CHECKOUT", "warn", "Stripe の本番決済の設定はそろっていますが、本番決済はまだ実装されていません（使われません）。");
+    else add("STRIPE_LIVE_CHECKOUT", "error", `Stripe の本番決済の設定に問題があります：${STRIPE_LIVE_DENY_MESSAGE[live.reason]}`);
   }
 
   // ---- Preview 専用の診断（本番では常に無効。値が残っていれば削除を促す） ----

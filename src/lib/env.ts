@@ -77,6 +77,7 @@ export const isProduction = () => process.env.NODE_ENV === "production";
 type RawProcessEnv = Record<string, string | undefined>;
 
 import { isDevModeLiveKeyConflict, livePaymentKeyNames, siteStatus } from "./env-rules";
+import { STRIPE_LIVE_DENY_MESSAGE, stripeLiveConfig } from "./payments/stripe-guard";
 export { isDevModeLiveKeyConflict, isSessionSecretStrong, livePaymentKeyNames, siteStatus, type SiteStatus } from "./env-rules";
 
 /**
@@ -242,6 +243,15 @@ export function productionConfigIssues(e: RawProcessEnv = process.env): Producti
   }
   if ((e.STRIPE_SECRET_KEY ?? "").startsWith("sk_test_") || (e.STRIPE_API_BASE ?? "").trim()) {
     issues.push({ level: "warning", key: "STRIPE_KEYS", message: "Stripe のテスト用の設定が本番にあります。本番では使いません。Preview だけに設定してください。" });
+  }
+  // Stripe の本番決済のスイッチがあるときは、本番の条件（キー・Firebase の接続先など）がそろっているか確かめる（値は出さない）
+  if ((e.STRIPE_LIVE_CHECKOUT ?? "").trim() || (e.STRIPE_LIVE_OPERATOR_TEST ?? "").trim()) {
+    const live = stripeLiveConfig({ ...e, VERCEL_ENV: "production" });
+    issues.push(
+      live.ok
+        ? { level: "warning", key: "STRIPE_LIVE_CHECKOUT", message: "Stripe の本番決済の設定はそろっていますが、本番決済はまだ実装されていません（使われません）。" }
+        : { level: "error", key: "STRIPE_LIVE_CHECKOUT", message: `Stripe の本番決済の設定に問題があります：${STRIPE_LIVE_DENY_MESSAGE[live.reason]}` },
+    );
   }
   const prodFs = (e.PRODUCTION_FIREBASE_PROJECT_ID ?? "").trim();
   if (prodFs && e.FIREBASE_PROJECT_ID && e.FIREBASE_PROJECT_ID.trim().toLowerCase() !== prodFs.toLowerCase()) {
