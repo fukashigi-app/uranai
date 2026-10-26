@@ -404,7 +404,7 @@ async function main() {
   assert.deepEqual([t12.get("refundStatus"), t12.get("refundNeedsReview"), t12.get("paymentStatus"), t12.get("amountRefunded"), t12.get("refundFailedAmount")], ["failed", true, "SUCCEEDED", 0, 100]);
   assert.equal((await fsdb().collection(C.fortuneSessions).doc(t12.id).get()).get("status"), "EXPIRED");
   const adminHtml = await (await op.req("/admin/transactions")).text();
-  assert.match(adminHtml, /返金の確認が必要なテスト決済/);
+  assert.match(adminHtml, /返金の確認が必要な決済/);
   assert.match(adminHtml, /占い権利を戻す/);
   assert.equal(await restoreStripeEntitlement(t12.id, { userId: opId, role: "OPERATOR" }), "restored");
   assert.equal(await restoreStripeEntitlement(t12.id, { userId: opId, role: "OPERATOR" }), "not_eligible"); // 2回目は何もしない
@@ -413,7 +413,7 @@ async function main() {
   assert.equal((await fsdb().collection(C.transactions).doc(t12.id).get()).get("refundNeedsReview"), false);
   const audits = await fsdb().collection(C.auditLogs).where("targetId", "==", t12.id).get();
   assert.deepEqual(audits.docs.map((d) => [d.get("action"), d.get("actorUserId")]), [["stripe_test.entitlement_restored", opId]]);
-  assert.doesNotMatch(await (await op.req("/admin/transactions")).text(), /返金の確認が必要なテスト決済/);
+  assert.doesNotMatch(await (await op.req("/admin/transactions")).text(), /返金の確認が必要な決済/);
   r = await opR.req("/api/fortune", { method: "POST", json: { type: "ZODIAC", sign: "leo" } });
   assert.equal(r.status, 200, await r.clone().text());
   step("返金の失敗：refundStatus=failed・要確認として管理画面に表示。処理中は戻せない。管理者が戻すと権利が PAID に戻り占える（監査ログ1件。2回目は何もしない）");

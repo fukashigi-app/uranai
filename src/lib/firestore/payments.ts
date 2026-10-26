@@ -14,6 +14,8 @@ import { randomToken, sha256Hex } from "@/lib/security/crypto";
 import { CheckoutError, PAID_FLOW_BLOCKED_STORE_CODES, providerOrThrow } from "@/lib/errors";
 import { C, fsdb, mustDate, safeId, toDate } from "./admin";
 import { isAlreadyExists, salesKeys } from "./shared";
+import { reconcileTransactionInTx, settlementRefForTx } from "./settlement-adjustments";
+import { recordPaymentReview, type PaymentReviewInput } from "./payment-reviews";
 import { isSalesPayment } from "@/lib/payments/kind";
 import { findStoreByCode } from "./stores";
 
@@ -302,18 +304,26 @@ export async function markRefunded(providerId: ProviderId, chargeId: string): Pr
   if (!charge || !charge.refunded) return false;
   const txRef = transactionRef(providerId, chargeId);
   const sessionRef = fsdb().collection(C.fortuneSessions).doc(txRef.id);
-  return fsdb().runTransaction(async (tx) => {
+  let review: PaymentReviewInput | null = null;
+  const done = await fsdb().runTransaction(async (tx) => {
+    review = null;
     const [t, s] = await Promise.all([tx.get(txRef), tx.get(sessionRef)]);
     if (!t.exists || t.get("paymentStatus") !== "SUCCEEDED") return false;
-    tx.update(txRef, {
+    const st = await tx.get(settlementRefForTx(t.data()!));
+    const patch = {
       paymentStatus: "REFUNDED",
       refundedAt: new Date(),
       ...salesKeys(String(t.get("storeId")), providerId, "REFUNDED", mustDate(t.get("paidAt")), t.get("livemode")),
-      updatedAt: FieldValue.serverTimestamp(),
-    });
+    };
+    // 振込済み（確定済み）の月の取引なら、取り分の差額を調整として記録する
+    const adj = reconcileTransactionInTx(tx, txRef, t.data()!, patch, "refund", chargeId, { id: st.id, data: st.data() });
+    tx.update(txRef, { ...patch, ...adj.fields, updatedAt: FieldValue.serverTimestamp() });
+    review = adj.review ?? null;
     if (s.exists && s.get("status") === "PAID") tx.update(sessionRef, { status: "EXPIRED" });
     return true;
   });
+  if (review) await recordPaymentReview(review);
+  return done;
 }
 
 // ---------- Webhook の冪等性 ----------

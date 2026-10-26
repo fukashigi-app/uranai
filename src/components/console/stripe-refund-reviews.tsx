@@ -11,7 +11,7 @@ const REFUND_LABEL: Record<string, string> = { failed: "返金失敗", partial: 
 const ENTITLEMENT_LABEL = { suspended: "返金で停止中", used: "使用済み", active: "有効", expired: "期限切れ", missing: "なし" } as const;
 
 /**
- * Stripe のテスト決済で、返金が失敗・一部だけ成功したもの（管理者の確認が必要）。Firestore を使うときだけ表示する。
+ * Stripe の決済で、返金が失敗・一部だけ成功したもの（管理者の確認が必要）。Firestore を使うときだけ表示する。
  * 「占い権利を戻す」は、返金で止めた未使用の権利だけを戻せる（サーバー側で Stripe API の返金の状態を取り直して確認する）。
  */
 export async function StripeRefundReviews() {
@@ -24,7 +24,7 @@ export async function StripeRefundReviews() {
   if (rows === null || rows.length === 0) return null;
   return (
     <Card>
-      <h2 className="mb-1 text-sm font-bold text-danger">返金の確認が必要なテスト決済（{rows.length}件）</h2>
+      <h2 className="mb-1 text-sm font-bold text-danger">返金の確認が必要な決済（{rows.length}件）</h2>
       <p className="mb-3 text-[12px] text-ink-faint">
         Stripe の返金が失敗した、または一部だけ成功した決済です。Stripe のダッシュボードで状況を確認し、必要なら占い権利を戻してください（返金で止めた未使用の権利だけ戻せます）。
       </p>

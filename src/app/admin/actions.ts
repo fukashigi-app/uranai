@@ -188,7 +188,13 @@ export async function updateSettlementAction(id: string, _prev: FormState, fd: F
   assertId(id);
   const status = statusSchema.safeParse(fd.get("status"));
   if (!status.success) return { message: "状態を選択してください" };
-  await updateSettlementStatus(id, status.data, String(fd.get("note") ?? ""), actor);
+  try {
+    await updateSettlementStatus(id, status.data, String(fd.get("note") ?? ""), actor);
+  } catch (e) {
+    const { SettlementStateError } = await import("@/lib/firestore/settlements");
+    if (e instanceof SettlementStateError) return { message: e.message };
+    throw e;
+  }
   revalidatePath("/admin/settlements");
   return { ok: true, message: "更新しました" };
 }
@@ -222,6 +228,28 @@ export async function restoreStripeEntitlementAction(transactionId: string, _pre
   if (r === "restored") return { ok: true, message: "占い権利を戻しました（有効期限は今から24時間）。" };
   if (r === "refund_not_failed") return { message: "返金が失敗の状態ではないため、戻せません（返金が処理中・成功の可能性があります）。" };
   return { message: "戻せる占い権利がありません（使用済み・返金で止めたものではない・すでに戻した、など）。" };
+}
+
+/** 決済要確認を確認済みにする（監査ログに記録） */
+export async function resolvePaymentReviewAction(id: string, _prev: FormState): Promise<FormState> {
+  const { actor } = await operator();
+  if (!/^[A-Za-z0-9_]{1,120}$/.test(id)) throw new Error("invalid id");
+  const { resolvePaymentReview } = await import("@/lib/firestore/payment-reviews");
+  const done = await resolvePaymentReview(id, actor);
+  revalidatePath("/admin/payment-reviews");
+  return done ? { ok: true, message: "確認済みにしました。" } : { message: "すでに確認済みです。" };
+}
+
+/** Stripe：異議申し立ての確認を終える（敗訴など結果が出たものだけ。監査ログに記録） */
+export async function dismissStripeDisputeReviewAction(transactionId: string, _prev: FormState): Promise<FormState> {
+  const { actor } = await operator();
+  if (!stripeTxId.safeParse(transactionId).success) throw new Error("invalid id");
+  const { dismissStripeDisputeReview } = await import("@/lib/payments/stripe-confirm");
+  const r = await dismissStripeDisputeReview(transactionId, actor);
+  revalidatePath("/admin/transactions");
+  if (r === "dismissed") return { ok: true, message: "確認済みにしました。" };
+  if (r === "still_open") return { message: "まだ対応中です。Stripe で結果が出るまで、精算の保留は続きます。" };
+  return { message: "すでに確認済みです。" };
 }
 
 /** Stripe のテスト決済：返金の確認を終える（権利は戻さない。監査ログに記録） */

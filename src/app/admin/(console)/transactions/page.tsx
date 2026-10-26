@@ -1,8 +1,10 @@
 import Link from "next/link";
+import { PaymentIssueBadge } from "@/components/console/payment-issue-badge";
 import { Card, PageHeader, StatusBadge, Table } from "@/components/console/shell";
 import { PaymentKindBadge } from "@/components/console/payment-kind-badge";
 import { MonthPicker } from "@/components/console/month-picker";
 import { StripeRefundReviews } from "@/components/console/stripe-refund-reviews";
+import { StripeDisputeReviews } from "@/components/console/stripe-dispute-reviews";
 import { Pagination, one, parsePage } from "@/components/console/pagination";
 import { requireOperator } from "@/lib/auth/session";
 import { getStoreById } from "@/lib/services/stores";
@@ -65,7 +67,8 @@ export default async function AdminTransactionsPage(props: PageProps<"/admin/tra
           </div>
         ))}
       </div>
-      <div className="mb-4">
+      <div className="mb-4 space-y-4">
+        <StripeDisputeReviews />
         <StripeRefundReviews />
       </div>
       <Card>
@@ -86,6 +89,7 @@ export default async function AdminTransactionsPage(props: PageProps<"/admin/tra
               <td>
                 <StatusBadge status={t.paymentStatus} />
                 <PaymentKindBadge kind={t.kind} />
+                <PaymentIssueBadge t={t} />
               </td>
               <td>
                 <StatusBadge status={t.fortuneStatus} />

@@ -180,6 +180,18 @@ export async function retrieveStripeCharge(chargeId: string, rt: StripeRuntime =
   return rt.client.charges.retrieve(chargeId, { expand: ["balance_transaction"] });
 }
 
+/** PaymentIntent（店舗・金額の照合に使う。metadata に注文・店舗を入れている） */
+export async function retrieveStripePaymentIntent(paymentIntentId: string, rt: StripeRuntime = stripeRuntime()): Promise<Stripe.PaymentIntent> {
+  if (!/^pi_[A-Za-z0-9_]{1,200}$/.test(paymentIntentId)) throw new Error("invalid payment intent id");
+  return rt.client.paymentIntents.retrieve(paymentIntentId);
+}
+
+/** 異議申し立て（チャージバック）。状態・金額は通知の中身ではなく、ここで取り直した値で判断する */
+export async function retrieveStripeDispute(disputeId: string, rt: StripeRuntime = stripeRuntime()): Promise<Stripe.Dispute> {
+  if (!/^(dp|du)_[A-Za-z0-9_]{1,200}$/.test(disputeId)) throw new Error("invalid dispute id");
+  return rt.client.disputes.retrieve(disputeId);
+}
+
 /** Charge の返金の一覧（返金の状態は、通知の中身ではなくこの一覧から判断する） */
 export async function listStripeRefunds(chargeId: string, rt: StripeRuntime = stripeRuntime()): Promise<Stripe.Refund[]> {
   if (!/^(ch|py)_[A-Za-z0-9_]{1,200}$/.test(chargeId)) throw new Error("invalid charge id");

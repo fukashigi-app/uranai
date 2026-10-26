@@ -211,6 +211,11 @@ export async function listTransactions(opts: { storeId?: string; yearMonth?: str
       operatorShare: num(r.operator_share),
       paymentFee: num(r.payment_fee),
       paymentStatus: String(r.payment_status),
+      // PostgreSQL 版は Stripe の返金・異議申し立てを扱わない（一部返金・異議申し立ての記録なし）
+      amountRefunded: 0,
+      netStoreShare: num(r.store_share),
+      refundStatus: null as string | null,
+      disputeStatus: null as string | null,
       fortuneStatus: String(r.fortune_status),
       provider: String(r.payment_provider),
       kind: paymentKind(String(r.payment_provider), r.livemode),

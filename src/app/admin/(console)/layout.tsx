@@ -11,6 +11,7 @@ const NAV = [
   { href: "/admin/stores", label: "店舗" },
   { href: "/admin/transactions", label: "決済履歴" },
   { href: "/admin/settlements", label: "月次精算" },
+  { href: "/admin/payment-reviews", label: "決済要確認" },
   { href: "/admin/settings", label: "設定" },
 ];
 

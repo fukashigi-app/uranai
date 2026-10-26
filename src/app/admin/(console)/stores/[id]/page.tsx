@@ -1,4 +1,5 @@
 import { STORE_SHARE_BPS } from "@/config/pricing";
+import { PaymentIssueBadge } from "@/components/console/payment-issue-badge";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Card, PageHeader, StatusBadge, Table } from "@/components/console/shell";
@@ -151,12 +152,13 @@ export default async function AdminStoreDetail(props: PageProps<"/admin/stores/[
           </Table>
         </Card>
         <Card title="支払い履歴（精算）" actions={<Link href="/admin/settlements" className="text-[12px] text-ink-muted underline underline-offset-4">月次精算へ</Link>}>
-          <Table head={["対象月", "件数", "店舗報酬", "状況", "支払日", "メモ"]} empty={settlementRows.length === 0}>
+          <Table head={["対象月", "件数", "店舗報酬", "振込額", "状況", "支払日", "メモ"]} empty={settlementRows.length === 0}>
             {settlementRows.map(({ s }) => (
               <tr key={s.id}>
                 <td>{formatYearMonthJa(s.yearMonth)}</td>
                 <td className="tabular-nums">{s.transactionCount}件</td>
-                <td className="tabular-nums text-gold-200">{formatYen(s.storeShare)}</td>
+                <td className="tabular-nums">{formatYen(s.storeShare)}</td>
+                <td className="tabular-nums text-gold-200">{s.payableAmount !== null ? formatYen(s.payableAmount) : "—"}</td>
                 <td>
                   <StatusBadge status={s.status} />
                 </td>
@@ -180,6 +182,7 @@ export default async function AdminStoreDetail(props: PageProps<"/admin/stores/[
               <td>
                 <StatusBadge status={t.paymentStatus} />
                 <PaymentKindBadge kind={t.kind} />
+                <PaymentIssueBadge t={t} />
               </td>
               <td>
                 <StatusBadge status={t.fortuneStatus} />

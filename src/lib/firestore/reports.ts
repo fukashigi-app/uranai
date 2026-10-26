@@ -1,4 +1,6 @@
 import "server-only";
+import { netSalesFigures } from "@/lib/payments/settlement-rules";
+import { STORE_SHARE_BPS } from "@/config/pricing";
 import type { Query } from "firebase-admin/firestore";
 import type { Range, StoreListRow, StoreSort, Totals } from "@/lib/services/reports";
 import { jstDateString, jstMonthRange, jstYearMonth, shiftYearMonth } from "@/lib/time";
@@ -26,15 +28,33 @@ const ZERO: Totals = { count: 0, gross: 0, storeShare: 0, operatorShare: 0, fee:
 
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 
+/**
+ * 売上の集計に使う金額。一部返金（Stripe 側で発生したとき）は返金後の金額にする（決済時の記録は書き換えない）。
+ * 全額の返金・異議申し立ての敗訴は countable=false で、集計の対象から外れている。
+ */
+const NET_FIELDS = ["amount", "storeShare", "operatorShare", "storeShareBps", "amountRefunded", "disputeStatus", "disputeAmount"] as const;
+function figures(d: { get(f: string): unknown }) {
+  return netSalesFigures({
+    amount: num(d.get("amount")),
+    storeShare: num(d.get("storeShare")),
+    operatorShare: num(d.get("operatorShare")),
+    storeShareBps: Number.isInteger(d.get("storeShareBps")) ? Number(d.get("storeShareBps")) : STORE_SHARE_BPS,
+    amountRefunded: num(d.get("amountRefunded")),
+    disputeStatus: (typeof d.get("disputeStatus") === "string" ? d.get("disputeStatus") : null) as "open" | "won" | "lost" | null,
+    disputeAmount: typeof d.get("disputeAmount") === "number" ? Number(d.get("disputeAmount")) : null,
+  });
+}
+
 async function aggregate(q: Query): Promise<Totals> {
-  const snap = await q.select("amount", "storeShare", "operatorShare", "paymentFee", "paymentProvider", "livemode").get();
+  const snap = await q.select(...NET_FIELDS, "paymentFee", "paymentProvider", "livemode").get();
   const total: Totals = { ...ZERO };
   for (const d of snap.docs) {
     if (!isSalesDoc(d)) continue; // 以前の判定で countable になっているテスト決済などを除く
+    const f = figures(d);
     total.count += 1;
-    total.gross += num(d.get("amount"));
-    total.storeShare += num(d.get("storeShare"));
-    total.operatorShare += num(d.get("operatorShare"));
+    total.gross += f.gross;
+    total.storeShare += f.storeShare;
+    total.operatorShare += f.operatorShare;
     total.fee += num(d.get("paymentFee"));
   }
   return total;
@@ -70,10 +90,11 @@ export async function totalsBetween(start: Date, end: Date, storeId?: string): P
     for (const d of q.docs) {
       const paidAt = mustDate(d.get("paidAt"));
       if (paidAt < start || paidAt >= end || (storeId && d.get("storeId") !== storeId) || !isSalesDoc(d)) continue;
+      const f = figures(d);
       total.count += 1;
-      total.gross += Number(d.get("amount"));
-      total.storeShare += Number(d.get("storeShare"));
-      total.operatorShare += Number(d.get("operatorShare"));
+      total.gross += f.gross;
+      total.storeShare += f.storeShare;
+      total.operatorShare += f.operatorShare;
       total.fee += Number(d.get("paymentFee"));
     }
   }
@@ -89,13 +110,13 @@ export async function dailySeries(yearMonth: string, storeId?: string): Promise<
   const { start, end } = jstMonthRange(yearMonth);
   const days = Math.round((end.getTime() - start.getTime()) / 86_400_000);
   const out = Array.from({ length: days }, (_, i) => ({ day: i + 1, count: 0, gross: 0 }));
-  const snap = await monthQuery(yearMonth, storeId).select("paidDate", "amount", "paymentProvider", "livemode").get();
+  const snap = await monthQuery(yearMonth, storeId).select("paidDate", ...NET_FIELDS, "paymentProvider", "livemode").get();
   for (const d of snap.docs) {
     if (!isSalesDoc(d)) continue;
     const day = Number(String(d.get("paidDate")).slice(8, 10));
     if (day >= 1 && day <= days) {
       out[day - 1].count += 1;
-      out[day - 1].gross += Number(d.get("amount"));
+      out[day - 1].gross += figures(d).gross;
     }
   }
   return out;
@@ -214,6 +235,11 @@ export async function listTransactions(opts: { storeId?: string; yearMonth?: str
       operatorShare: Number(d.get("operatorShare")),
       paymentFee: Number(d.get("paymentFee")),
       paymentStatus: String(d.get("paymentStatus")),
+      amountRefunded: num(d.get("amountRefunded")),
+      // 一部返金の後の店舗の取り分（決済時の記録は書き換えない）
+      netStoreShare: figures(d).storeShare,
+      refundStatus: typeof d.get("refundStatus") === "string" ? String(d.get("refundStatus")) : null,
+      disputeStatus: typeof d.get("disputeStatus") === "string" ? String(d.get("disputeStatus")) : null,
       fortuneStatus: String(d.get("fortuneStatus")),
       provider: String(d.get("paymentProvider")),
       kind: paymentKind(String(d.get("paymentProvider")), d.get("livemode")),

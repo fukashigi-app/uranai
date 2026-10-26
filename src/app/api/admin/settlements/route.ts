@@ -16,15 +16,16 @@ export async function GET(req: Request) {
   const byId = new Map(storeRows.map((s) => [s.id, s]));
   const esc = (v: string | number) => {
     const s = String(v);
-    // CSVインジェクション対策（= + - @ で始まるセルを無効化）
-    const safe = /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+    // CSVインジェクション対策（= + - @ で始まるセルを無効化）。数値（調整のマイナスなど）は数式にならないのでそのまま
+    const safe = typeof v !== "number" && /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
     return `"${safe.replace(/"/g, '""')}"`;
   };
-  const header = ["対象月", "店舗名", "件数", "総売上", "店舗報酬", "状況", "銀行名", "金融機関コード", "支店名", "支店コード", "口座種別", "口座番号", "口座名義"];
+  // 振込額は確定済み（処理中・支払済）の精算だけ。未払いは確定前のため空欄（確定時に未反映の調整を合わせて決まる）
+  const header = ["対象月", "店舗名", "件数", "総売上", "店舗報酬", "保留", "調整", "繰越", "振込額", "状況", "銀行名", "金融機関コード", "支店名", "支店コード", "口座種別", "口座番号", "口座名義"];
   const lines = rows.map(({ s, storeName }) => {
     const store = byId.get(s.storeId);
     const b = store ? readBankInfo(store) : null;
-    return [s.yearMonth, storeName, s.transactionCount, s.grossSales, s.storeShare, SETTLEMENT_LABEL[s.status], b?.bankName ?? "", b?.bankCode ?? "", b?.branchName ?? "", b?.branchCode ?? "", b?.accountType ?? "", b?.accountNumber ?? "", b?.accountHolder ?? ""]
+    return [s.yearMonth, storeName, s.transactionCount, s.grossSales, s.storeShare, s.heldShare, s.adjustmentTotal, s.carryOver, s.payableAmount ?? "", SETTLEMENT_LABEL[s.status], b?.bankName ?? "", b?.bankCode ?? "", b?.branchName ?? "", b?.branchCode ?? "", b?.accountType ?? "", b?.accountNumber ?? "", b?.accountHolder ?? ""]
       .map(esc)
       .join(",");
   });

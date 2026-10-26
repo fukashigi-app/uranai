@@ -75,6 +75,10 @@ export const C = {
   fortuneSessions: "fortuneSessions",
   fortuneResults: "fortuneResults",
   settlements: "settlements",
+  /** 精算の調整（振込後の返金・異議申し立て・締め後の決済・繰越）。過去の取引・支払済みの精算は書き換えず、ここに記録する */
+  settlementAdjustments: "settlementAdjustments",
+  /** 決済要確認（署名を確認できた通知のうち、照合に失敗したもの・以前に確定した精算の変化など） */
+  paymentReviews: "paymentReviews",
   webhookEvents: "webhookEvents",
   auditLogs: "auditLogs",
   testFortuneLogs: "testFortuneLogs",

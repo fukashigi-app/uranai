@@ -18,6 +18,7 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
     pis: new Map<string, Record<string, unknown>>(),
     charges: new Map<string, Record<string, unknown>>(),
     refunds: new Map<string, Record<string, unknown>>(),
+    disputes: new Map<string, Record<string, unknown>>(),
     createCalls: 0,
     /** Stripe 側で表示される支払い方法（ダッシュボードの設定で有効なもの）。絞り込みの確認用に増やせる */
     eligible: ["card", "paypay", "link", "konbini"],
@@ -119,12 +120,22 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
     if (req.method === "GET" && r) {
       return fake.charges.has(r[1]) ? send(res, 200, chargeView(r[1])) : send(res, 404, { error: { type: "invalid_request_error", message: "No such charge" } });
     }
+    r = m(/^\/v1\/payment_intents\/([^/]+)$/);
+    if (req.method === "GET" && r) {
+      const pi = fake.pis.get(r[1]);
+      return pi ? send(res, 200, pi) : send(res, 404, { error: { type: "invalid_request_error", message: "No such payment_intent" } });
+    }
+    r = m(/^\/v1\/disputes\/([^/]+)$/);
+    if (req.method === "GET" && r) {
+      const dp = fake.disputes.get(r[1]);
+      return dp ? send(res, 200, dp) : send(res, 404, { error: { type: "invalid_request_error", message: "No such dispute" } });
+    }
     if (req.method === "GET" && url.pathname === "/v1/refunds") {
       const charge = url.searchParams.get("charge");
       return send(res, 200, { object: "list", url: "/v1/refunds", has_more: false, data: [...fake.refunds.values()].filter((x) => x.charge === charge) });
     }
     // ---- テスト用の操作（決済画面での支払い・返金・期限切れ・手数料の確定を再現） ----
-    const ctl = JSON.parse(body || "{}") as { fee?: number | null; amount?: number; created?: number; metadataStoreId?: string; method?: string; async?: boolean; status?: string };
+    const ctl = JSON.parse(body || "{}") as { fee?: number | null; amount?: number; created?: number; metadataStoreId?: string; method?: string; async?: boolean; status?: string; currency?: string };
     r = m(/^\/__test\/pay\/([^/]+)$/);
     if (r) {
       // 決済画面での支払い。method: card | apple_pay | google_pay | paypay | link | samsung_pay、async: 確定待ち（PayPay の非同期の確定）
@@ -185,6 +196,27 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
       syncCharge(String(re.charge));
       return send(res, 200, {});
     }
+    r = m(/^\/__test\/dispute\/([^/]+)$/);
+    if (r) {
+      // 異議申し立て（チャージバック）の発生。status: needs_response（既定）・under_review・won・lost など
+      const ch = fake.charges.get(r[1])!;
+      const dpId = id("dp");
+      fake.disputes.set(dpId, { id: dpId, object: "dispute", livemode: LIVE, charge: r[1], payment_intent: ch.payment_intent, currency: ctl.currency ?? "jpy", amount: ctl.amount ?? ch.amount, status: ctl.status ?? "needs_response", reason: "fraudulent" });
+      Object.assign(ch, { disputed: true });
+      return send(res, 200, { dispute: dpId });
+    }
+    r = m(/^\/__test\/dispute-status\/([^/]+)$/);
+    if (r) {
+      Object.assign(fake.disputes.get(r[1])!, { status: ctl.status });
+      return send(res, 200, {});
+    }
+    r = m(/^\/__test\/pi-metadata\/([^/]+)$/);
+    if (r) {
+      // 照合の確認用：PaymentIntent の店舗を書き換える（記録と一致しない返金・異議申し立てを再現）
+      const pi = fake.pis.get(r[1])!;
+      pi.metadata = { ...(pi.metadata as Record<string, string>), storeId: ctl.metadataStoreId ?? "" };
+      return send(res, 200, {});
+    }
     r = m(/^\/__test\/expire\/([^/]+)$/);
     if (r) {
       Object.assign(fake.sessions.get(r[1])!, { status: "expired" });
@@ -200,7 +232,7 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
 
   async function ctl(path: string, body: Record<string, unknown> = {}) {
     const r = await fetch(`http://127.0.0.1:${port}/__test/${path}`, { method: "POST", body: JSON.stringify(body) });
-    return r.json() as Promise<{ paymentIntent?: string; charge?: string; refund?: string }>;
+    return r.json() as Promise<{ paymentIntent?: string; charge?: string; refund?: string; dispute?: string }>;
   }
 
   return {

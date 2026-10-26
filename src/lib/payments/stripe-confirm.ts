@@ -11,12 +11,18 @@ import { CheckoutError } from "@/lib/errors";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
 import { siteConfig } from "@/config/site";
 import { writeAudit } from "@/lib/firestore/audit";
+import { reconcileTransactionInTx, settlementRefForTx } from "@/lib/firestore/settlement-adjustments";
+import { recordPaymentReview, type PaymentReviewInput } from "@/lib/firestore/payment-reviews";
+import { chargebackCoversRemainder, disputeStateOf } from "./settlement-rules";
+import type Stripe from "stripe";
 import {
   createStripeCheckoutSession,
   feeOf,
   isStripeSessionId,
   listStripeRefunds,
   retrieveStripeCharge,
+  retrieveStripeDispute,
+  retrieveStripePaymentIntent,
   retrieveStripeSession,
   STRIPE_SESSION_TTL_MS,
   stripeSessionExpiry,
@@ -299,16 +305,42 @@ export async function closeStripeCheckout(sessionId: string, opts: { asyncFailed
   return closed ? (next.status === "EXPIRED" ? "expired" : "failed") : false;
 }
 
-export type StripeRefundOutcome = "refund_pending" | "refunded" | "partial" | "refund_failed" | "unchanged" | "ignored";
+export type StripeRefundOutcome = "refund_pending" | "refunded" | "partial" | "refund_failed" | "unchanged" | "ignored" | "rejected";
+
+const idOfRef = (v: unknown): string | null => (typeof v === "string" ? v : v && typeof v === "object" && typeof (v as { id?: unknown }).id === "string" ? (v as { id: string }).id : null);
+
+/**
+ * Stripe の Charge が、記録した決済（取引）と一致するか（返金・異議申し立ての反映の前に確かめる）。
+ * 決済ID（Charge・PaymentIntent）、モード（livemode）、金額、通貨、店舗（PaymentIntent の metadata）がすべて一致すること。
+ * 一致しない項目名を返す（空なら一致）。値そのものは返さない（決済要確認には項目名だけを記録する）。
+ */
+function chargeMismatches(t: DocumentData, charge: Stripe.Charge, pi: Stripe.PaymentIntent): string[] {
+  const out: string[] = [];
+  if (t.paymentProvider !== STRIPE_PROVIDER) out.push("provider");
+  if (t.stripeChargeId !== charge.id) out.push("charge_id");
+  if (t.livemode !== charge.livemode || pi.livemode !== charge.livemode) out.push("livemode");
+  if (idOfRef(charge.payment_intent) !== pi.id) out.push("payment_intent");
+  if (charge.currency !== "jpy") out.push("currency");
+  if (Number(t.amount) !== charge.amount || pi.amount !== charge.amount) out.push("amount");
+  if (pi.metadata?.storeId !== String(t.storeId)) out.push("store");
+  return out;
+}
+
+/** このアプリの注文の決済か（PaymentIntent の metadata に注文ID・店舗IDを入れている） */
+const isOurPayment = (pi: Stripe.PaymentIntent) => typeof pi.metadata?.checkoutId === "string" && pi.metadata.checkoutId !== "" && typeof pi.metadata?.storeId === "string";
+
+type TxOutcome<T extends string> = { outcome: T; review?: PaymentReviewInput };
 
 /**
  * 返金の状態を Stripe API から取り直して、決済記録と占い権利に反映する（charge.refunded・refund.* の通知から呼ばれる）。
- * 状態は返金の一覧から毎回求め直し、変わったときだけ書き込む（通知の再送・順番の入れ替わりがあっても結果は同じ）。
+ * 状態は返金の一覧から毎回求め直し、変わったときだけ書き込む（通知の再送・順番の入れ替わりがあっても結果は同じ。古い通知が
+ * 後から届いても、Stripe API の今の状態で判断するので巻き戻らない）。
  *  - 処理中 … refundStatus=pending。未使用の権利を止める（suspendedByRefund=true）
  *  - 成功   … paymentStatus=REFUNDED。未使用の権利を止める
  *  - 一部・失敗 … refundNeedsReview=true（管理者が確認する。権利の復旧は restoreStripeEntitlement）
+ * 記録と照合できないとき（店舗・金額の食い違い、記録が無い）は反映せず「決済要確認」に記録する。
  */
-export async function syncStripeRefunds(chargeId: string, rt?: StripeRuntime): Promise<StripeRefundOutcome> {
+export async function syncStripeRefunds(chargeId: string, rt?: StripeRuntime, eventType?: string): Promise<StripeRefundOutcome> {
   const r0 = rt ?? stripeRuntime();
   const charge = await retrieveStripeCharge(chargeId, r0);
   if (charge.livemode !== (r0.mode === "live")) return "ignored"; // 別のモードの決済は扱わない
@@ -316,18 +348,26 @@ export async function syncStripeRefunds(chargeId: string, rt?: StripeRuntime): P
   if (!piId) return "ignored";
   const summary = summarizeRefunds(charge.id, charge.amount, await listStripeRefunds(charge.id, r0));
   if (summary.state === "none") return "ignored";
+  const pi = await retrieveStripePaymentIntent(piId, r0);
   const txRef = fsdb().collection(C.transactions).doc(stripeTransactionId(piId));
   const sessionRef = fsdb().collection(C.fortuneSessions).doc(txRef.id);
-  const result = await fsdb().runTransaction(async (tx) => {
+  const base = { chargeId: charge.id, paymentIntentId: piId, eventType: eventType ?? null, livemode: charge.livemode };
+  const res = await fsdb().runTransaction(async (tx): Promise<TxOutcome<StripeRefundOutcome>> => {
     const [t, fs] = await Promise.all([tx.get(txRef), tx.get(sessionRef)]);
-    if (!t.exists || t.get("paymentProvider") !== STRIPE_PROVIDER || t.get("stripeChargeId") !== charge.id || t.get("livemode") !== charge.livemode) return "ignored" as const;
+    if (!t.exists) return { outcome: "ignored", review: isOurPayment(pi) ? { kind: "transaction_not_found", objectType: "charge", objectId: charge.id, storeId: pi.metadata.storeId, ...base } : undefined };
+    // 金額・店舗などが記録と一致しない返金は反映しない（売上・精算を動かさない）
+    const mism = chargeMismatches(t.data()!, charge, pi);
+    if (mism.length) return { outcome: "rejected", review: { kind: "charge_mismatch", objectType: "charge", objectId: charge.id, transactionId: t.id, storeId: String(t.get("storeId")), mismatches: mism, ...base } };
     const refundKey = refundKeyOf(summary);
-    if (t.get("refundKey") === refundKey) return "unchanged" as const; // 同じ状態はもう反映済み（再送・重複）
+    if (t.get("refundKey") === refundKey) return { outcome: "unchanged" }; // 同じ状態はもう反映済み（再送・重複）
+    const st = await tx.get(settlementRefForTx(t.data()!));
     const refunded = summary.state === "succeeded";
     const needsReview = summary.state === "partial" || summary.state === "failed";
     const paymentStatus = refunded ? "REFUNDED" : "SUCCEEDED"; // 成功した返金が後で失敗に変わったら SUCCEEDED に戻す
     const paidAt = mustDate(t.get("paidAt"));
-    tx.update(txRef, {
+    // 異議申し立てで敗訴（全額）した決済は CHARGEBACK のまま（返金の状態だけ記録する）
+    const nextStatus = t.get("paymentStatus") === "CHARGEBACK" ? "CHARGEBACK" : paymentStatus;
+    const patch: Record<string, unknown> = {
       refundStatus: summary.state,
       refundKey,
       amountRefunded: summary.succeededAmount,
@@ -336,19 +376,103 @@ export async function syncStripeRefunds(chargeId: string, rt?: StripeRuntime): P
       stripeRefundIds: summary.refundIds,
       refundNeedsReview: needsReview,
       refundUpdatedAt: new Date(),
-      ...(t.get("paymentStatus") !== paymentStatus
-        ? { paymentStatus, refundedAt: refunded ? new Date() : null, ...salesKeys(String(t.get("storeId")), STRIPE_PROVIDER, paymentStatus, paidAt, t.get("livemode")) }
+      ...(t.get("paymentStatus") !== nextStatus
+        ? { paymentStatus: nextStatus, refundedAt: refunded ? new Date() : null, ...salesKeys(String(t.get("storeId")), STRIPE_PROVIDER, nextStatus, paidAt, t.get("livemode")) }
         : {}),
-      updatedAt: FieldValue.serverTimestamp(),
-    });
+    };
+    // 振込済み（確定済み）の月の取引なら、取り分の差額を調整として記録する（成功した返金の額だけ。処理中・失敗では減らさない）
+    const adj = reconcileTransactionInTx(tx, txRef, t.data()!, patch, "refund", summary.refundIds.join(","), { id: st.id, data: st.data() });
+    tx.update(txRef, { ...patch, ...adj.fields, updatedAt: FieldValue.serverTimestamp() });
     // 返金の処理中・成功：未使用の権利を止める（使用済みの権利はそのまま）
     if ((refunded || summary.state === "pending") && fs.exists && fs.get("status") === "PAID") {
       tx.update(sessionRef, { status: "EXPIRED", suspendedByRefund: true, suspendedAt: new Date() });
     }
-    return refunded ? ("refunded" as const) : summary.state === "pending" ? ("refund_pending" as const) : summary.state === "partial" ? ("partial" as const) : ("refund_failed" as const);
+    const outcome = refunded ? "refunded" : summary.state === "pending" ? "refund_pending" : summary.state === "partial" ? "partial" : "refund_failed";
+    return { outcome, review: adj.review ? { ...adj.review, eventType: eventType ?? null } : undefined };
   });
+  if (res.review) await recordPaymentReview(res.review);
+  const result = res.outcome;
+  if (result === "rejected") console.error("[stripe] refund does not match the recorded payment (not applied)", { chargeId: charge.id });
   if (result === "refund_failed") console.error("[stripe] refund failed (admin review required)", { chargeId: charge.id });
   if (result === "partial") console.warn("[stripe] partial refund recorded (admin review required)", { chargeId: charge.id });
+  return result;
+}
+
+export type StripeDisputeOutcome = "dispute_open" | "dispute_won" | "dispute_lost" | "unchanged" | "ignored" | "rejected";
+
+/**
+ * 異議申し立て（チャージバック）の状態を Stripe API から取り直して、決済記録に反映する（charge.dispute.* の通知から呼ばれる）。
+ *  - 対応中（needs_response・under_review など）… disputeStatus=open。売上には数えたまま、申し立ての額の分だけ精算を保留
+ *  - 勝訴（won など）……………………………………… disputeStatus=won。保留を解除（振込済みの月なら、差し引いた分を次回に戻す）
+ *  - 敗訴（lost）…………………………………………… 申し立ての額を売上・取り分から除く。返金の後の残りすべてなら paymentStatus=CHARGEBACK
+ *                                                    （一部の額だけなら、残りは売上・取り分に残す）。未使用の権利を止める
+ * 振込済み（確定済み）の月の取引は、取り分の差額を調整として記録する（同じトランザクション）。
+ * 同じ状態はもう反映済みとして何もしない（通知の再送・重複でも二重にならない）。結果が出た（勝訴・敗訴）申し立ては
+ * 対応中に戻さない（Stripe API が古い状態を返しても巻き戻らない。決済要確認に記録する）。
+ */
+export async function syncStripeDispute(disputeId: string, rt?: StripeRuntime, eventType?: string): Promise<StripeDisputeOutcome> {
+  const r0 = rt ?? stripeRuntime();
+  const dp = await retrieveStripeDispute(disputeId, r0);
+  if (dp.livemode !== (r0.mode === "live")) return "ignored";
+  const chargeId = idOfRef(dp.charge);
+  if (!chargeId) return "ignored";
+  const charge = await retrieveStripeCharge(chargeId, r0);
+  if (charge.livemode !== (r0.mode === "live")) return "ignored";
+  const piId = idOfRef(charge.payment_intent);
+  if (!piId) return "ignored";
+  const pi = await retrieveStripePaymentIntent(piId, r0);
+  const base = { chargeId: charge.id, paymentIntentId: piId, eventType: eventType ?? null, livemode: charge.livemode };
+  if (dp.currency !== "jpy" || !Number.isSafeInteger(dp.amount) || dp.amount <= 0 || dp.amount > charge.amount) {
+    console.error("[stripe] dispute amount does not match the charge (not applied)", { disputeId: dp.id });
+    if (isOurPayment(pi)) await recordPaymentReview({ kind: "dispute_amount_invalid", objectType: "dispute", objectId: dp.id, storeId: pi.metadata.storeId, amount: Number.isSafeInteger(dp.amount) ? dp.amount : null, mismatches: [dp.currency !== "jpy" ? "currency" : "amount"], ...base });
+    return "rejected";
+  }
+  const state = disputeStateOf(String(dp.status));
+  const txRef = fsdb().collection(C.transactions).doc(stripeTransactionId(piId));
+  const sessionRef = fsdb().collection(C.fortuneSessions).doc(txRef.id);
+  const res = await fsdb().runTransaction(async (tx): Promise<TxOutcome<StripeDisputeOutcome>> => {
+    const [t, fs] = await Promise.all([tx.get(txRef), tx.get(sessionRef)]);
+    if (!t.exists) return { outcome: "ignored", review: isOurPayment(pi) ? { kind: "transaction_not_found", objectType: "dispute", objectId: dp.id, storeId: pi.metadata.storeId, ...base } : undefined };
+    const mism = chargeMismatches(t.data()!, charge, pi);
+    if (mism.length) return { outcome: "rejected", review: { kind: "charge_mismatch", objectType: "dispute", objectId: dp.id, transactionId: t.id, storeId: String(t.get("storeId")), mismatches: mism, ...base } };
+    const prevId = t.get("disputeId");
+    const prevState = t.get("disputeStatus");
+    // 同じ決済に別の異議申し立て（通常は起きない）：自動では反映しない
+    if (typeof prevId === "string" && prevId && prevId !== dp.id) return { outcome: "rejected", review: { kind: "multiple_disputes", objectType: "dispute", objectId: dp.id, transactionId: t.id, storeId: String(t.get("storeId")), ...base } };
+    // 結果が出た申し立てを対応中に戻さない（古い状態の取り直し・順番の入れ替わり）
+    if ((prevState === "won" || prevState === "lost") && state === "open") return { outcome: "unchanged", review: { kind: "dispute_state_regressed", objectType: "dispute", objectId: dp.id, transactionId: t.id, storeId: String(t.get("storeId")), ...base } };
+    const key = `${dp.id}:${dp.status}:${dp.amount}`;
+    if (t.get("disputeKey") === key) return { outcome: "unchanged" };
+    const st = await tx.get(settlementRefForTx(t.data()!));
+    const cur = String(t.get("paymentStatus"));
+    const facts = { amount: Number(t.get("amount")), amountRefunded: Number(t.get("amountRefunded") ?? 0), disputeStatus: state, disputeAmount: dp.amount };
+    const full = chargebackCoversRemainder(facts);
+    const refundedAll = t.get("refundStatus") === "succeeded";
+    const nextStatus = state === "lost" && full ? "CHARGEBACK" : cur === "CHARGEBACK" ? (refundedAll ? "REFUNDED" : "SUCCEEDED") : cur;
+    const patch: Record<string, unknown> = {
+      disputeId: dp.id,
+      disputeStatus: state,
+      disputeStripeStatus: String(dp.status),
+      disputeAmount: dp.amount,
+      disputeReason: String(dp.reason ?? ""),
+      disputeKey: key,
+      disputeNeedsReview: state !== "won",
+      disputeUpdatedAt: new Date(),
+      ...(nextStatus !== cur
+        ? { paymentStatus: nextStatus, chargebackAt: nextStatus === "CHARGEBACK" ? new Date() : null, ...salesKeys(String(t.get("storeId")), STRIPE_PROVIDER, nextStatus, mustDate(t.get("paidAt")), t.get("livemode")) }
+        : {}),
+    };
+    const adj = reconcileTransactionInTx(tx, txRef, t.data()!, patch, "dispute", dp.id, { id: st.id, data: st.data() });
+    tx.update(txRef, { ...patch, ...adj.fields, updatedAt: FieldValue.serverTimestamp() });
+    // 敗訴：未使用の権利を止める（使用済みはそのまま）
+    if (state === "lost" && fs.exists && fs.get("status") === "PAID") tx.update(sessionRef, { status: "EXPIRED", suspendedByDispute: true, suspendedAt: new Date() });
+    const outcome = state === "lost" ? "dispute_lost" : state === "won" ? "dispute_won" : "dispute_open";
+    return { outcome, review: adj.review ? { ...adj.review, eventType: eventType ?? null } : undefined };
+  });
+  if (res.review) await recordPaymentReview(res.review);
+  const result = res.outcome;
+  if (result === "rejected") console.error("[stripe] dispute does not match the recorded payment (not applied)", { disputeId: dp.id });
+  if (result === "dispute_open" || result === "dispute_lost") console.warn("[stripe] dispute recorded (admin review required)", { disputeId: dp.id, state });
   return result;
 }
 
@@ -366,7 +490,7 @@ export type StripeRefundReview = {
   entitlement: "suspended" | "used" | "active" | "expired" | "missing";
 };
 
-/** 返金の確認が必要なテスト決済（管理画面） */
+/** 返金の確認が必要な決済（管理画面） */
 export async function listStripeRefundReviews(): Promise<StripeRefundReview[]> {
   const q = await fsdb().collection(C.transactions).where("refundNeedsReview", "==", true).limit(50).get();
   const docs = q.docs.filter((d) => d.get("paymentProvider") === STRIPE_PROVIDER);
@@ -443,6 +567,56 @@ export async function dismissStripeRefundReview(transactionId: string, actor: Ac
       tx,
     );
     return true;
+  });
+}
+
+export type StripeDisputeReview = {
+  transactionId: string;
+  storeId: string;
+  amount: number;
+  disputeAmount: number;
+  disputeStatus: "open" | "won" | "lost";
+  disputeStripeStatus: string;
+  disputeReason: string;
+  livemode: boolean;
+  paidAt: Date;
+};
+
+/** 異議申し立て（チャージバック）の確認が必要な決済（管理画面。対応中・敗訴） */
+export async function listStripeDisputeReviews(): Promise<StripeDisputeReview[]> {
+  const q = await fsdb().collection(C.transactions).where("disputeNeedsReview", "==", true).limit(50).get();
+  return q.docs
+    .filter((d) => d.get("paymentProvider") === STRIPE_PROVIDER)
+    .map((d) => ({
+      transactionId: d.id,
+      storeId: String(d.get("storeId")),
+      amount: Number(d.get("amount")),
+      disputeAmount: Number(d.get("disputeAmount") ?? 0),
+      disputeStatus: d.get("disputeStatus") as "open" | "won" | "lost",
+      disputeStripeStatus: String(d.get("disputeStripeStatus") ?? ""),
+      disputeReason: String(d.get("disputeReason") ?? ""),
+      livemode: d.get("livemode") === true,
+      paidAt: mustDate(d.get("paidAt")),
+    }));
+}
+
+/**
+ * 異議申し立ての確認を終える（結果が出たもの＝敗訴だけ。対応中は Stripe で結果が出るまで残す）。監査ログに記録。
+ * 精算の保留・調整は状態から自動で決まるので、ここでは変えない。
+ */
+export async function dismissStripeDisputeReview(transactionId: string, actor: Actor): Promise<"dismissed" | "still_open" | "not_found"> {
+  if (!/^stripe_[A-Za-z0-9_]{1,200}$/.test(transactionId)) return "not_found";
+  const txRef = fsdb().collection(C.transactions).doc(transactionId);
+  return fsdb().runTransaction(async (tx) => {
+    const t = await tx.get(txRef);
+    if (!t.exists || t.get("paymentProvider") !== STRIPE_PROVIDER || t.get("disputeNeedsReview") !== true) return "not_found" as const;
+    if (t.get("disputeStatus") === "open") return "still_open" as const;
+    tx.update(txRef, { disputeNeedsReview: false, disputeReviewedAt: new Date(), updatedAt: FieldValue.serverTimestamp() });
+    await writeAudit(
+      { actorUserId: actor.userId, actorRole: actor.role, action: "stripe.dispute_review_dismissed", targetType: "transaction", targetId: transactionId, storeId: String(t.get("storeId")), before: { disputeStatus: t.get("disputeStatus") }, after: null },
+      tx,
+    );
+    return "dismissed" as const;
   });
 }
 

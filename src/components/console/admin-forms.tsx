@@ -57,12 +57,20 @@ export function ActionButton({ action, label, confirmMessage, variant = "ghost" 
   );
 }
 
-export function SettlementRowForm({ action, status, note }: { action: Action; status: string; note: string }) {
+export function SettlementRowForm({ action, status, note, locked = false }: { action: Action; status: string; note: string; locked?: boolean }) {
   const [state, formAction, pending] = useActionState(action, null);
   return (
-    <form action={formAction} className="flex flex-wrap items-center gap-2">
+    <form
+      action={formAction}
+      onSubmit={(e) => {
+        // 未払い → 処理中・支払済は精算の確定（振込額が決まり、未払いに戻せない）
+        const next = new FormData(e.currentTarget).get("status");
+        if (!locked && next !== "UNPAID" && !window.confirm("精算を確定します。未反映の調整を合わせて振込額が決まり、未払いには戻せません。よろしいですか？")) e.preventDefault();
+      }}
+      className="flex flex-wrap items-center gap-2"
+    >
       <select name="status" defaultValue={status} className="field !w-28 !py-1.5 !text-[13px]" aria-label="支払状況">
-        <option value="UNPAID">未払い</option>
+        {locked ? null : <option value="UNPAID">未払い</option>}
         <option value="PROCESSING">処理中</option>
         <option value="PAID">支払済</option>
       </select>

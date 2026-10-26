@@ -1,4 +1,5 @@
 import { Card, PageHeader, Stat, StatusBadge, Table } from "@/components/console/shell";
+import { PaymentIssueBadge } from "@/components/console/payment-issue-badge";
 import { MonthPicker } from "@/components/console/month-picker";
 import { Pagination, one, parsePage } from "@/components/console/pagination";
 import { requireStoreUser } from "@/lib/auth/session";
@@ -55,9 +56,10 @@ export default async function StoreSalesPage(props: PageProps<"/store/sales">) {
               <td className="whitespace-nowrap tabular-nums">{formatDateTimeJa(t.paidAt)}</td>
               <td>{FORTUNE_CATALOG[t.fortuneType].label}</td>
               <td className="tabular-nums">{formatYen(t.amount)}</td>
-              <td className="tabular-nums text-gold-200">{formatYen(t.paymentStatus === "SUCCEEDED" ? t.storeShare : 0)}</td>
+              <td className="tabular-nums text-gold-200">{formatYen(t.paymentStatus === "SUCCEEDED" ? t.netStoreShare : 0)}</td>
               <td>
                 <StatusBadge status={t.paymentStatus === "SUCCEEDED" ? t.fortuneStatus : t.paymentStatus} />
+                <PaymentIssueBadge t={t} />
               </td>
             </tr>
           ))}
