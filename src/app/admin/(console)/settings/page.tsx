@@ -1,4 +1,5 @@
 import { Card, PageHeader } from "@/components/console/shell";
+import { isStripeProviderSelected, stripePublicCheckoutAccess } from "@/lib/payments/stripe-access";
 import { PasswordForm } from "@/components/console/store-forms";
 import { requireOperator } from "@/lib/auth/session";
 import { env, isDevModeLiveKeyConflict, isPaidFlowBlocked, siteStatus } from "@/lib/env";
@@ -23,6 +24,10 @@ export default async function AdminSettingsPage() {
     ? "準備中（SITE_STATUS=coming_soon）：無料テスト・決済とも受け付けていません"
     : e.TEST_PAYMENT_ENABLED
     ? "テストモード（ENABLE_TEST_PAYMENT=true・無料で占える・売上には記録しない）"
+    : isStripeProviderSelected()
+    ? stripePublicCheckoutAccess().ok
+      ? "Stripe のテスト決済（Sandbox）：一般のお客さんも利用可能。実際の請求は発生せず、売上・店舗の精算には含めない"
+      : "Stripe（PAYMENT_PROVIDER=stripe）：決済を受け付けていません（本番決済は未実装、または設定の不足）"
     : e.PAYMENT_PROVIDER === "mock"
       ? "自動テスト用の疑似決済（PAYMENT_PROVIDER=mock）"
       : !e.PAYMENT_PROVIDER
@@ -37,9 +42,9 @@ export default async function AdminSettingsPage() {
     ["価格（サーバー固定）", `${PRICE_JPY}円`],
     ["店舗配分率（既定）", `${DEFAULT_STORE_SHARE_BPS / 100}%（運営 ${100 - DEFAULT_STORE_SHARE_BPS / 100}%）`],
     ["決済手数料率（既定）", `${defaultFeeRateBps() / 100}%（PAY.JPは決済ごとの fee_rate を優先）`],
-    ["決済プロバイダ", e.PAYMENT_PROVIDER ?? "—"],
+    ["決済プロバイダ", isStripeProviderSelected() ? "stripe" : (e.PAYMENT_PROVIDER ?? "—")],
     ["決済モード", mode],
-    ["Webhook URL", e.PAYMENT_PROVIDER ? `${e.APP_URL}/api/webhooks/${e.PAYMENT_PROVIDER}` : "—"],
+    ["Webhook URL", isStripeProviderSelected() ? `${e.APP_URL}/api/webhooks/stripe` : e.PAYMENT_PROVIDER ? `${e.APP_URL}/api/webhooks/${e.PAYMENT_PROVIDER}` : "—"],
     ["公開状態（SITE_STATUS）", status === "development" ? "開発モード（development）" : status === "coming_soon" ? "準備中（coming_soon）" : "公開中（open）"],
     ...(status === "development"
       ? ([["Vercel Authentication", `${describeProtection(protection!)} — ${protection!.detail}`]] as [string, string][])

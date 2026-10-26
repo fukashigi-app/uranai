@@ -19,12 +19,15 @@ export function PurchaseSummary({
   inputLabel,
   expiresAt,
   testPayment,
+  payButtonLabel,
 }: {
   fortuneLabel: string;
   inputLabel: string;
   expiresAt: Date;
   /** テスト用の決済（実際の請求なし） */
   testPayment: boolean;
+  /** 購入ボタンの文言（省略時は testPayment に合わせた PAY.JP・疑似決済の文言） */
+  payButtonLabel?: string;
 }) {
   const deadline = expiresAt.toLocaleTimeString("ja-JP", { timeZone: "Asia/Tokyo", hour: "2-digit", minute: "2-digit" });
   const rows: [string, React.ReactNode][] = [
@@ -47,7 +50,7 @@ export function PurchaseSummary({
         </>
       ),
     ],
-    ["お支払い時期", `下の「${testPayment ? TEST_PAY_BUTTON_LABEL : PAY_BUTTON_LABEL}」ボタンを押した時点で決済されます。`],
+    ["お支払い時期", `下の「${payButtonLabel ?? (testPayment ? TEST_PAY_BUTTON_LABEL : PAY_BUTTON_LABEL)}」ボタンを押した時点で決済されます。`],
     ["提供方法・時期", `決済の完了後すぐに、この画面から${inputLabel}を入力すると、占い結果が表示されます。`],
     [
       "ご利用期限",

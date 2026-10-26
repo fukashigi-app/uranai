@@ -2,3 +2,5 @@
 export const PAY_BUTTON_LABEL = "同意して100円を支払う";
 /** テスト用の決済（PAYMENT_PROVIDER=mock）のボタンの文言 */
 export const TEST_PAY_BUTTON_LABEL = "テスト決済で進む（無料）";
+/** Stripe のテスト決済（Sandbox。実際の請求なし）のボタンの文言 */
+export const STRIPE_TEST_PAY_BUTTON_LABEL = `${PAY_BUTTON_LABEL}（テスト）`;

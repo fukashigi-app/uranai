@@ -9,16 +9,18 @@ import { getAccessToken } from "@/lib/cookies";
 import { getCheckoutByToken } from "@/lib/services/checkout";
 import { activeProvider, PaymentUnavailableError } from "@/lib/payments";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
-import { stripeTestAccess } from "@/lib/payments/stripe-access";
+import { stripeCheckoutAccess } from "@/lib/payments/stripe-access";
 import { StripeCheckoutButton } from "@/components/public/stripe-checkout-button";
+import { PAY_BUTTON_LABEL, STRIPE_TEST_PAY_BUTTON_LABEL } from "@/lib/legal/labels";
 
 // 決済の状態・公開状態（準備中など）で表示が変わるため毎回サーバーで描画（ビルド時の状態で固定しない）
 export const dynamic = "force-dynamic";
 
 export default async function PaymentPage(props: PageProps<"/payment">) {
   const canceled = (await props.searchParams).canceled === "1";
-  // Stripe のテスト決済（Preview・運営アカウントだけ）は、開発モード・準備中でも使える（危険な設定・設定の不足では使えない）
-  const stripe = await stripeTestAccess();
+  // Stripe の決済：運営アカウントのテスト決済は開発モード・準備中でも使える。一般のお客さんは公開中で PAYMENT_PROVIDER=stripe のときだけ
+  // （危険な設定・設定の不足ではどちらも使えない）
+  const stripe = await stripeCheckoutAccess();
   const stop = serviceStopReason();
   if (stop && !stripe.ok) {
     return (
@@ -56,8 +58,8 @@ export default async function PaymentPage(props: PageProps<"/payment">) {
       <PublicShell storeName={storeName} step={2}>
         <h1 className="mb-4 font-serif text-2xl font-bold tracking-wide">お支払い</h1>
         <PaymentHeader fortuneType={checkout.fortuneType} label={item.label} storeName={storeName} amount={checkout.amount} />
-        <PurchaseSummary fortuneLabel={item.label} inputLabel={item.inputLabel} expiresAt={checkout.expiresAt} testPayment />
-        <StripeCheckoutButton canceled={canceled} />
+        <PurchaseSummary fortuneLabel={item.label} inputLabel={item.inputLabel} expiresAt={checkout.expiresAt} testPayment={stripe.mode === "test"} payButtonLabel={stripe.mode === "test" ? STRIPE_TEST_PAY_BUTTON_LABEL : PAY_BUTTON_LABEL} />
+        <StripeCheckoutButton canceled={canceled} variant={stripe.audience === "operator_test" ? "operator_test" : stripe.mode === "test" ? "public_test" : "live"} />
         <p className="mt-4 text-center">
           <Link href="/fortune" className="text-[12px] text-ink-muted underline underline-offset-4">
             占いを選び直す

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { isStripeProviderSelected, stripePublicCheckoutAccess } from "@/lib/payments/stripe-access";
 import { dataProvider } from "@/lib/data-provider";
 import { readOperatorInfo } from "@/config/operator";
 import { dangerousConfigReasons, isPaidFlowBlocked, isTestPaymentConfigured, pausedMessage, productionConfigIssues, siteStatus } from "@/lib/env";
@@ -27,6 +28,10 @@ export async function GET() {
         ? "coming_soon (準備中：無料テスト・決済とも受け付けていません)"
         : isTestPaymentConfigured()
         ? "test (ENABLE_TEST_PAYMENT=true)"
+        : isStripeProviderSelected()
+          ? stripePublicCheckoutAccess().ok
+            ? "stripe (test: Sandbox。売上・精算には含めない)"
+            : "stripe (決済を受け付けていません：本番決済は未実装、または設定が不足しています)"
         : process.env.PAYJP_SECRET_KEY
           ? process.env.PAYJP_SECRET_KEY.startsWith("sk_live_")
             ? "payjp (live)"

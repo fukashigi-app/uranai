@@ -50,7 +50,11 @@ export async function runFortune(token: string | null, input: FortuneInput): Pro
   return fsdb().runTransaction(async (tx) => {
     const [s, existing] = await Promise.all([tx.get(sessionRef), tx.get(resultRef)]);
     if (!s.exists) throw new FortuneError("no_session", "お支払い情報が確認できません。お店のQRコードからやり直してください。", 401);
-    if (s.get("status") === "USED" && existing.exists) return existing.get("result") as FortuneResultData; // 二重送信は同じ結果
+    if (s.get("status") === "USED" && existing.exists) {
+      // 二重送信は同じ結果。ただし表示期間（24時間）の後は返さない（結果の画面と同じ）
+      if ((toDate(existing.get("viewableUntil")) ?? new Date(0)) > new Date()) return existing.get("result") as FortuneResultData;
+      throw new FortuneError("result_expired", "結果の表示期間が終了しました。", 410);
+    }
     if (s.get("status") !== "PAID" || mustDate(s.get("expiresAt")) <= new Date()) throw new FortuneError("expired", "占いの有効期限が切れています。", 410);
     if (s.get("fortuneType") !== input.type) throw new FortuneError("type_mismatch", "お支払いいただいた占いと種類が異なります。", 400);
 

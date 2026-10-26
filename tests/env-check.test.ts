@@ -63,7 +63,8 @@ describe("check:env（本番の環境変数の形式確認）", () => {
 
   it("本番で危険な設定・不足を検出する", () => {
     expect(levelOf({ ...good, PAYMENT_PROVIDER: "mock" }, "PAYMENT_PROVIDER")).toEqual(["error"]);
-    expect(levelOf({ ...good, PAYMENT_PROVIDER: "stripe" }, "PAYMENT_PROVIDER")).toEqual(["error"]); // 未実装の値はアプリが起動時にエラー
+    expect(levelOf({ ...good, PAYMENT_PROVIDER: "stripe" }, "PAYMENT_PROVIDER")).toEqual(["warn"]); // 本番決済は未実装のため、本番では受け付けない
+    expect(levelOf({ ...good, PAYMENT_PROVIDER: "square" }, "PAYMENT_PROVIDER")).toEqual(["error"]); // 未対応の値はアプリが起動時にエラー
     expect(levelOf({ ...good, ALLOW_MOCK_PAYMENTS_IN_PRODUCTION: "true" }, "ALLOW_MOCK_PAYMENTS_IN_PRODUCTION")).toEqual(["error"]);
     expect(levelOf({ ...good, PAYJP_SECRET_KEY: SECRETS.liveKey }, "PAYJP_SECRET_KEY")).toEqual(["warn"]);
     expect(levelOf({ ...good, CRON_SECRET: "" }, "CRON_SECRET")).toEqual(["error"]);

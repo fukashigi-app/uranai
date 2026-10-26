@@ -121,6 +121,7 @@ export function checkProductionEnv(env: Env): CheckResult[] {
     add("ENABLE_TEST_PAYMENT", "warn", "true / false 以外の値です（無効として扱われます）。");
   }
   if (env.PAYMENT_PROVIDER === "mock") add("PAYMENT_PROVIDER", "error", "mock（疑似決済）は本番では使えません。");
+  else if (env.PAYMENT_PROVIDER === "stripe") add("PAYMENT_PROVIDER", "warn", "stripe です。Stripe の本番決済はまだ実装されていないため、本番では決済を受け付けません。");
   else if (has(env.PAYMENT_PROVIDER) && !["payjp"].includes(env.PAYMENT_PROVIDER!)) add("PAYMENT_PROVIDER", "error", "対応していない値です（アプリが起動時にエラーになります）。");
   if (env.ALLOW_MOCK_PAYMENTS_IN_PRODUCTION === "true") add("ALLOW_MOCK_PAYMENTS_IN_PRODUCTION", "error", "本番では削除してください。");
   for (const k of ["PAYJP_PUBLIC_KEY", "PAYJP_SECRET_KEY", "PAYJP_WEBHOOK_TOKEN"]) {

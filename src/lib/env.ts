@@ -9,6 +9,8 @@ import { z } from "zod";
  *  - ENABLE_TEST_PAYMENT=true … テストモード。決済をスキップして無料で占える（売上には一切記録しない）
  *  - それ以外 …………………… 本番決済の成功確認が必須（決済が未設定なら占いは開始できない）
  *  - PAYMENT_PROVIDER=mock …… 自動テスト用の疑似決済（本番環境では ALLOW_MOCK_PAYMENTS_IN_PRODUCTION=true が無い限り無効）
+ *  - PAYMENT_PROVIDER=stripe … 一般のお客さんの決済を Stripe Checkout で受け付ける（判定は lib/payments/stripe-access.ts）。
+ *                              PAY.JP・疑似決済は使わない（env().PAYMENT_PROVIDER は null のまま）
  */
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -18,7 +20,7 @@ const schema = z.object({
   SESSION_SECRET: z.string().min(32, "SESSION_SECRET must be at least 32 chars"),
   DATA_ENCRYPTION_KEY: z.string().optional(),
   ENABLE_TEST_PAYMENT: z.string().optional(),
-  PAYMENT_PROVIDER: z.enum(["payjp", "mock"]).optional(),
+  PAYMENT_PROVIDER: z.enum(["payjp", "mock", "stripe"]).optional(),
   PAYJP_PUBLIC_KEY: z.string().optional(),
   PAYJP_SECRET_KEY: z.string().optional(),
   PAYJP_WEBHOOK_TOKEN: z.string().optional(),
@@ -30,7 +32,7 @@ const schema = z.object({
 type RawEnv = z.infer<typeof schema>;
 export type Env = Omit<RawEnv, "APP_URL" | "PAYMENT_PROVIDER" | "MOCK_WEBHOOK_SECRET"> & {
   APP_URL: string;
-  /** 有料フローの新規決済に使うプロバイダ。null = 決済受付不可（本番決済が未設定） */
+  /** 有料フローの新規決済に使うプロバイダ（PAY.JP・疑似決済）。null = これらでは受け付けない（未設定、または PAYMENT_PROVIDER=stripe） */
   PAYMENT_PROVIDER: "payjp" | "mock" | null;
   TEST_PAYMENT_ENABLED: boolean;
   MOCK_WEBHOOK_SECRET: string;
@@ -55,6 +57,9 @@ export function env(): Env {
   let provider: Env["PAYMENT_PROVIDER"] = null;
   if (e.PAYMENT_PROVIDER === "mock") {
     provider = mockAllowed ? "mock" : null;
+  } else if (e.PAYMENT_PROVIDER === "stripe") {
+    // Stripe を選んだときは PAY.JP のキーが残っていても PAY.JP では決済しない
+    provider = null;
   } else {
     const configured = Boolean(e.PAYJP_PUBLIC_KEY && e.PAYJP_SECRET_KEY && e.PAYJP_WEBHOOK_TOKEN);
     if (configured && e.PAYJP_SECRET_KEY!.startsWith("pk_")) throw new Error("PAYJP_SECRET_KEY looks like a public key");
@@ -216,7 +221,10 @@ export function productionConfigIssues(e: RawProcessEnv = process.env): Producti
     });
   }
   if (e.PAYMENT_PROVIDER === "mock") {
-    issues.push({ level: "error", key: "PAYMENT_PROVIDER", message: "本番で PAYMENT_PROVIDER=mock になっています。疑似決済は本番では使えないため、占いの受付（無料テスト・有料の決済とも）を停止しています。payjp に変更してください。" });
+    issues.push({ level: "error", key: "PAYMENT_PROVIDER", message: "本番で PAYMENT_PROVIDER=mock になっています。疑似決済は本番では使えないため、占いの受付（無料テスト・有料の決済とも）を停止しています。削除してください。" });
+  }
+  if (e.PAYMENT_PROVIDER === "stripe") {
+    issues.push({ level: "warning", key: "PAYMENT_PROVIDER", message: "PAYMENT_PROVIDER=stripe ですが、Stripe の本番決済はまだ実装されていないため、本番では決済を受け付けていません。" });
   }
   if (e.ALLOW_MOCK_PAYMENTS_IN_PRODUCTION === "true") {
     issues.push({ level: "error", key: "ALLOW_MOCK_PAYMENTS_IN_PRODUCTION", message: "本番では無視しています（疑似決済は使えません）。削除してください。" });

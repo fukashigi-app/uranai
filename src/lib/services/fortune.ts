@@ -64,7 +64,11 @@ export async function runFortune(token: string | null, input: FortuneInput): Pro
 
     if (session.status === "USED") {
       const [existing] = await tx.select().from(fortuneResults).where(eq(fortuneResults.fortuneSessionId, session.id));
-      if (existing) return existing.result; // 二重送信時は同じ結果を返す
+      if (existing) {
+        // 二重送信時は同じ結果を返す。ただし表示期間（24時間）の後は返さない（結果の画面と同じ）
+        if (existing.viewableUntil > new Date()) return existing.result;
+        throw new FortuneError("result_expired", "結果の表示期間が終了しました。", 410);
+      }
     }
     if (session.status !== "PAID" || session.expiresAt <= new Date()) {
       throw new FortuneError("expired", "占いの有効期限が切れています。", 410);
