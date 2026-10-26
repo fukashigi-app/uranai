@@ -11,7 +11,7 @@ export default async function StoreSettlementsPage() {
   const rows = await listSettlements({ storeId: store.id, limit: 36 });
   return (
     <>
-      <PageHeader title="振込状況" description="月末締めで集計し、運営からご登録の口座へお振込みします。" />
+      <PageHeader title="振込状況" description="売上は毎月末に集計し、原則として3か月ごとにまとめて、運営からご登録の口座へお振込みします。" />
       <Card>
         <Table head={["対象月", "利用回数", "総売上", "店舗報酬", "状況", "振込日"]} empty={rows.length === 0}>
           {rows.map(({ s }) => (

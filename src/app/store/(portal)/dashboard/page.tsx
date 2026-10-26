@@ -1,3 +1,4 @@
+import { STORE_SHARE_BPS } from "@/config/pricing";
 import Link from "next/link";
 import { Card, PageHeader, Stat, StatusBadge } from "@/components/console/shell";
 import { BarChart } from "@/components/ui/bar-chart";
@@ -23,7 +24,8 @@ export default async function StoreDashboard() {
   ]);
   const testModeOn = isTestPaymentConfigured();
   const cur = monthly[0];
-  const shareRate = store.storeShareBps / 100;
+  // 店舗の取り分は全店舗一律（店舗のデータに残っている古い率は表示に使わない）
+  const shareRate = STORE_SHARE_BPS / 100;
 
   return (
     <>

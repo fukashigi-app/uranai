@@ -7,7 +7,7 @@ import { db } from "@/lib/db";
 import { auditLogs, storeUsers, stores, users, type Store } from "@/lib/db/schema";
 import { decryptJson, encryptJson, generateStoreCode } from "@/lib/security/crypto";
 import { hashPassword } from "@/lib/auth/password";
-import { DEFAULT_STORE_SHARE_BPS } from "@/config/pricing";
+import { STORE_SHARE_BPS } from "@/config/pricing";
 import type { BankInfo, StoreProfileInput } from "@/lib/validation";
 import { writeAudit } from "./audit";
 import { revokeUserSessions } from "@/lib/auth/session-store";
@@ -25,7 +25,7 @@ export async function createStore(input: StoreProfileInput, actor: Actor): Promi
   for (let attempt = 0; attempt < 5; attempt++) {
     const inserted = await db()
       .insert(stores)
-      .values({ ...input, storeCode: generateStoreCode(), storeShareBps: DEFAULT_STORE_SHARE_BPS })
+      .values({ ...input, storeCode: generateStoreCode(), storeShareBps: STORE_SHARE_BPS })
       .onConflictDoNothing()
       .returning();
     if (inserted[0]) {
@@ -176,14 +176,7 @@ export async function getStoresByIds(ids: string[]): Promise<Store[]> {
   return db().select().from(stores).where(inArray(stores.id, ids));
 }
 
-/** 店舗配分率の変更（以後の決済にのみ適用。過去の取引は保存済みの取り分のまま） */
-export async function setStoreShareBps(storeId: string, bps: number, actor: Actor): Promise<void> {
-  if (isFirestore()) return fsStores.setStoreShareBps(storeId, bps, actor);
-  const [before] = await db().select({ bps: stores.storeShareBps }).from(stores).where(eq(stores.id, storeId));
-  if (!before || before.bps === bps) return;
-  await db().update(stores).set({ storeShareBps: bps }).where(eq(stores.id, storeId));
-  await writeAudit({ actorUserId: actor.userId, actorRole: actor.role, action: "store.share.update", targetType: "store", targetId: storeId, storeId, before: { storeShareBps: before.bps }, after: { storeShareBps: bps } });
-}
+// 店舗の取り分は全店舗一律（STORE_SHARE_BPS）で、店舗ごとには変更できない（変更の機能は廃止）
 
 export async function getUserPasswordHash(userId: string): Promise<string | null> {
   if (isFirestore()) return fsUsers.getUserPasswordHash(userId);

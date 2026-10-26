@@ -2,7 +2,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { FieldValue, type DocumentData } from "firebase-admin/firestore";
 import type { Store } from "@/lib/db/schema";
-import { DEFAULT_STORE_SHARE_BPS } from "@/config/pricing";
+import { STORE_SHARE_BPS } from "@/config/pricing";
 import { decryptJson, encryptJson, generateStoreCode } from "@/lib/security/crypto";
 import type { BankInfo, StoreProfileInput } from "@/lib/validation";
 import { C, fsdb, mustDate, toDate } from "./admin";
@@ -30,7 +30,8 @@ export function toStore(id: string, d: DocumentData): Store {
     phone: String(d.phone ?? ""),
     email: String(d.email ?? ""),
     status: d.status === "SUSPENDED" ? "SUSPENDED" : "ACTIVE",
-    storeShareBps: Number(d.storeShareBps ?? DEFAULT_STORE_SHARE_BPS),
+    // 古い店舗のデータに残っている率（参考の記録だけ。決済には使わない。取り分は全店舗一律 STORE_SHARE_BPS）
+    storeShareBps: Number(d.storeShareBps ?? STORE_SHARE_BPS),
     bankInfoEncrypted: d.bankInfoEncrypted ?? null,
     bankAccountLast4: d.bankAccountLast4 ?? null,
     bankUpdatedAt: toDate(d.bankUpdatedAt),
@@ -80,7 +81,7 @@ export async function createStore(input: StoreProfileInput, actor: Actor): Promi
           ...input,
           storeCode: code,
           status: "ACTIVE",
-          storeShareBps: DEFAULT_STORE_SHARE_BPS,
+          storeShareBps: STORE_SHARE_BPS,
           bankInfoEncrypted: null,
           bankAccountLast4: null,
           bankUpdatedAt: null,
@@ -162,13 +163,6 @@ export async function reissueStoreCode(storeId: string, actor: Actor): Promise<s
     }
   }
   throw new Error("failed to reissue store code");
-}
-
-export async function setStoreShareBps(storeId: string, bps: number, actor: Actor): Promise<void> {
-  const snap = await storeRef(storeId).get();
-  if (!snap.exists || Number(snap.get("storeShareBps")) === bps) return;
-  await storeRef(storeId).update({ storeShareBps: bps, updatedAt: FieldValue.serverTimestamp() });
-  await writeAudit({ actorUserId: actor.userId, actorRole: actor.role, action: "store.share.update", targetType: "store", targetId: storeId, storeId, before: { storeShareBps: snap.get("storeShareBps") }, after: { storeShareBps: bps } });
 }
 
 export async function listStoreAuditLogs(storeId: string, limit = 30) {

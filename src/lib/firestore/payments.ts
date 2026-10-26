@@ -2,7 +2,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { FieldValue, type DocumentData } from "firebase-admin/firestore";
 import type { checkouts, FortuneTypeValue } from "@/lib/db/schema";
-import { CHECKOUT_TTL_MS, CURRENCY, defaultFeeRateBps, FORTUNE_SESSION_TTL_MS, PRICE_JPY } from "@/config/pricing";
+import { CHECKOUT_TTL_MS, CURRENCY, defaultFeeRateBps, FORTUNE_SESSION_TTL_MS, PRICE_JPY, STORE_SHARE_BPS } from "@/config/pricing";
 import { siteConfig } from "@/config/site";
 import { calcFee, splitRevenue } from "@/lib/money";
 import { getProvider, isProviderId } from "@/lib/payments";
@@ -239,8 +239,8 @@ export async function confirmCharge(providerId: ProviderId, chargeId: string): P
       const st = await tx.get(stRef);
       if (!st.exists) return { status: "rejected", reason: "store_not_found" } as const;
 
-      const shareBps = Number(st.get("storeShareBps"));
-      // 決済時点の取り分を保存（後で取り分率を変えても過去の取引は変わらない）
+      // 店舗の取り分は全店舗一律（店舗のデータの率は使わない）。決済時点の取り分を保存する
+      const shareBps = STORE_SHARE_BPS;
       const { storeShare, operatorShare } = splitRevenue(co.amount, shareBps);
       const paymentFee = calcFee(co.amount, charge.feeRateBps ?? defaultFeeRateBps());
       const paidAt = charge.createdAt;

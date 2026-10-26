@@ -15,7 +15,7 @@ import Stripe from "stripe";
 import { createFakeStripe } from "./lib/fake-stripe";
 import { C, fsdb } from "@/lib/firestore/admin";
 import { dataProvider } from "@/lib/data-provider";
-import { createOperator, createStore, setStoreShareBps, setStoreStatus } from "@/lib/services/stores";
+import { createOperator, createStore, setStoreStatus } from "@/lib/services/stores";
 import { monthTotals } from "@/lib/services/reports";
 import { randomToken, sha256Hex } from "@/lib/security/crypto";
 import { jstYearMonth } from "@/lib/time";
@@ -165,7 +165,9 @@ async function main() {
   const storeA = await createStore({ name: `公開検証店舗A ${stamp}`, contactName: "", postalCode: "", address: "", phone: "", email: "" }, SYSTEM);
   const storeB = await createStore({ name: `公開検証店舗B ${stamp}`, contactName: "", postalCode: "", address: "", phone: "", email: "" }, SYSTEM);
   const storeS = await createStore({ name: `公開検証店舗S ${stamp}`, contactName: "", postalCode: "", address: "", phone: "", email: "" }, SYSTEM);
-  await setStoreShareBps(storeB.id, 2500, SYSTEM);
+  // 配分率を店舗ごとに変えられた頃の古い値が店舗のデータに残っていても、新規の決済は全店舗一律の30%
+  await fsdb().collection(C.stores).doc(storeA.id).update({ storeShareBps: 4000 });
+  await fsdb().collection(C.stores).doc(storeB.id).update({ storeShareBps: 2500 });
   await setStoreStatus(storeS.id, "SUSPENDED", SYSTEM);
   const opId = await createOperator({ name: "公開検証運営", email: `pub-op-${stamp}@example.com`, password: "PublicOperator123" });
   const ym = jstYearMonth(new Date());
@@ -258,6 +260,7 @@ async function main() {
     { provider: t1.get("paymentProvider"), amount: t1.get("amount"), storeId: t1.get("storeId"), storeShare: t1.get("storeShare"), operatorShare: t1.get("operatorShare"), fee: t1.get("paymentFee"), livemode: t1.get("livemode"), countable: t1.get("countable"), status: t1.get("paymentStatus") },
     { provider: "stripe", amount: 100, storeId: storeA.id, storeShare: 30, operatorShare: 70, fee: 4, livemode: false, countable: false, status: "SUCCEEDED" },
   );
+  assert.equal(t1.get("storeShareBps"), 3000, "店舗の古い配分率（40%）が使われました");
   assert.equal((await fsdb().collection(C.fortuneSessions).where("transactionId", "==", t1.id).get()).size, 1);
   assert.equal((await fsdb().collection(C.fortuneSessions).doc(t1.id).get()).get("status"), "PAID");
   r = await webhook("checkout.session.completed", obj1, { eventId: "evt_pub_dup_1" });
@@ -270,7 +273,7 @@ async function main() {
   // 支払い済みの間は新しい注文を作らない（権利の消失・二重決済の防止）
   r = await guest.req("/api/checkout", { method: "POST", json: { fortuneType: "BLOOD" } });
   assert.equal(r.status, 409);
-  step("支払い：戻り先と Webhook 2通が同時でも決済記録・占い権利は1件。100円 → 店舗A 30円・運営70円・手数料4円・Sandbox（売上対象外）。再送・再訪問も1件のまま。支払い済みの間は新しい注文を作らない");
+  step("支払い：戻り先と Webhook 2通が同時でも決済記録・占い権利は1件。100円 → 店舗A（古い配分率40%が残っている）でも店舗30円・運営70円・手数料4円・Sandbox（売上対象外）。再送・再訪問も1件のまま。支払い済みの間は新しい注文を作らない");
 
   // ---- 6. 入力 → 結果。二重送信は同じ結果。24時間の再表示 ----
   html = await (await guest.req("/fortune/input")).text();
@@ -306,7 +309,7 @@ async function main() {
   await ctl(`pay/${p2.sessionId}`, { fee: 4 });
   assert.equal(await outcome(await webhook("checkout.session.completed", { id: p2.sessionId, object: "checkout.session" })), "confirmed");
   const [t2] = await txOf(p2.checkoutId);
-  assert.deepEqual([t2.get("storeId"), t2.get("storeShare"), t2.get("operatorShare"), t2.get("amount")], [storeB.id, 25, 75, 100]);
+  assert.deepEqual([t2.get("storeId"), t2.get("storeShare"), t2.get("operatorShare"), t2.get("amount"), t2.get("storeShareBps")], [storeB.id, 30, 70, 100, 3000]);
   r = await guestB.req("/api/fortune", { method: "POST", json: { type: "BLOOD", bloodType: "O", birthMonth: 3 } });
   assert.equal(r.status, 200, await r.clone().text());
   // 別の店舗の QR を後から読んでも、支払い済みの注文の店舗は変わらない
@@ -315,7 +318,7 @@ async function main() {
   // Sandbox の決済は売上・店舗の取り分・精算に含めない（テストと本番を混ぜない）
   const after = { month: await monthTotals(ym), monthA: await monthTotals(ym, storeA.id), monthB: await monthTotals(ym, storeB.id) };
   assert.deepEqual(after, before, "Sandbox の決済が売上集計に入りました");
-  step("売上の帰属：店舗B の QR → 店舗B（配分25%：店舗25円・運営75円）。後から別の QR を読んでも変わらない。Sandbox の決済は売上集計に含めない");
+  step("売上の帰属：店舗B の QR → 店舗B（古い配分率25%が残っていても店舗30円・運営70円）。後から別の QR を読んでも変わらない。Sandbox の決済は売上集計に含めない");
 
   // ---- 8. 確定待ち（PayPay）→ 失敗：権利なし・選び直しを案内 ----
   const guestP = new Client();

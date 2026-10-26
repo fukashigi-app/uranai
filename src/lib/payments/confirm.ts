@@ -4,7 +4,7 @@ import * as fsPay from "@/lib/firestore/payments";
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { checkouts, fortuneSessions, stores, transactions, webhookEvents } from "@/lib/db/schema";
-import { CURRENCY, defaultFeeRateBps, FORTUNE_SESSION_TTL_MS } from "@/config/pricing";
+import { CURRENCY, defaultFeeRateBps, FORTUNE_SESSION_TTL_MS, STORE_SHARE_BPS } from "@/config/pricing";
 import { calcFee, splitRevenue } from "@/lib/money";
 import { getProvider } from "./index";
 import type { ProviderId } from "./types";
@@ -54,10 +54,11 @@ export async function confirmCharge(providerId: ProviderId, chargeId: string): P
     if (charge.amount !== checkout.amount) return { status: "rejected", reason: "amount_mismatch" } as const;
     if (charge.metadata.storeId !== checkout.storeId) return { status: "rejected", reason: "store_mismatch" } as const;
 
-    const [store] = await tx.select({ shareBps: stores.storeShareBps }).from(stores).where(eq(stores.id, checkout.storeId));
+    const [store] = await tx.select({ id: stores.id }).from(stores).where(eq(stores.id, checkout.storeId));
     if (!store) return { status: "rejected", reason: "store_not_found" } as const;
 
-    const { storeShare, operatorShare } = splitRevenue(checkout.amount, store.shareBps);
+    // 店舗の取り分は全店舗一律（店舗のデータの率は使わない）
+    const { storeShare, operatorShare } = splitRevenue(checkout.amount, STORE_SHARE_BPS);
     const paymentFee = calcFee(checkout.amount, charge.feeRateBps ?? defaultFeeRateBps());
 
     const inserted = await tx
@@ -72,7 +73,7 @@ export async function confirmCharge(providerId: ProviderId, chargeId: string): P
         storeShare,
         operatorShare,
         paymentFee,
-        storeShareBps: store.shareBps,
+        storeShareBps: STORE_SHARE_BPS,
         livemode: charge.livemode,
         paidAt: charge.createdAt,
       })

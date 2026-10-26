@@ -33,7 +33,7 @@ export default async function AdminSettlementsPage(props: PageProps<"/admin/sett
     <>
       <PageHeader
         title="月次精算"
-        description="月末締め後に精算を作成し、振込完了後に「支払済」へ変更してください。"
+        description="月末締め後に各月の精算を作成します。店舗への振込は原則として3か月ごとにまとめて行い、振込が済んだ月の精算を「支払済」へ変更してください。"
         actions={<MonthPicker value={ym} makeHref={(v) => `/admin/settlements?ym=${v <= jstYearMonth() ? v : jstYearMonth()}`} />}
       />
       <BankChangeNotice changes={bankChanges} names={changeStoreNames} />

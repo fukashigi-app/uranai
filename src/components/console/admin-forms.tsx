@@ -88,14 +88,11 @@ export function StoreAdminProfileForm({ action, values, sharePercent }: { action
             <Field label="住所" name="address" defaultValue={values.address} error={s?.errors?.address} />
           </div>
           <Field label="メールアドレス" name="email" defaultValue={values.email} error={s?.errors?.email} />
-          <Field
-            label="店舗配分率（%）"
-            name="storeSharePercent"
-            defaultValue={String(sharePercent)}
-            error={s?.errors?.storeSharePercent}
-            inputMode="numeric"
-            hint="既定30%。変更は以後の決済にのみ適用されます"
-          />
+          <div>
+            <p className="text-[12px] text-ink-muted">店舗の取り分</p>
+            <p className="mt-1 text-[14px] font-bold">{sharePercent}%（運営 {100 - sharePercent}%）</p>
+            <p className="mt-1 text-[11.5px] text-ink-faint">全店舗一律で、店舗ごとには変更できません。決済手数料は運営の負担です。</p>
+          </div>
         </div>
       )}
     </ActionForm>

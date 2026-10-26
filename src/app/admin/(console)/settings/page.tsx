@@ -4,7 +4,7 @@ import { PasswordForm } from "@/components/console/store-forms";
 import { requireOperator } from "@/lib/auth/session";
 import { env, isDevModeLiveKeyConflict, isPaidFlowBlocked, siteStatus } from "@/lib/env";
 import { describeProtection, getProtectionStatus } from "@/lib/services/vercel-protection";
-import { DEFAULT_STORE_SHARE_BPS, PRICE_JPY, defaultFeeRateBps } from "@/config/pricing";
+import { STORE_SHARE_BPS, PRICE_JPY, defaultFeeRateBps } from "@/config/pricing";
 import { siteConfig } from "@/config/site";
 import { changeAdminPasswordAction } from "../../actions";
 
@@ -40,7 +40,7 @@ export default async function AdminSettingsPage() {
     ["サービス名", siteConfig.name],
     ["公開URL", e.APP_URL],
     ["価格（サーバー固定）", `${PRICE_JPY}円`],
-    ["店舗配分率（既定）", `${DEFAULT_STORE_SHARE_BPS / 100}%（運営 ${100 - DEFAULT_STORE_SHARE_BPS / 100}%）`],
+    ["店舗の取り分（全店舗一律・固定）", `${STORE_SHARE_BPS / 100}%（運営 ${100 - STORE_SHARE_BPS / 100}%。決済手数料は運営の負担）`],
     ["決済手数料率（既定）", `${defaultFeeRateBps() / 100}%（PAY.JPは決済ごとの fee_rate を優先）`],
     ["決済プロバイダ", isStripeProviderSelected() ? "stripe" : (e.PAYMENT_PROVIDER ?? "—")],
     ["決済モード", mode],

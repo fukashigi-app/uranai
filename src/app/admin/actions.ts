@@ -16,7 +16,6 @@ import {
   getUserStoreId,
   readBankInfo,
   reissueStoreCode,
-  setStoreShareBps,
   setStoreStatus,
   setUserActive,
   setUserPassword,
@@ -88,12 +87,7 @@ export async function updateStoreAction(storeId: string, _prev: FormState, fd: F
   assertId(storeId);
   const parsed = storeProfileSchema.safeParse(pick(fd, PROFILE_FIELDS));
   if (!parsed.success) return { errors: fieldErrors(parsed.error), message: "入力内容を確認してください" };
-  const shareRaw = String(fd.get("storeSharePercent") ?? "").trim();
-  if (shareRaw !== "") {
-    const pct = Number(shareRaw);
-    if (!Number.isFinite(pct) || pct < 0 || pct > 100 || Math.round(pct * 100) !== pct * 100) return { errors: { storeSharePercent: "0〜100の数値で入力してください" } };
-    await setStoreShareBps(storeId, Math.round(pct * 100), actor);
-  }
+  // 店舗の取り分は全店舗一律で変更できない（古い画面などから storeSharePercent が送られても無視する）
   await updateStoreProfile(storeId, parsed.data, actor);
   revalidatePath(`/admin/stores/${storeId}`);
   return { ok: true, message: "店舗情報を保存しました" };

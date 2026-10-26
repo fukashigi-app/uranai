@@ -124,7 +124,8 @@ async function main() {
   assert.match(await res.text(), new RegExp(storeA.name));
   step("店舗QR（/s/店舗コード で店舗を識別）");
 
-  // 4. 決済 → 決済履歴作成（100円 → 店舗30円 / 運営70円）
+  // 4. 決済 → 決済履歴作成（100円 → 店舗30円 / 運営70円）。店舗のデータに古い配分率（50%）が残っていても全店舗一律の30%
+  await fsdb().collection(C.stores).doc(storeA.id).update({ storeShareBps: 5000 });
   res = await user.req("/api/checkout", { method: "POST", json: { fortuneType: "BIRTHDAY" } });
   assert.equal(res.status, 201, await res.clone().text());
   res = await user.req("/api/checkout/pay", { method: "POST", json: { cardToken: "mock_tok_success" } });
@@ -139,10 +140,10 @@ async function main() {
   const txs = await fsdb().collection(C.transactions).where("storeId", "==", storeA.id).get();
   assert.equal(txs.size, 1);
   const t = txs.docs[0];
-  assert.deepEqual([t.get("amount"), t.get("storeShare"), t.get("operatorShare")], [100, 30, 70]);
+  assert.deepEqual([t.get("amount"), t.get("storeShare"), t.get("operatorShare"), t.get("storeShareBps")], [100, 30, 70, 3000]);
   assert.equal(t.id, transactionDocId("mock", t.get("providerPaymentId")));
   assert.equal(t.get("yearMonth"), jstYearMonth(t.get("paidAt").toDate()));
-  step(`決済履歴作成（金額100円・店舗30円・運営70円を保存、年月は日本時間 ${t.get("yearMonth")}）`);
+  step(`決済履歴作成（金額100円・店舗30円・運営70円を保存。店舗の古い配分率50%は使わない、年月は日本時間 ${t.get("yearMonth")}）`);
 
   // 5. 二重計上防止（同じWebhookの再送・同時確定）
   const chargeId = String(t.get("providerPaymentId"));

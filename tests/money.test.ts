@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { calcFee, percentStringToBps, splitRevenue } from "@/lib/money";
 import { jstDateString, jstMonthRange, jstYearMonth, shiftYearMonth } from "@/lib/time";
+import * as pricing from "@/config/pricing";
+
+describe("店舗の取り分（全店舗一律・固定）", () => {
+  it("店舗30%・運営70%（100円 → 30円・70円）。率は1つの定数だけ", () => {
+    expect(pricing.PRICE_JPY).toBe(100);
+    expect(pricing.STORE_SHARE_BPS).toBe(3000);
+    expect(splitRevenue(pricing.PRICE_JPY, pricing.STORE_SHARE_BPS)).toEqual({ storeShare: 30, operatorShare: 70 });
+    // 店舗ごとの既定値（上書きできる率）という考え方は残さない
+    expect("DEFAULT_STORE_SHARE_BPS" in pricing).toBe(false);
+  });
+});
 
 describe("splitRevenue", () => {
   it("100円の30%は店舗30円・運営70円", () => {

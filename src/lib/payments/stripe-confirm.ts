@@ -1,6 +1,6 @@
 import "server-only";
 import { FieldValue, type DocumentData } from "firebase-admin/firestore";
-import { defaultFeeRateBps, FORTUNE_SESSION_TTL_MS, PRICE_JPY } from "@/config/pricing";
+import { defaultFeeRateBps, FORTUNE_SESSION_TTL_MS, PRICE_JPY, STORE_SHARE_BPS } from "@/config/pricing";
 import { calcFee, splitRevenue } from "@/lib/money";
 import { C, fsdb, mustDate, safeId, toDate } from "@/lib/firestore/admin";
 import { isSalesPayment } from "@/lib/payments/kind";
@@ -209,8 +209,8 @@ export async function confirmStripeCheckout(sessionId: string, rt?: StripeRuntim
       const stRef = fsdb().collection(C.stores).doc(f.storeId);
       const st = await tx.get(stRef);
       if (!st.exists) return { status: "rejected", reason: "store_not_found" } as const;
-      const shareBps = Number(st.get("storeShareBps"));
-      if (!Number.isInteger(shareBps) || shareBps < 0 || shareBps > 10000) return { status: "rejected", reason: "invalid_share" } as const;
+      // 店舗の取り分は全店舗一律（店舗のデータの率は使わない）。決済時点の取り分を保存する
+      const shareBps = STORE_SHARE_BPS;
       const { storeShare, operatorShare } = splitRevenue(f.amount, shareBps);
 
       tx.create(txRef, {

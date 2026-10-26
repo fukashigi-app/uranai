@@ -6,8 +6,12 @@ import "server-only";
 export const PRICE_JPY = 100 as const;
 export const CURRENCY = "jpy" as const;
 
-/** 店舗配分率の既定値（basis points: 3000 = 30%）。店舗ごとに stores.store_share_bps で上書き可 */
-export const DEFAULT_STORE_SHARE_BPS = 3000;
+/**
+ * 店舗の取り分（basis points: 3000 = 30%。100円 → 店舗30円・運営70円）。全店舗一律・固定で、店舗ごとには変更できない。
+ * 新規の決済は必ずこの率で配分する（店舗のデータ stores.storeShareBps に古い値が残っていても使わない）。
+ * 過去の取引は、決済時点で transactions に保存した取り分のまま（書き換えない）。決済手数料は運営の負担（取り分からは引かない）。
+ */
+export const STORE_SHARE_BPS = 3000;
 
 /** 決済手数料率の既定値（bps）。PAY.JP は charge.fee_rate を優先して使う */
 export function defaultFeeRateBps(): number {

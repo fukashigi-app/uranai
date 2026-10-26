@@ -1,3 +1,4 @@
+import { STORE_SHARE_BPS } from "@/config/pricing";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Card, PageHeader, StatusBadge, Table } from "@/components/console/shell";
@@ -37,7 +38,7 @@ const AUDIT_LABEL: Record<string, string> = {
   "store.suspend": "店舗停止",
   "store.resume": "店舗再開",
   "store.qr.reissue": "QR再発行",
-  "store.share.update": "配分率変更",
+  "store.share.update": "配分率変更（廃止前の記録）",
   "store.user.create": "アカウント作成",
   "user.password.set": "パスワード変更",
   "user.enable": "アカウント有効化",
@@ -96,7 +97,7 @@ export default async function AdminStoreDetail(props: PageProps<"/admin/stores/[
           <StoreAdminProfileForm
             action={updateStoreAction.bind(null, id)}
             values={{ name: store.name, contactName: store.contactName, postalCode: store.postalCode, address: store.address, phone: store.phone, email: store.email }}
-            sharePercent={store.storeShareBps / 100}
+            sharePercent={STORE_SHARE_BPS / 100}
           />
         </Card>
         <Card title="振込情報">
