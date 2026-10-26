@@ -116,6 +116,7 @@ const stripeServer = createServer(async (req, res) => {
       metadata: { checkoutId: f.get("metadata[checkoutId]") ?? "", storeId: f.get("metadata[storeId]") ?? "", fortuneType: f.get("metadata[fortuneType]") ?? "" },
       pi_metadata: { checkoutId: f.get("payment_intent_data[metadata][checkoutId]"), storeId: f.get("payment_intent_data[metadata][storeId]"), fortuneType: f.get("payment_intent_data[metadata][fortuneType]") },
       success_url: f.get("success_url"),
+      cancel_url: f.get("cancel_url"),
       expires_at: Number(f.get("expires_at")),
       payment_intent: null,
       allowed_payment_method_types: allowed.length ? allowed : null,
@@ -225,18 +226,20 @@ async function ctl(path: string, body: Record<string, unknown> = {}) {
 
 // ================= アプリの利用者 =================
 class Client {
+  /** 接続先（同じアプリを別のホスト名で開く＝Vercel のデプロイ固有の URL とブランチの固定 URL の違いを再現する） */
+  base = BASE;
   jar = new Map<string, string>();
   ip = `198.51.100.${Math.floor(Math.random() * 250) + 1}`;
   async req(path: string, init: RequestInit & { json?: unknown } = {}) {
     const headers = new Headers(init.headers);
     headers.set("cookie", [...this.jar].map(([k, v]) => `${k}=${v}`).join("; "));
     headers.set("x-real-ip", this.ip);
-    if (init.method === "POST" && !headers.has("origin")) headers.set("origin", BASE);
+    if (init.method === "POST" && !headers.has("origin")) headers.set("origin", this.base);
     if (init.json !== undefined) {
       headers.set("content-type", "application/json");
       init.body = JSON.stringify(init.json);
     }
-    const res = await fetch(BASE + path, { ...init, headers, redirect: "manual" });
+    const res = await fetch(this.base + path, { ...init, headers, redirect: "manual" });
     for (const c of res.headers.getSetCookie()) {
       const [kv] = c.split(";");
       const i = kv.indexOf("=");
@@ -338,7 +341,8 @@ async function main() {
   assert.equal(s1.client_reference_id, p1.checkoutId);
   assert.deepEqual(s1.metadata, { checkoutId: p1.checkoutId, storeId: storeA.id, fortuneType: "ZODIAC" });
   assert.equal(s1.amount_total, 100);
-  assert.match(String(s1.success_url), /\/payment\/return\?session_id=\{CHECKOUT_SESSION_ID\}$/);
+  assert.equal(s1.success_url, `${BASE}/payment/return?session_id={CHECKOUT_SESSION_ID}`);
+  assert.equal(s1.cancel_url, `${BASE}/payment?canceled=1`);
   assert.deepEqual(s1.allowed_payment_method_types, ["card", "paypay"], "支払い方法がカード・PayPay に絞り込まれていません");
   assert.deepEqual(s1.payment_method_types, ["card", "paypay"]);
   assert.equal(s1.managed_payments_param, "false", "managed_payments.enabled=false を明示していません");
@@ -463,7 +467,7 @@ async function main() {
   const p6 = await startPurchase(op2, storeA.storeCode, "ZODIAC");
   await ctl(`pay/${p6.sessionId}`);
   r = await op.req(`/payment/return?session_id=${p6.sessionId}`);
-  assert.match(await r.text(), /お支払いを確認できませんでした/);
+  assert.match(await r.text(), /このブラウザではお支払いを確認できませんでした/);
   assert.equal((await txOf(p6.checkoutId)).length, 0);
   step("照合の失敗：金額の食い違い・店舗の食い違いは記録しない。他人の注文の Session は戻り先で確定しない");
 
@@ -708,6 +712,53 @@ async function main() {
   assert.equal(((await r.json()) as { outcome: string }).outcome, "rejected");
   assert.equal((await txOf(pM.checkoutId)).length, 0);
   step("Managed Payments：enabled=false を明示（アカウントの既定が有効でも決済画面を開ける）。応答・確定時に有効なら移動・記録しない。期限は押した時刻から31分で注文の期限もそろう。再度押しても同じ Session。期限切れの注文では作らない");
+
+  // ---- 19. 戻り先は決済を始めたドメイン（同一オリジン＋許可リスト）。別のドメインでは確定しない。偽の Origin では外部に戻さない ----
+  const ALT = BASE.replace("localhost", "127.0.0.1"); // 別のホスト名（Cookie は共有されない）
+  assert.notEqual(ALT, BASE);
+  const opAlt = await loggedIn(opId);
+  opAlt.base = ALT;
+  const pAlt = await startPurchase(opAlt, storeA.storeCode, "ZODIAC");
+  const sAlt = fake.sessions.get(pAlt.sessionId)!;
+  assert.equal(sAlt.success_url, `${ALT}/payment/return?session_id={CHECKOUT_SESSION_ID}`, "戻り先が決済を始めたドメインではありません");
+  assert.equal(sAlt.cancel_url, `${ALT}/payment?canceled=1`);
+  await ctl(`pay/${pAlt.sessionId}`);
+  // 別のドメイン（このブラウザの注文の Cookie が無い）に戻ったら確定しない。案内は「始めたブラウザ・URLで開き直す」「二重に払う必要はない」
+  const otherDomain = new Client();
+  r = await otherDomain.req(`/payment/return?session_id=${pAlt.sessionId}`);
+  const htmlAlt = await r.text();
+  assert.match(htmlAlt, /このブラウザではお支払いを確認できませんでした/);
+  assert.match(htmlAlt, /お支払いを始めたブラウザで、同じURLから開き直してください/);
+  assert.match(htmlAlt, /もう一度お支払いいただく必要はありません/);
+  assert.equal((await txOf(pAlt.checkoutId)).length, 0);
+  // 始めたドメインで開き直すと確定する（Webhook と同時でも記録・権利は1件）
+  const [retAlt] = await Promise.all([
+    opAlt.req(`/payment/return?session_id=${pAlt.sessionId}`),
+    webhook("checkout.session.completed", { id: pAlt.sessionId, object: "checkout.session" }),
+  ]);
+  assert.match(retAlt.headers.get("location") ?? "", /\/fortune\/input$/);
+  const txAlt = await txOf(pAlt.checkoutId);
+  assert.equal(txAlt.length, 1);
+  assert.equal((await fsdb().collection(C.fortuneSessions).where("transactionId", "==", txAlt[0].id).get()).size, 1);
+  r = await opAlt.req(`/payment/return?session_id=${pAlt.sessionId}`); // もう一度戻っても増えない
+  assert.equal((await txOf(pAlt.checkoutId)).length, 1);
+  // 偽の Origin：転送用のヘッダーを偽って同一オリジンの確認を通しても、許可リストに無いので外部サイトには戻さない（公開URL に戻す）
+  const appOrigin = new URL(process.env.APP_URL || BASE).origin;
+  const opEvil = await loggedIn(opId);
+  await createOrder(opEvil, storeA.storeCode);
+  r = await opEvil.req("/api/checkout/stripe-session", { method: "POST", json: {}, headers: { origin: "https://evil.example", "x-forwarded-host": "evil.example", "x-forwarded-proto": "https" } });
+  assert.equal(r.status, 200, await r.clone().text());
+  const sEvil = fake.sessions.get(((await r.json()) as { url: string }).url.split("/").pop()!)!;
+  assert.ok(!String(sEvil.success_url).includes("evil") && !String(sEvil.cancel_url).includes("evil"), "外部サイトへの戻り先になりました");
+  assert.equal(sEvil.success_url, `${appOrigin}/payment/return?session_id={CHECKOUT_SESSION_ID}`);
+  // Origin と接続先が一致しない要求は、同一オリジンの確認で 403（Session を作らない）
+  const opEvil2 = await loggedIn(opId);
+  await createOrder(opEvil2, storeA.storeCode);
+  const callsEvil = fake.createCalls;
+  r = await opEvil2.req("/api/checkout/stripe-session", { method: "POST", json: {}, headers: { origin: "https://evil.example" } });
+  assert.equal(r.status, 403);
+  assert.equal(fake.createCalls, callsEvil);
+  step("戻り先は決済を始めたドメイン（同一オリジン＋このデプロイの URL の許可リスト）。別のドメインでは確定せず開き直しを案内。始めたドメインで1回だけ確定（Webhook と同時でも1件）。偽の Origin・転送ヘッダーでは外部に戻さず、Origin の不一致は 403");
 
   // ---- 11. 売上・精算に含めない（テスト決済） ----
   assert.deepEqual(await monthTotals(ym), before.month);

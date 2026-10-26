@@ -41,10 +41,23 @@ export default async function StripeReturnPage(props: PageProps<"/payment/return
       </PublicShell>
     );
   }
+  if (status === "rejected") {
+    // 金額・注文などが一致しない（記録も占い権利も作っていない。詳しい理由は画面に出さない）
+    return (
+      <PublicShell>
+        <Notice title="お支払いを確認できませんでした" action={<Link href="/fortune" className="btn-ghost inline-block rounded-2xl px-6 py-3 text-sm">占いの選択へ</Link>}>
+          お支払いの内容を確認できなかったため、占いを開始できませんでした。お手数ですが、運営までお問い合わせください。
+        </Notice>
+      </PublicShell>
+    );
+  }
+  // not_linked：このブラウザ（このドメイン）に、この Session と紐付いた注文が無い。照合の条件は緩めない
   return (
     <PublicShell>
-      <Notice title="お支払いを確認できませんでした" action={<Link href="/fortune" className="btn-gold inline-block rounded-2xl px-6 py-3 font-bold">占いを選び直す</Link>}>
-        このブラウザのお支払い情報と一致しませんでした。お手数ですが、占いの選択からやり直してください。
+      <Notice title="このブラウザではお支払いを確認できませんでした" action={<Link href="/fortune" className="btn-ghost inline-block rounded-2xl px-6 py-3 text-sm">占いの選択へ</Link>}>
+        お支払いを始めたときの情報が、このブラウザ（またはこのURL）に見つかりませんでした。
+        <span className="mt-2 block">お支払いを始めたブラウザで、同じURLから開き直してください。お支払いが済んでいれば、そのまま占いに進めます。</span>
+        <span className="mt-2 block font-bold text-gold-200">お支払い済みの場合、もう一度お支払いいただく必要はありません。</span>
       </Notice>
     </PublicShell>
   );

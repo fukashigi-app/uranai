@@ -5,10 +5,14 @@ import { CheckoutError } from "@/lib/errors";
 import { stripeTestAccess } from "@/lib/payments/stripe-access";
 import { startStripeCheckout } from "@/lib/payments/stripe-confirm";
 import { stripeErrorSummary } from "@/lib/payments/stripe-checkout";
+import { stripeTestConfig } from "@/lib/payments/stripe-guard";
+import { stripeReturnOrigin } from "@/lib/payments/stripe-return-origin";
 
 /**
  * Stripe の決済画面（Checkout）の URL を返す。Stripe のテスト決済が使えて、運営アカウントでログイン中のときだけ。
  * 注文はブラウザの Cookie から見つける（注文IDや金額はリクエストで受け付けない）。注文と Session を紐付けてから URL を返す。
+ * 戻り先は決済を始めたドメイン（注文の Cookie があるドメイン）。同一オリジンの確認（guardPost）と、
+ * このデプロイ自身の URL だけの許可リストで確かめる。許可されなければ公開URL（APP_URL）に戻す。
  */
 export async function POST(req: Request) {
   const access = await stripeTestAccess();
@@ -16,7 +20,9 @@ export async function POST(req: Request) {
   const blocked = await guardPost(req, "stripe-session", 10, 60);
   if (blocked) return blocked;
   try {
-    const r = await startStripeCheckout(await getAccessToken(), env().APP_URL);
+    const cfg = stripeTestConfig();
+    const returnOrigin = stripeReturnOrigin(req.headers.get("origin"), env().APP_URL, cfg.ok ? cfg.mode : "preview");
+    const r = await startStripeCheckout(await getAccessToken(), returnOrigin);
     // pending … Stripe 側で支払いの確定待ち（PayPay など）。新しい決済画面には移動させず、確認中の画面へ
     return jsonOk(r.status === "succeeded" ? { status: "succeeded" } : r.status === "pending" ? { status: "pending", url: r.returnUrl } : { status: "redirect", url: r.url });
   } catch (e) {
