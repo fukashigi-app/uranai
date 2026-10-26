@@ -85,6 +85,11 @@ export type StripeTestConfig =
 const norm = (v: string | undefined) => (v ?? "").trim().toLowerCase();
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 
+/** Firestore Emulator（localhost）に接続する設定か（ローカルの自動テストの判定に使う） */
+export function isLocalEmulatorTarget(e: Env = process.env): boolean {
+  return isLocalEmulator(e);
+}
+
 function isLocalEmulator(e: Env): boolean {
   const host = (e.FIRESTORE_EMULATOR_HOST ?? "").trim();
   if (!host) return false;

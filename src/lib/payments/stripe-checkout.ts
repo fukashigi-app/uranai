@@ -1,46 +1,88 @@
 import "server-only";
 import Stripe from "stripe";
 import { CURRENCY, PRICE_JPY } from "@/config/pricing";
-import { stripeTestConfig, STRIPE_TEST_DENY_MESSAGE } from "./stripe-guard";
+import { isLocalEmulatorTarget, stripeTestConfig, STRIPE_TEST_DENY_MESSAGE } from "./stripe-guard";
 
 /**
- * Stripe Checkout（Stripe の決済画面へ移動する方式）のテスト決済。Stripe 公式 SDK を使う。
- *  - テスト用キー（sk_test_）でだけ動く。条件は stripe-guard.ts（欠けていたら例外＝決済を受け付けない）
+ * Stripe Checkout（Stripe の決済画面へ移動する方式）。Stripe 公式 SDK を使う。
+ *  - Stripe との接続は「モード」（test＝Sandbox / live＝本番）を持つ StripeRuntime で表す。照合・記録はモードに合わせて行う
+ *    （Session の ID が cs_test_ / cs_live_、Session・PaymentIntent・Charge・通知の livemode がモードと一致すること）
+ *  - アプリの決済の処理が使う接続は stripeRuntime() だけで、今はテスト（sk_test_）しか返さない。本番決済は未実装・無効
+ *    （条件は stripe-guard.ts。欠けていたら例外＝決済を受け付けない）
+ *  - 本番モードの処理は、自動テストで createSimulatedStripeRuntime（localhost の模擬 Stripe API と Firestore Emulator だけ）で確かめる
  *  - 決済の確定は、Webhook や戻り先の URL の内容を信用せず、必ず Stripe API から取り直して検証する（stripe-confirm.ts）
  *  - 支払い方法は、カード（Apple Pay・Google Pay を含む）と PayPay だけ。Session の作成時に絞り込み、確定時にも Charge で確認する
  */
 
 export class StripeUnavailableError extends Error {
   constructor(reason: string) {
-    super(`Stripe test checkout is not available: ${reason}`);
+    super(`Stripe checkout is not available: ${reason}`);
     this.name = "StripeUnavailableError";
   }
 }
 
-let cached: { key: string; client: Stripe } | null = null;
+export type StripeMode = "test" | "live";
 
-/** テスト決済が使える設定のときだけ SDK を返す。使えないときは例外（安全側） */
-export function stripeClient(): Stripe {
-  const cfg = stripeTestConfig();
-  if (!cfg.ok) throw new StripeUnavailableError(STRIPE_TEST_DENY_MESSAGE[cfg.reason]);
-  const key = `${cfg.secretKey}|${cfg.apiBase ? `${cfg.apiBase.protocol}://${cfg.apiBase.host}:${cfg.apiBase.port}` : ""}`;
-  if (cached?.key === key) return cached.client;
-  const client = new Stripe(cfg.secretKey, {
+/** Stripe との接続（モード・SDK・Webhook の署名の値）。モードは作成時に決まり、変えられない */
+export type StripeRuntime = {
+  readonly mode: StripeMode;
+  readonly client: Stripe;
+  readonly webhookSecret: string;
+  /** 戻り先に http を許すか（ローカルの自動テストだけ） */
+  readonly allowHttpOrigin: boolean;
+};
+
+type ApiBase = { host: string; port: number; protocol: "http" | "https" };
+
+function newClient(secretKey: string, apiBase: ApiBase | null): Stripe {
+  return new Stripe(secretKey, {
     maxNetworkRetries: 2,
     timeout: 20_000,
     telemetry: false,
     appInfo: { name: "uranai" },
-    ...(cfg.apiBase ? { host: cfg.apiBase.host, port: cfg.apiBase.port, protocol: cfg.apiBase.protocol } : {}),
+    ...(apiBase ? { host: apiBase.host, port: apiBase.port, protocol: apiBase.protocol } : {}),
   });
-  cached = { key, client };
-  return client;
 }
 
-/** Webhook の署名の確認に使う秘密の値（設定が欠けていたら例外） */
-export function stripeWebhookSecret(): string {
+let cached: { key: string; runtime: StripeRuntime } | null = null;
+
+/**
+ * アプリの決済の処理が使う Stripe との接続。今はテスト（Sandbox）だけを返す（本番決済は未実装・無効。段階を分けて有効にする）。
+ * 使えない設定のときは例外（安全側）。
+ */
+export function stripeRuntime(): StripeRuntime {
   const cfg = stripeTestConfig();
   if (!cfg.ok) throw new StripeUnavailableError(STRIPE_TEST_DENY_MESSAGE[cfg.reason]);
-  return cfg.webhookSecret;
+  const key = `test|${cfg.secretKey}|${cfg.webhookSecret}|${cfg.apiBase ? `${cfg.apiBase.protocol}://${cfg.apiBase.host}:${cfg.apiBase.port}` : ""}`;
+  if (cached?.key === key) return cached.runtime;
+  const runtime: StripeRuntime = { mode: "test", client: newClient(cfg.secretKey, cfg.apiBase), webhookSecret: cfg.webhookSecret, allowHttpOrigin: cfg.mode === "local" };
+  cached = { key, runtime };
+  return runtime;
+}
+
+const LOOPBACK = new Set(["localhost", "127.0.0.1"]);
+
+/**
+ * 自動テスト専用：localhost の模擬 Stripe API に接続する Stripe との接続を作る（本番モードの照合・記録を確かめるため）。
+ * 次のすべてを満たさなければ例外。本物の Stripe・本番の Firebase には接続できない。
+ *  - Vercel 上ではない（VERCEL_ENV が無い）
+ *  - Firestore Emulator（localhost）の demo- プロジェクト
+ *  - 接続先が http(s)://localhost または 127.0.0.1
+ *  - キーの形がモードと一致（形だけの偽物を使う）
+ */
+export function createSimulatedStripeRuntime(
+  mode: StripeMode,
+  opts: { apiBase: string; secretKey: string; webhookSecret: string },
+  e: Record<string, string | undefined> = process.env,
+): StripeRuntime {
+  if (e.VERCEL_ENV) throw new StripeUnavailableError("simulated runtime is for local automated tests only");
+  if (!isLocalEmulatorTarget(e) || !(e.FIREBASE_PROJECT_ID ?? "").startsWith("demo-")) throw new StripeUnavailableError("simulated runtime requires the local Firestore emulator (demo- project)");
+  const u = new URL(opts.apiBase);
+  if (!LOOPBACK.has(u.hostname) || !["http:", "https:"].includes(u.protocol) || u.pathname !== "/") throw new StripeUnavailableError("simulated runtime must use a localhost API");
+  if (!opts.secretKey.startsWith(`sk_${mode}_`) || !opts.webhookSecret.startsWith("whsec_")) throw new StripeUnavailableError("simulated runtime key does not match the mode");
+  const protocol = u.protocol === "https:" ? "https" : "http";
+  const apiBase = { host: u.hostname, port: Number(u.port || (protocol === "https" ? 443 : 80)), protocol } as const;
+  return { mode, client: newClient(opts.secretKey, apiBase), webhookSecret: opts.webhookSecret, allowHttpOrigin: true };
 }
 
 /** Stripe の Checkout Session の有効期限（Stripe の下限は作成から30分）。注文の有効期限もこれに合わせる */
@@ -83,15 +125,13 @@ export type StripeSessionInput = {
  * Managed Payments（Stripe が販売者になる仕組み）は使わない。このアプリは運営が販売者で、店舗の取り分はアプリ内で計算・記録し、
  * 運営が銀行振込する。アカウントの既定で有効になっていても、Session ごとに managed_payments.enabled=false を明示する。
  */
-export async function createStripeCheckoutSession(input: StripeSessionInput): Promise<{ id: string; url: string; expiresAt: Date }> {
-  const cfg = stripeTestConfig();
-  if (!cfg.ok) throw new StripeUnavailableError(STRIPE_TEST_DENY_MESSAGE[cfg.reason]);
+export async function createStripeCheckoutSession(input: StripeSessionInput, rt: StripeRuntime = stripeRuntime()): Promise<{ id: string; url: string; expiresAt: Date }> {
   const origin = new URL(input.origin);
-  if (origin.protocol !== "https:" && !(cfg.mode === "local" && origin.protocol === "http:")) throw new Error("checkout origin must be https");
+  if (origin.protocol !== "https:" && !(rt.allowHttpOrigin && origin.protocol === "http:")) throw new Error("checkout origin must be https");
   const metadata = { checkoutId: input.checkoutId, storeId: input.storeId, fortuneType: input.fortuneType };
   const expiresAt = Math.floor(input.expiresAt.getTime() / 1000);
   if (expiresAt * 1000 < Date.now() + 30 * 60 * 1000) throw new Error("checkout session expiry is too early");
-  const session = await stripeClient().checkout.sessions.create(
+  const session = await rt.client.checkout.sessions.create(
     {
       mode: "payment",
       locale: "ja",
@@ -108,7 +148,8 @@ export async function createStripeCheckoutSession(input: StripeSessionInput): Pr
     },
     { idempotencyKey: `uranai-checkout-v2-${input.checkoutId}-${expiresAt}` },
   );
-  if (!session.id.startsWith("cs_test_") || session.livemode || !session.url) throw new Error("unexpected checkout session");
+  // モードと違う Session（テストの環境で本番の Session など）は使わない
+  if (!isStripeSessionId(session.id, rt.mode) || session.livemode !== (rt.mode === "live") || !session.url) throw new Error("unexpected checkout session");
   if (session.client_reference_id !== input.checkoutId || session.metadata?.checkoutId !== input.checkoutId) throw new Error("checkout session is not linked to the order");
   // Managed Payments が有効な Session（販売者が Stripe になる）には移動させない
   if (session.managed_payments?.enabled === true) throw new Error("checkout session uses managed payments");
@@ -129,25 +170,28 @@ export function stripeErrorSummary(e: unknown): Record<string, string | number |
 }
 
 /** 決済の確認に必要な情報を Stripe API から取り直す（PaymentIntent・Charge・手数料の明細まで） */
-export async function retrieveStripeSession(sessionId: string): Promise<Stripe.Checkout.Session> {
-  if (!isStripeTestSessionId(sessionId)) throw new Error("invalid test session id");
-  return stripeClient().checkout.sessions.retrieve(sessionId, { expand: ["payment_intent.latest_charge.balance_transaction"] });
+export async function retrieveStripeSession(sessionId: string, rt: StripeRuntime = stripeRuntime()): Promise<Stripe.Checkout.Session> {
+  if (!isStripeSessionId(sessionId, rt.mode)) throw new Error("invalid session id for this mode");
+  return rt.client.checkout.sessions.retrieve(sessionId, { expand: ["payment_intent.latest_charge.balance_transaction"] });
 }
 
-export async function retrieveStripeCharge(chargeId: string): Promise<Stripe.Charge> {
+export async function retrieveStripeCharge(chargeId: string, rt: StripeRuntime = stripeRuntime()): Promise<Stripe.Charge> {
   if (!/^(ch|py)_[A-Za-z0-9_]{1,200}$/.test(chargeId)) throw new Error("invalid charge id");
-  return stripeClient().charges.retrieve(chargeId, { expand: ["balance_transaction"] });
+  return rt.client.charges.retrieve(chargeId, { expand: ["balance_transaction"] });
 }
 
 /** Charge の返金の一覧（返金の状態は、通知の中身ではなくこの一覧から判断する） */
-export async function listStripeRefunds(chargeId: string): Promise<Stripe.Refund[]> {
+export async function listStripeRefunds(chargeId: string, rt: StripeRuntime = stripeRuntime()): Promise<Stripe.Refund[]> {
   if (!/^(ch|py)_[A-Za-z0-9_]{1,200}$/.test(chargeId)) throw new Error("invalid charge id");
-  const page = await stripeClient().refunds.list({ charge: chargeId, limit: 100 });
+  const page = await rt.client.refunds.list({ charge: chargeId, limit: 100 });
   if (page.has_more) throw new Error("too many refunds"); // 100円の商品では起きない。取りこぼすくらいなら処理しない
   return page.data;
 }
 
-export const isStripeTestSessionId = (v: unknown): v is string => typeof v === "string" && /^cs_test_[A-Za-z0-9_]{1,200}$/.test(v);
+/** モードに合った Checkout Session の ID か（テストは cs_test_、本番は cs_live_） */
+export const isStripeSessionId = (v: unknown, mode: StripeMode): v is string =>
+  typeof v === "string" && (mode === "live" ? /^cs_live_[A-Za-z0-9_]{1,200}$/ : /^cs_test_[A-Za-z0-9_]{1,200}$/).test(v);
+export const isStripeTestSessionId = (v: unknown): v is string => isStripeSessionId(v, "test");
 
 export type StripePaymentFacts = {
   sessionId: string;
@@ -163,6 +207,8 @@ export type StripePaymentFacts = {
   balanceTransactionId: string | null;
   refunded: boolean;
   paymentMethod: StripePaymentMethod;
+  /** Stripe の値（モードと一致することを確認済み）。本番の決済だけ true（売上・精算の対象） */
+  livemode: boolean;
 };
 
 export type StripeValidation = { ok: true; facts: StripePaymentFacts } | { ok: false; status: "not_paid" | "rejected"; reason: string };
@@ -176,9 +222,11 @@ const idOf = (v: unknown): string | null => (typeof v === "string" ? v : v && ty
  * Stripe API から取り直した Session を検証する（Firestore には触れない純粋な処理）。
  * テスト決済であること・支払い済み・通貨・金額・注文ID・店舗ID・占いの種類・PaymentIntent・Charge を確認する。
  */
-export function validateStripeSession(session: Stripe.Checkout.Session): StripeValidation {
-  if (session.object !== "checkout.session" || !isStripeTestSessionId(session.id)) return { ok: false, status: "rejected", reason: "not_test_session" };
-  if (session.livemode) return { ok: false, status: "rejected", reason: "livemode" };
+export function validateStripeSession(session: Stripe.Checkout.Session, mode: StripeMode = "test"): StripeValidation {
+  const live = mode === "live";
+  // ID の形と livemode が、実行環境から決まるモードと一致すること（テストの環境で本番の決済、本番の環境でテストの決済を記録しない）
+  if (session.object !== "checkout.session" || !isStripeSessionId(session.id, mode)) return { ok: false, status: "rejected", reason: live ? "not_live_session" : "not_test_session" };
+  if (session.livemode !== live) return { ok: false, status: "rejected", reason: "livemode" };
   // Managed Payments（Stripe が販売者）の決済は記録しない（このアプリは運営が販売者。店舗の取り分の前提が変わる）
   if (session.managed_payments?.enabled === true) return { ok: false, status: "rejected", reason: "managed_payments_not_allowed" };
   if (session.mode !== "payment") return { ok: false, status: "rejected", reason: "mode" };
@@ -194,7 +242,7 @@ export function validateStripeSession(session: Stripe.Checkout.Session): StripeV
 
   const pi = session.payment_intent;
   if (!pi || typeof pi === "string") return { ok: false, status: "rejected", reason: "payment_intent_not_expanded" };
-  if (pi.livemode) return { ok: false, status: "rejected", reason: "livemode" };
+  if (pi.livemode !== live) return { ok: false, status: "rejected", reason: "livemode" };
   if (pi.status !== "succeeded") return { ok: false, status: "not_paid", reason: `payment_intent_${pi.status}` };
   if (pi.currency !== CURRENCY || pi.amount !== PRICE_JPY || pi.amount_received !== PRICE_JPY) return { ok: false, status: "rejected", reason: "amount_mismatch" };
   const pmd = pi.metadata ?? {};
@@ -202,7 +250,8 @@ export function validateStripeSession(session: Stripe.Checkout.Session): StripeV
 
   const charge = pi.latest_charge;
   if (!charge || typeof charge === "string") return { ok: false, status: "rejected", reason: "charge_not_expanded" };
-  if (charge.livemode || charge.status !== "succeeded" || !charge.paid || !charge.captured) return { ok: false, status: "not_paid", reason: "charge_not_captured" };
+  if (charge.livemode !== live) return { ok: false, status: "rejected", reason: "livemode" };
+  if (charge.status !== "succeeded" || !charge.paid || !charge.captured) return { ok: false, status: "not_paid", reason: "charge_not_captured" };
   if (charge.currency !== CURRENCY || charge.amount !== PRICE_JPY || idOf(charge.payment_intent) !== pi.id) return { ok: false, status: "rejected", reason: "charge_mismatch" };
   // カード（Apple Pay・Google Pay を含む）と PayPay だけを受け付ける（Session で絞り込んでいるが、確定時にも確認する）
   const paymentMethod = paymentMethodOf(charge);
@@ -224,6 +273,7 @@ export function validateStripeSession(session: Stripe.Checkout.Session): StripeV
       balanceTransactionId,
       refunded: charge.refunded || charge.amount_refunded > 0,
       paymentMethod,
+      livemode: live,
     },
   };
 }

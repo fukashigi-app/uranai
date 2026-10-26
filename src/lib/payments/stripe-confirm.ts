@@ -2,7 +2,8 @@ import "server-only";
 import { FieldValue, type DocumentData } from "firebase-admin/firestore";
 import { defaultFeeRateBps, FORTUNE_SESSION_TTL_MS, PRICE_JPY } from "@/config/pricing";
 import { calcFee, splitRevenue } from "@/lib/money";
-import { C, fsdb, mustDate, safeId } from "@/lib/firestore/admin";
+import { C, fsdb, mustDate, safeId, toDate } from "@/lib/firestore/admin";
+import { isSalesPayment } from "@/lib/payments/kind";
 import { isAlreadyExists, salesKeys } from "@/lib/firestore/shared";
 import { sha256Hex } from "@/lib/security/crypto";
 import type { CheckoutStatus } from "@/lib/services/checkout";
@@ -13,7 +14,7 @@ import { writeAudit } from "@/lib/firestore/audit";
 import {
   createStripeCheckoutSession,
   feeOf,
-  isStripeTestSessionId,
+  isStripeSessionId,
   listStripeRefunds,
   retrieveStripeCharge,
   retrieveStripeSession,
@@ -21,8 +22,10 @@ import {
   stripeSessionExpiry,
   stripeSessionState,
   summarizeRefunds,
+  stripeRuntime,
   validateStripeSession,
   type StripeRefundSummary,
+  type StripeRuntime,
 } from "./stripe-checkout";
 
 /**
@@ -39,7 +42,10 @@ import {
  * 返金は Stripe API の返金の一覧から状態を求める（処理中・成功・一部・失敗）。処理中になった時点で未使用の権利を止め、
  * 成功で決済記録を REFUNDED にする。失敗したら refundNeedsReview=true にして、管理者が確認・権利の復旧をできるようにする。
  *
- * テスト決済（livemode=false）なので、売上・店舗の売上画面・月次精算には含めない（lib/payments/kind.ts。salesKeys の countable=false）。
+ * モード（テスト／本番）は Stripe との接続（StripeRuntime）で決まる。各関数の最後の引数で渡せるが、アプリからは渡さず
+ * stripeRuntime()（今はテストだけ）を使う。本番モードは自動テストで模擬 Stripe API に対してだけ使う。
+ * livemode は Stripe から取得してモードとの一致を確かめた値を記録する。テスト決済（false）は売上・店舗の売上画面・月次精算に
+ * 含めず、本番の決済（true）だけが含まれる（lib/payments/kind.ts。salesKeys の countable）。
  * 店舗の取り分・運営の取り分は記録する（100円 → 30円・70円）。手数料は Stripe の確定値。未確定なら推定値で feeEstimated=true にして、後で確定値に直す。
  */
 
@@ -77,20 +83,27 @@ const FAILED_ERROR = () => new CheckoutError("payment_failed", "お支払いが�
 
 export type StripeStartResult = { status: "redirect"; url: string } | { status: "succeeded" } | { status: "pending"; returnUrl: string };
 
-export async function startStripeCheckout(token: string | null, origin: string): Promise<StripeStartResult> {
+export async function startStripeCheckout(token: string | null, origin: string, rt?: StripeRuntime): Promise<StripeStartResult> {
+  const r0 = rt ?? stripeRuntime();
   const found = await stripeCheckoutByToken(token);
   if (!found) throw new CheckoutError("not_found", "お支払い情報が見つかりません。占いの選択からやり直してください。", 404);
   const d = found.data;
+  // 別のモードで始めた注文（テストと本番の取り違え）は、状態にかかわらず扱わない
+  if (typeof d.stripeLivemode === "boolean" && d.stripeLivemode !== (r0.mode === "live")) {
+    throw new CheckoutError("checkout_conflict", "お支払い情報を確認できませんでした。占いの選択からやり直してください。", 409);
+  }
   if (d.status === "SUCCEEDED") return { status: "succeeded" };
   // すでに Session に移動済みなら、期限より先に支払い状況を照合する（期限の後に PayPay の支払いが確定することもあるため）
-  if (isStripeTestSessionId(d.providerPaymentId)) {
-    const r = await confirmStripeCheckout(d.providerPaymentId);
+  if (typeof d.providerPaymentId === "string" && d.providerPaymentId) {
+    // 別のモードの Session が紐付いた注文（テストと本番の取り違え）は使わない
+    if (!isStripeSessionId(d.providerPaymentId, r0.mode)) throw new CheckoutError("checkout_conflict", "お支払い情報を確認できませんでした。占いの選択からやり直してください。", 409);
+    const r = await confirmStripeCheckout(d.providerPaymentId, r0);
     if (r.status === "confirmed" || r.status === "duplicate") return { status: "succeeded" };
     if (r.status === "rejected") throw new CheckoutError("checkout_conflict", "お支払い情報を確認できませんでした。占いの選択からやり直してください。", 409);
     // すでに閉じた注文（失敗・期限切れ）は、支払いが確定していなければ選び直しを案内する
     if (d.status === "FAILED") throw FAILED_ERROR();
     if (d.status === "EXPIRED") throw EXPIRED_ERROR();
-    const linkedSession = await retrieveStripeSession(d.providerPaymentId);
+    const linkedSession = await retrieveStripeSession(d.providerPaymentId, r0);
     const state = stripeSessionState(linkedSession);
     // まだ支払える Session（カードの拒否の後なども含む）：同じ決済画面へ戻す
     if (state === "retryable") {
@@ -98,7 +111,7 @@ export async function startStripeCheckout(token: string | null, origin: string):
       return { status: "redirect", url: linkedSession.url };
     }
     if (state === "canceled" || state === "expired") {
-      await closeStripeCheckout(d.providerPaymentId);
+      await closeStripeCheckout(d.providerPaymentId, {}, r0);
       throw state === "canceled" ? FAILED_ERROR() : EXPIRED_ERROR();
     }
     // それ以外（Stripe 側で確定待ち・支払い済みで確定の処理待ちなど）：新しい Session は作らない（二重の支払いを防ぐ）。確認中の画面へ
@@ -117,7 +130,7 @@ export async function startStripeCheckout(token: string | null, origin: string):
     productName: `${siteConfig.name} ${FORTUNE_CATALOG[d.fortuneType as keyof typeof FORTUNE_CATALOG]?.label ?? "占い"}（テスト決済）`,
     origin,
     expiresAt: stripeSessionExpiry(),
-  });
+  }, r0);
   const linked = await fsdb().runTransaction(async (tx) => {
     const snap = await tx.get(checkoutRef(found.id));
     const cur = snap.data();
@@ -131,6 +144,8 @@ export async function startStripeCheckout(token: string | null, origin: string):
         providerPaymentId: session.id,
         // 注文の期限を Session の期限にそろえる（注文の期限切れの判断と、Stripe の期限切れを一致させる）
         expiresAt: session.expiresAt,
+        // どちらのモードの Session か（確定時に照合する）
+        stripeLivemode: r0.mode === "live",
         attemptCount: Number(cur.attemptCount ?? 0) + 1,
         processingStartedAt: new Date(),
         failureCode: null,
@@ -152,9 +167,10 @@ export async function startStripeCheckout(token: string | null, origin: string):
  * Stripe API から Session・PaymentIntent・Charge を取り直し、注文と照合してから、
  * 決済記録・占い権利の作成と注文の更新を1つのトランザクションで行う。
  */
-export async function confirmStripeCheckout(sessionId: string): Promise<StripeConfirmOutcome> {
-  if (!isStripeTestSessionId(sessionId)) return { status: "rejected", reason: "invalid_session_id" };
-  const v = validateStripeSession(await retrieveStripeSession(sessionId));
+export async function confirmStripeCheckout(sessionId: string, rt?: StripeRuntime): Promise<StripeConfirmOutcome> {
+  const r0 = rt ?? stripeRuntime();
+  if (!isStripeSessionId(sessionId, r0.mode)) return { status: "rejected", reason: "invalid_session_id" };
+  const v = validateStripeSession(await retrieveStripeSession(sessionId, r0), r0.mode);
   if (!v.ok) {
     if (v.status === "rejected") console.error("[stripe] payment rejected", { sessionId, reason: v.reason });
     return v.status === "not_paid" ? { status: "not_paid", reason: v.reason } : { status: "rejected", reason: v.reason };
@@ -182,6 +198,8 @@ export async function confirmStripeCheckout(sessionId: string): Promise<StripeCo
       const co = coSnap.data()!;
       if (co.provider !== STRIPE_PROVIDER) return { status: "rejected", reason: "provider_mismatch" } as const;
       if (co.providerPaymentId !== f.sessionId) return { status: "rejected", reason: "session_not_linked" } as const;
+      // 注文に記録したモードと、決済のモードが一致すること（記録が無い古い注文は、Session の ID の形で確認済み）
+      if (typeof co.stripeLivemode === "boolean" && co.stripeLivemode !== f.livemode) return { status: "rejected", reason: "mode_mismatch" } as const;
       if (co.status === "SUCCEEDED") return { status: "rejected", reason: "checkout_already_succeeded" } as const; // 1注文につき1決済
       // 注文を閉じた後に Stripe 側で支払いが確定した場合も、支払われた以上は権利を付与する（ログで知らせる）
       if (co.status !== "PROCESSING" && co.status !== "CREATED") console.warn("[stripe] payment confirmed after the order was closed", { checkoutId: f.checkoutId, status: co.status });
@@ -209,7 +227,7 @@ export async function confirmStripeCheckout(sessionId: string): Promise<StripeCo
         storeShareBps: shareBps,
         paymentStatus: "SUCCEEDED",
         fortuneStatus: "PENDING",
-        livemode: false, // テスト決済（売上・精算に含めない）
+        livemode: f.livemode, // Stripe から取得した値（モードと一致を確認済み）。true の本番の決済だけが売上・精算の対象
         paidAt: f.paidAt,
         refundedAt: null,
         amountRefunded: 0,
@@ -221,7 +239,7 @@ export async function confirmStripeCheckout(sessionId: string): Promise<StripeCo
         refundStatus: null,
         refundPendingAmount: 0,
         refundNeedsReview: false,
-        ...salesKeys(f.storeId, STRIPE_PROVIDER, "SUCCEEDED", f.paidAt, false),
+        ...salesKeys(f.storeId, STRIPE_PROVIDER, "SUCCEEDED", f.paidAt, f.livemode),
         createdAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp(),
       });
@@ -236,7 +254,11 @@ export async function confirmStripeCheckout(sessionId: string): Promise<StripeCo
         createdAt: FieldValue.serverTimestamp(),
       });
       tx.update(checkoutRef(f.checkoutId), { status: "SUCCEEDED", providerPaymentKey: txId, failureCode: null, updatedAt: FieldValue.serverTimestamp() });
-      // テスト決済は店舗の最終利用日を更新しない（売上に数える決済だけ）
+      // 店舗の最終利用日は、売上に数える決済（本番の決済）だけで更新する（テスト決済では更新しない）
+      if (isSalesPayment(STRIPE_PROVIDER, f.livemode)) {
+        const lastUsed = toDate(st.get("lastUsedAt"));
+        if (!lastUsed || lastUsed < f.paidAt) tx.update(stRef, { lastUsedAt: f.paidAt });
+      }
       return { status: "confirmed", transactionId: txId } as const;
     });
   } catch (e) {
@@ -253,10 +275,11 @@ export async function confirmStripeCheckout(sessionId: string): Promise<StripeCo
  *  - 非同期の支払いの失敗：Stripe の通知（asyncFailed=true。署名を確認済み）があり、取り直した Session も
  *    「手続き済み・未払い」のときだけ FAILED。requires_payment_method だけでは失敗にしない
  */
-export async function closeStripeCheckout(sessionId: string, opts: { asyncFailed?: boolean } = {}): Promise<"expired" | "failed" | false> {
-  if (!isStripeTestSessionId(sessionId)) return false;
-  const s = await retrieveStripeSession(sessionId);
-  if (s.livemode) return false;
+export async function closeStripeCheckout(sessionId: string, opts: { asyncFailed?: boolean } = {}, rt?: StripeRuntime): Promise<"expired" | "failed" | false> {
+  const r0 = rt ?? stripeRuntime();
+  if (!isStripeSessionId(sessionId, r0.mode)) return false;
+  const s = await retrieveStripeSession(sessionId, r0);
+  if (s.livemode !== (r0.mode === "live")) return false;
   const state = stripeSessionState(s);
   const next =
     state === "expired" ? ({ status: "EXPIRED", failureCode: "stripe_session_expired" } as const)
@@ -285,18 +308,19 @@ export type StripeRefundOutcome = "refund_pending" | "refunded" | "partial" | "r
  *  - 成功   … paymentStatus=REFUNDED。未使用の権利を止める
  *  - 一部・失敗 … refundNeedsReview=true（管理者が確認する。権利の復旧は restoreStripeEntitlement）
  */
-export async function syncStripeRefunds(chargeId: string): Promise<StripeRefundOutcome> {
-  const charge = await retrieveStripeCharge(chargeId);
-  if (charge.livemode) return "ignored";
+export async function syncStripeRefunds(chargeId: string, rt?: StripeRuntime): Promise<StripeRefundOutcome> {
+  const r0 = rt ?? stripeRuntime();
+  const charge = await retrieveStripeCharge(chargeId, r0);
+  if (charge.livemode !== (r0.mode === "live")) return "ignored"; // 別のモードの決済は扱わない
   const piId = typeof charge.payment_intent === "string" ? charge.payment_intent : charge.payment_intent?.id;
   if (!piId) return "ignored";
-  const summary = summarizeRefunds(charge.id, charge.amount, await listStripeRefunds(charge.id));
+  const summary = summarizeRefunds(charge.id, charge.amount, await listStripeRefunds(charge.id, r0));
   if (summary.state === "none") return "ignored";
   const txRef = fsdb().collection(C.transactions).doc(stripeTransactionId(piId));
   const sessionRef = fsdb().collection(C.fortuneSessions).doc(txRef.id);
   const result = await fsdb().runTransaction(async (tx) => {
     const [t, fs] = await Promise.all([tx.get(txRef), tx.get(sessionRef)]);
-    if (!t.exists || t.get("paymentProvider") !== STRIPE_PROVIDER || t.get("stripeChargeId") !== charge.id) return "ignored" as const;
+    if (!t.exists || t.get("paymentProvider") !== STRIPE_PROVIDER || t.get("stripeChargeId") !== charge.id || t.get("livemode") !== charge.livemode) return "ignored" as const;
     const refundKey = refundKeyOf(summary);
     if (t.get("refundKey") === refundKey) return "unchanged" as const; // 同じ状態はもう反映済み（再送・重複）
     const refunded = summary.state === "succeeded";
@@ -372,13 +396,15 @@ export type RestoreOutcome = "restored" | "not_eligible" | "refund_not_failed";
  * Stripe API で返金の状態を取り直し、返金が成功・処理中でない（すべて失敗・取り消し）ことを確かめてから、
  * 返金で止めた未使用の権利だけを PAID に戻す（有効期限は戻した時点から24時間）。2回目以降は何もしない。
  */
-export async function restoreStripeEntitlement(transactionId: string, actor: Actor): Promise<RestoreOutcome> {
+export async function restoreStripeEntitlement(transactionId: string, actor: Actor, rt?: StripeRuntime): Promise<RestoreOutcome> {
   if (!/^stripe_[A-Za-z0-9_]{1,200}$/.test(transactionId)) return "not_eligible";
   const txRef = fsdb().collection(C.transactions).doc(transactionId);
   const first = await txRef.get();
   const chargeId = first.get("stripeChargeId");
   if (!first.exists || first.get("paymentProvider") !== STRIPE_PROVIDER || typeof chargeId !== "string") return "not_eligible";
-  await syncStripeRefunds(chargeId); // 最新の返金の状態を反映してから判断する
+  // 別のモードの決済（テストの環境で本番の決済など）は扱わない（Stripe にも問い合わせない）
+  if (first.get("livemode") !== ((rt ?? stripeRuntime()).mode === "live")) return "not_eligible";
+  await syncStripeRefunds(chargeId, rt); // 最新の返金の状態を反映してから判断する
   const sessionRef = fsdb().collection(C.fortuneSessions).doc(transactionId);
   return fsdb().runTransaction(async (tx) => {
     const [t, fs] = await Promise.all([tx.get(txRef), tx.get(sessionRef)]);
@@ -421,32 +447,34 @@ export async function dismissStripeRefundReview(transactionId: string, actor: Ac
 }
 
 /** 手数料の確定値が出たら、推定値で記録した決済を更新する */
-export async function refreshStripeFee(chargeId: string): Promise<boolean> {
-  const charge = await retrieveStripeCharge(chargeId);
-  if (charge.livemode) return false;
+export async function refreshStripeFee(chargeId: string, rt?: StripeRuntime): Promise<boolean> {
+  const r0 = rt ?? stripeRuntime();
+  const charge = await retrieveStripeCharge(chargeId, r0);
+  if (charge.livemode !== (r0.mode === "live")) return false;
   const { fee, balanceTransactionId } = feeOf(charge);
   const piId = typeof charge.payment_intent === "string" ? charge.payment_intent : charge.payment_intent?.id;
   if (fee === null || !piId) return false;
   const txRef = fsdb().collection(C.transactions).doc(stripeTransactionId(piId));
   return fsdb().runTransaction(async (tx) => {
     const t = await tx.get(txRef);
-    if (!t.exists || t.get("stripeChargeId") !== charge.id || t.get("feeEstimated") !== true) return false;
+    if (!t.exists || t.get("stripeChargeId") !== charge.id || t.get("livemode") !== charge.livemode || t.get("feeEstimated") !== true) return false;
     tx.update(txRef, { paymentFee: fee, feeEstimated: false, stripeBalanceTransactionId: balanceTransactionId, updatedAt: FieldValue.serverTimestamp() });
     return true;
   });
 }
 
 /** 戻り先（/payment/return）：ブラウザの注文と Session が紐付いていることを確かめてから確定する */
-export async function confirmStripeReturn(token: string | null, sessionId: string): Promise<StripeConfirmOutcome | { status: "not_linked" }> {
+export async function confirmStripeReturn(token: string | null, sessionId: string, rt?: StripeRuntime): Promise<StripeConfirmOutcome | { status: "not_linked" }> {
+  const r0 = rt ?? stripeRuntime();
   const found = await stripeCheckoutByToken(token);
-  if (!found || !isStripeTestSessionId(sessionId) || found.data.providerPaymentId !== sessionId) return { status: "not_linked" };
-  return confirmStripeCheckout(sessionId);
+  if (!found || !isStripeSessionId(sessionId, r0.mode) || found.data.providerPaymentId !== sessionId) return { status: "not_linked" };
+  return confirmStripeCheckout(sessionId, r0);
 }
 
 const RECONCILE_AFTER_MS = 3_000;
 
 /** 状態の確認（/api/checkout/status）。Webhook が遅れても、Stripe API で照合して進める */
-export async function stripeCheckoutStatus(checkout: CheckoutLike): Promise<{ status: CheckoutStatus; failureCode?: string | null }> {
+export async function stripeCheckoutStatus(checkout: CheckoutLike, rt?: StripeRuntime): Promise<{ status: CheckoutStatus; failureCode?: string | null }> {
   switch (checkout.status) {
     case "SUCCEEDED":
       return { status: "succeeded" };
@@ -459,12 +487,13 @@ export async function stripeCheckoutStatus(checkout: CheckoutLike): Promise<{ st
     default: {
       if (!checkout.providerPaymentId) return { status: "processing" };
       try {
-        const outcome = await confirmStripeCheckout(checkout.providerPaymentId);
+        const r0 = rt ?? stripeRuntime();
+        const outcome = await confirmStripeCheckout(checkout.providerPaymentId, r0);
         if (outcome.status === "confirmed" || outcome.status === "duplicate") return { status: "succeeded" };
         if (outcome.status === "rejected") return { status: "failed", failureCode: "stripe_rejected" };
         // 期限の後だけ、期限切れ・取り消しを確かめて閉じる（非同期の支払いの失敗は Stripe の通知で閉じる）
         if (checkout.expiresAt.getTime() + RECONCILE_AFTER_MS < Date.now()) {
-          const closed = await closeStripeCheckout(checkout.providerPaymentId);
+          const closed = await closeStripeCheckout(checkout.providerPaymentId, {}, r0);
           if (closed) return closed === "expired" ? { status: "expired" } : { status: "failed", failureCode: "stripe_failed" };
         }
       } catch (e) {
