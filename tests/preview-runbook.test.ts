@@ -22,6 +22,7 @@ const PREVIEW: E = {
   FIREBASE_PROJECT_ID: "uranai-preview",
   STRIPE_TEST_FIREBASE_PROJECT_ID: "uranai-preview",
   PRODUCTION_FIREBASE_PROJECT_ID: "uranai-b6edf",
+  FIREBASE_CLIENT_EMAIL: "stripe-test@uranai-preview.iam.gserviceaccount.com",
 };
 
 describe("手順書 §1.1・§1.2：Preview の環境変数の取り違えでは、テスト決済・データベースを使わない", () => {

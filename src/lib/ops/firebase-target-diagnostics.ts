@@ -13,12 +13,10 @@ import { createHash, timingSafeEqual } from "node:crypto";
 
 type Env = Record<string, string | undefined>;
 
-export const PREVIEW_FIREBASE_PROJECT_ID = "uranai-preview";
-export const PRODUCTION_FIREBASE_PROJECT_ID = "uranai-b6edf";
+// プロジェクトID・サービスアカウントの判定は、データベースの接続の判定（target-guard.ts）と同じものを使う
+import { PREVIEW_FIREBASE_PROJECT_ID, PREVIEW_SERVICE_ACCOUNT_RE, PRODUCTION_FIREBASE_PROJECT_ID } from "@/lib/firestore/target-guard";
+export { PREVIEW_FIREBASE_PROJECT_ID, PRODUCTION_FIREBASE_PROJECT_ID };
 export const DIAGNOSTICS_TOKEN_MIN_LENGTH = 32;
-
-/** uranai-preview のサービスアカウント（名前@プロジェクトID.iam.gserviceaccount.com） */
-const PREVIEW_SERVICE_ACCOUNT_RE = /^[a-z][a-z0-9-]{4,28}[a-z0-9]@uranai-preview\.iam\.gserviceaccount\.com$/;
 
 export type FirebaseTargetDiagnostics = {
   projectIdIsPreview: boolean;

@@ -28,16 +28,16 @@
  * どちらも Sandbox の決済（livemode=false）なので、売上・店舗の取り分・月次精算には含めない（payments/kind.ts）。
  * next.config やスクリプト・テストからも読み込めるよう、server-only に依存しない。
  */
-import { checkFirestoreTarget } from "@/lib/firestore/target-guard";
+import { checkFirestoreTarget, PREVIEW_FIREBASE_PROJECT_ID as PREVIEW_PROJECT, PRODUCTION_FIREBASE_PROJECT_ID as PRODUCTION_PROJECT } from "@/lib/firestore/target-guard";
 import { isDevModeLiveKeyConflict, livePaymentKeyNames, siteStatus } from "@/lib/env-rules";
 
 type Env = Record<string, string | undefined>;
 
 /** 本番の Firebase プロジェクト（テスト決済では絶対に使わない。本番決済ではこれだけを使う） */
-export const PRODUCTION_FIREBASE_PROJECT_IDS = ["uranai-b6edf"] as const;
+export const PRODUCTION_FIREBASE_PROJECT_IDS = [PRODUCTION_PROJECT] as const;
 export const PRODUCTION_FIREBASE_PROJECT_ID = PRODUCTION_FIREBASE_PROJECT_IDS[0];
-/** Preview のテスト決済で使ってよい Firebase プロジェクト（これ以外は拒否） */
-export const PREVIEW_FIREBASE_PROJECT_ID = "uranai-preview";
+/** Preview のテスト決済で使ってよい Firebase プロジェクト（これ以外は拒否。データベースの接続の判定と同じ値） */
+export const PREVIEW_FIREBASE_PROJECT_ID = PREVIEW_PROJECT;
 
 export type StripeTestDenyReason =
   | "not_enabled"

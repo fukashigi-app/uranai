@@ -139,9 +139,10 @@ describe("診断 API（/api/ops/firebase-target）", () => {
 
   it("Firebase・Firestore を読み込まない（接続しない）：読み込むモジュールを固定する", () => {
     const importsOf = (file: string) => [...readFileSync(path.resolve(__dirname, "..", file), "utf8").matchAll(/^\s*import\s[^;]*?from\s+"([^"]+)"|^\s*import\s+"([^"]+)"|import\(\s*"([^"]+)"\s*\)|require\(\s*"([^"]+)"\s*\)/gm)].map((m) => m[1] ?? m[2] ?? m[3] ?? m[4]).sort();
-    // route → 診断のモジュール → node:crypto だけ（この先で Firebase に届く経路が無い）
+    // route → 診断のモジュール → node:crypto と接続先の判定（target-guard。何も読み込まない）だけ（この先で Firebase に届く経路が無い）
     expect(importsOf("src/app/api/ops/firebase-target/route.ts")).toEqual(["@/lib/ops/firebase-target-diagnostics", "next/server"]);
-    expect(importsOf("src/lib/ops/firebase-target-diagnostics.ts")).toEqual(["node:crypto"]);
+    expect(importsOf("src/lib/ops/firebase-target-diagnostics.ts")).toEqual(["@/lib/firestore/target-guard", "node:crypto"]);
+    expect(importsOf("src/lib/firestore/target-guard.ts")).toEqual([]);
   });
 });
 

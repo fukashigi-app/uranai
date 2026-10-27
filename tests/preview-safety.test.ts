@@ -14,25 +14,78 @@ afterEach(() => {
 });
 
 describe("Firebase の接続先：Preview から本番プロジェクトに接続させない", () => {
-  it("Preview：本番のプロジェクトIDと一致したら停止。別のプロジェクトなら許可（大文字小文字・前後の空白も同一視）", () => {
-    expect(checkFirestoreTarget({ VERCEL_ENV: "preview", FIREBASE_PROJECT_ID: PROD_ID, PRODUCTION_FIREBASE_PROJECT_ID: PROD_ID })).toEqual({ ok: false, reason: "preview_uses_production_project" });
-    expect(checkFirestoreTarget({ VERCEL_ENV: "preview", FIREBASE_PROJECT_ID: " URANAI-PROD ", PRODUCTION_FIREBASE_PROJECT_ID: PROD_ID }).ok).toBe(false);
-    expect(checkFirestoreTarget({ VERCEL_ENV: "preview", FIREBASE_PROJECT_ID: PREVIEW_ID, PRODUCTION_FIREBASE_PROJECT_ID: PROD_ID })).toEqual({ ok: true });
+  // Preview は uranai-preview と、そのサービスアカウントだけ。本番は uranai-b6edf（コードに固定）
+  const REAL_PROD = "uranai-b6edf";
+  const PREVIEW_SA = "stripe-test@uranai-preview.iam.gserviceaccount.com";
+  const OK_PREVIEW = { VERCEL_ENV: "preview", FIREBASE_PROJECT_ID: PREVIEW_ID, PRODUCTION_FIREBASE_PROJECT_ID: REAL_PROD, FIREBASE_CLIENT_EMAIL: PREVIEW_SA };
+
+  it("Preview：正しい設定（uranai-preview・本番のID・uranai-preview のサービスアカウント）なら接続できる", () => {
+    expect(checkFirestoreTarget(OK_PREVIEW)).toEqual({ ok: true });
   });
 
-  it("Preview・Development：設定不足（判定できない）なら停止", () => {
-    for (const env of ["preview", "development"]) {
-      expect(checkFirestoreTarget({ VERCEL_ENV: env, FIREBASE_PROJECT_ID: PREVIEW_ID })).toEqual({ ok: false, reason: "production_project_id_not_set" });
-      expect(checkFirestoreTarget({ VERCEL_ENV: env, FIREBASE_PROJECT_ID: "", PRODUCTION_FIREBASE_PROJECT_ID: PROD_ID })).toEqual({ ok: false, reason: "project_id_not_set" });
-      expect(checkFirestoreTarget({ VERCEL_ENV: env, PRODUCTION_FIREBASE_PROJECT_ID: "  " , FIREBASE_PROJECT_ID: PREVIEW_ID }).ok).toBe(false);
+  it("Preview：接続先が本番のプロジェクトなら、PRODUCTION_FIREBASE_PROJECT_ID の値に関係なく必ず拒否", () => {
+    for (const production of [REAL_PROD, "uranai-b6edff", "uranai-preview", "uranai-prod", " URANAI-B6EDF "]) {
+      expect(checkFirestoreTarget({ ...OK_PREVIEW, FIREBASE_PROJECT_ID: REAL_PROD, PRODUCTION_FIREBASE_PROJECT_ID: production }).ok).toBe(false);
     }
+    expect(checkFirestoreTarget({ ...OK_PREVIEW, FIREBASE_PROJECT_ID: REAL_PROD, PRODUCTION_FIREBASE_PROJECT_ID: "uranai-b6edff" })).toEqual({ ok: false, reason: "preview_uses_production_project" });
+    expect(checkFirestoreTarget({ ...OK_PREVIEW, FIREBASE_PROJECT_ID: " URANAI-B6EDF " }).ok).toBe(false); // 大文字小文字・前後の空白も同一視
+  });
+
+  it("Preview：PRODUCTION_FIREBASE_PROJECT_ID が本番のIDと完全に一致しなければ拒否（誤記・入れ違い）", () => {
+    for (const production of ["uranai-b6edff", "uranai-prod", "uranai-staging", " uranai-b6edf", "URANAI-B6EDF"]) {
+      expect(checkFirestoreTarget({ ...OK_PREVIEW, PRODUCTION_FIREBASE_PROJECT_ID: production })).toEqual({ ok: false, reason: "preview_production_project_id_unexpected" });
+    }
+    // 入れ違い（本番のIDの欄に Preview のID）は、接続先と同じなので最初に止まる
+    expect(checkFirestoreTarget({ ...OK_PREVIEW, PRODUCTION_FIREBASE_PROJECT_ID: PREVIEW_ID }).ok).toBe(false);
+  });
+
+  it("Preview：別の Firebase プロジェクトは拒否（uranai-preview と完全に一致するものだけ）", () => {
+    for (const target of ["uranai-staging", "uranai-preview2", "Uranai-Preview", " uranai-preview", "uranai-preview ", "demo-uranai"]) {
+      expect(checkFirestoreTarget({ ...OK_PREVIEW, FIREBASE_PROJECT_ID: target })).toEqual({ ok: false, reason: "preview_project_not_allowed" });
+    }
+  });
+
+  it("Preview：FIREBASE_CLIENT_EMAIL が uranai-preview のサービスアカウントでなければ拒否（本番用・別のプロジェクト・未設定）", () => {
+    for (const email of [
+      "firebase-adminsdk-abc12@uranai-b6edf.iam.gserviceaccount.com",
+      "stripe-test@uranai-staging.iam.gserviceaccount.com",
+      "stripe-test@uranai-preview.iam.gserviceaccount.com.evil.example",
+      "stripe-test@uranai-preview.iam.gserviceaccount.com ",
+      "someone@example.com",
+      "",
+      undefined,
+    ]) {
+      expect(checkFirestoreTarget({ ...OK_PREVIEW, FIREBASE_CLIENT_EMAIL: email })).toEqual({ ok: false, reason: "preview_service_account_mismatch" });
+    }
+  });
+
+  it("Preview：必須の変数が未設定なら拒否", () => {
+    expect(checkFirestoreTarget({ ...OK_PREVIEW, PRODUCTION_FIREBASE_PROJECT_ID: undefined })).toEqual({ ok: false, reason: "production_project_id_not_set" });
+    expect(checkFirestoreTarget({ ...OK_PREVIEW, PRODUCTION_FIREBASE_PROJECT_ID: "  " })).toEqual({ ok: false, reason: "production_project_id_not_set" });
+    expect(checkFirestoreTarget({ ...OK_PREVIEW, FIREBASE_PROJECT_ID: undefined })).toEqual({ ok: false, reason: "project_id_not_set" });
+    expect(checkFirestoreTarget({ ...OK_PREVIEW, FIREBASE_PROJECT_ID: "" })).toEqual({ ok: false, reason: "project_id_not_set" });
+    expect(checkFirestoreTarget({ VERCEL_ENV: "preview" }).ok).toBe(false);
+  });
+
+  it("Preview：Firestore Emulator の設定があっても判定を省略しない", () => {
+    expect(checkFirestoreTarget({ FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080", VERCEL_ENV: "preview" }).ok).toBe(false);
+    expect(checkFirestoreTarget({ ...OK_PREVIEW, FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080", FIREBASE_PROJECT_ID: REAL_PROD }).ok).toBe(false);
+  });
+
+  it("Development：以前どおり（本番のIDの指定が必須。接続先と一致したら停止）", () => {
+    expect(checkFirestoreTarget({ VERCEL_ENV: "development", FIREBASE_PROJECT_ID: PROD_ID, PRODUCTION_FIREBASE_PROJECT_ID: PROD_ID })).toEqual({ ok: false, reason: "preview_uses_production_project" });
+    expect(checkFirestoreTarget({ VERCEL_ENV: "development", FIREBASE_PROJECT_ID: " URANAI-PROD ", PRODUCTION_FIREBASE_PROJECT_ID: PROD_ID }).ok).toBe(false);
+    expect(checkFirestoreTarget({ VERCEL_ENV: "development", FIREBASE_PROJECT_ID: PREVIEW_ID, PRODUCTION_FIREBASE_PROJECT_ID: PROD_ID })).toEqual({ ok: true });
+    expect(checkFirestoreTarget({ VERCEL_ENV: "development", FIREBASE_PROJECT_ID: PREVIEW_ID })).toEqual({ ok: false, reason: "production_project_id_not_set" });
+    expect(checkFirestoreTarget({ VERCEL_ENV: "development", FIREBASE_PROJECT_ID: "", PRODUCTION_FIREBASE_PROJECT_ID: PROD_ID })).toEqual({ ok: false, reason: "project_id_not_set" });
+    expect(checkFirestoreTarget({ VERCEL_ENV: "development", PRODUCTION_FIREBASE_PROJECT_ID: "  ", FIREBASE_PROJECT_ID: PREVIEW_ID }).ok).toBe(false);
   });
 
   it("Production・Firestore Emulator・ローカル開発には影響しない", () => {
     expect(checkFirestoreTarget({ VERCEL_ENV: "production", FIREBASE_PROJECT_ID: PROD_ID, PRODUCTION_FIREBASE_PROJECT_ID: PROD_ID }).ok).toBe(true);
     expect(checkFirestoreTarget({ VERCEL_ENV: "production", FIREBASE_PROJECT_ID: PROD_ID }).ok).toBe(true);
+    expect(checkFirestoreTarget({ VERCEL_ENV: "production", FIREBASE_PROJECT_ID: REAL_PROD, PRODUCTION_FIREBASE_PROJECT_ID: REAL_PROD, FIREBASE_CLIENT_EMAIL: "firebase-adminsdk-abc12@uranai-b6edf.iam.gserviceaccount.com" }).ok).toBe(true);
     expect(checkFirestoreTarget({ FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080", FIREBASE_PROJECT_ID: "demo-uranai" }).ok).toBe(true);
-    expect(checkFirestoreTarget({ FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080", VERCEL_ENV: "preview" }).ok).toBe(true);
     expect(checkFirestoreTarget({ FIREBASE_PROJECT_ID: PREVIEW_ID }).ok).toBe(true); // ローカルで本番IDの指定なし
     // ローカルでも、本番のプロジェクトIDを指定していて一致した場合は止める
     expect(checkFirestoreTarget({ FIREBASE_PROJECT_ID: PROD_ID, PRODUCTION_FIREBASE_PROJECT_ID: PROD_ID }).ok).toBe(false);
@@ -58,6 +111,38 @@ describe("Firebase の接続先：Preview から本番プロジェクトに接�
     }
     expect(message).not.toContain(PROD_ID); // プロジェクトIDはメッセージに出さない
     expect(message).not.toContain("NOT_A_REAL_KEY");
+    vi.doUnmock("firebase-admin/app");
+  });
+});
+
+describe("Preview の接続の拒否は、Firebase Admin SDK の初期化の前に行う（新しい判定）", () => {
+  const cases: [string, Record<string, string>][] = [
+    ["本番のIDで、PRODUCTION_FIREBASE_PROJECT_ID が誤記", { FIREBASE_PROJECT_ID: "uranai-b6edf", PRODUCTION_FIREBASE_PROJECT_ID: "uranai-b6edff", FIREBASE_CLIENT_EMAIL: "firebase-adminsdk-abc12@uranai-b6edf.iam.gserviceaccount.com" }],
+    ["本番のIDで、PRODUCTION_FIREBASE_PROJECT_ID が Preview のID（入れ違い）", { FIREBASE_PROJECT_ID: "uranai-b6edf", PRODUCTION_FIREBASE_PROJECT_ID: "uranai-preview", FIREBASE_CLIENT_EMAIL: "stripe-test@uranai-preview.iam.gserviceaccount.com" }],
+    ["別のプロジェクト", { FIREBASE_PROJECT_ID: "uranai-staging", PRODUCTION_FIREBASE_PROJECT_ID: "uranai-b6edf", FIREBASE_CLIENT_EMAIL: "stripe-test@uranai-preview.iam.gserviceaccount.com" }],
+    ["本番用のサービスアカウント", { FIREBASE_PROJECT_ID: "uranai-preview", PRODUCTION_FIREBASE_PROJECT_ID: "uranai-b6edf", FIREBASE_CLIENT_EMAIL: "firebase-adminsdk-abc12@uranai-b6edf.iam.gserviceaccount.com" }],
+  ];
+  it.each(cases)("%s：初期化せずに停止し、値をメッセージに出さない", async (_label, vars) => {
+    vi.resetModules();
+    vi.stubEnv("FIRESTORE_EMULATOR_HOST", "");
+    vi.stubEnv("VERCEL_ENV", "preview");
+    for (const [k, v] of Object.entries(vars)) vi.stubEnv(k, v);
+    vi.stubEnv("FIREBASE_PRIVATE_KEY", "-----BEGIN PRIVATE KEY-----\nNOT_A_REAL_KEY\n-----END PRIVATE KEY-----");
+    const initializeApp = vi.fn();
+    const cert = vi.fn();
+    vi.doMock("firebase-admin/app", () => ({ cert, getApps: () => [], initializeApp }));
+    const { fsdb } = await import("@/lib/firestore/admin");
+    let err: unknown = null;
+    try {
+      fsdb();
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toEqual(expect.objectContaining({ name: "FirestoreTargetBlockedError", code: "firestore_target_blocked" }));
+    expect(initializeApp).not.toHaveBeenCalled();
+    expect(cert).not.toHaveBeenCalled(); // 秘密鍵を読む前に止める
+    const message = (err as Error).message;
+    for (const v of [...Object.values(vars), "NOT_A_REAL_KEY"]) expect(message).not.toContain(v);
     vi.doUnmock("firebase-admin/app");
   });
 });

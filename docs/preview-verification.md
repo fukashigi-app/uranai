@@ -64,7 +64,11 @@ Stripe の Sandbox（テスト決済）と Vercel の Preview で、決済・返
 
 コードでの防止（設定を誤っても停止する）：
 
-- Preview で `PRODUCTION_FIREBASE_PROJECT_ID` が未設定、または `FIREBASE_PROJECT_ID` と同じ → データベースへのアクセスを停止（`lib/firestore/target-guard.ts`）
+- Preview のデータベースへの接続は、次のすべてを満たすときだけ（`lib/firestore/target-guard.ts`。Firebase Admin SDK の初期化の前に判定し、満たさなければ接続しない）：
+  - `FIREBASE_PROJECT_ID` が `uranai-preview` と完全に一致する（本番の `uranai-b6edf` は `PRODUCTION_FIREBASE_PROJECT_ID` の値に関係なく必ず拒否。別のプロジェクトも拒否）
+  - `PRODUCTION_FIREBASE_PROJECT_ID` が設定されていて、本番のID（`uranai-b6edf`）と完全に一致する（誤記・入れ違いは拒否）
+  - `FIREBASE_CLIENT_EMAIL` が `uranai-preview` のサービスアカウント（`…@uranai-preview.iam.gserviceaccount.com`）
+  - Preview では Firestore Emulator の設定があっても、この判定を省略しない
 - Preview のテスト決済は `FIREBASE_PROJECT_ID` が `uranai-preview` かつ `STRIPE_TEST_FIREBASE_PROJECT_ID` と一致するときだけ（`lib/payments/stripe-guard.ts`）。
   本番のプロジェクトID（`uranai-b6edf`）なら拒否
 - Preview で Firestore Emulator・`STRIPE_API_BASE`・本番用キー・本番決済のスイッチがあれば、テスト決済を受け付けない

@@ -7,7 +7,7 @@ import { productionConfigIssues } from "@/lib/env";
 // Stripe API・Firestore には接続しない（すべて模擬）
 const SECRET = "unit-test-session-secret-Qx7v2Lr9Tm4Kp8Zw";
 const LOCAL = { STRIPE_TEST_CHECKOUT: "on", STRIPE_SECRET_KEY: "sk_test_unit", STRIPE_WEBHOOK_SECRET: "whsec_unit_secret", FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080", FIREBASE_PROJECT_ID: "demo-stripe-unit", SESSION_SECRET: SECRET };
-const PREVIEW = { STRIPE_TEST_CHECKOUT: "on", STRIPE_SECRET_KEY: "sk_test_unit", STRIPE_WEBHOOK_SECRET: "whsec_unit_secret", VERCEL_ENV: "preview", FIREBASE_PROJECT_ID: "uranai-preview", STRIPE_TEST_FIREBASE_PROJECT_ID: "uranai-preview", PRODUCTION_FIREBASE_PROJECT_ID: "uranai-b6edf" };
+const PREVIEW = { STRIPE_TEST_CHECKOUT: "on", STRIPE_SECRET_KEY: "sk_test_unit", STRIPE_WEBHOOK_SECRET: "whsec_unit_secret", VERCEL_ENV: "preview", FIREBASE_PROJECT_ID: "uranai-preview", STRIPE_TEST_FIREBASE_PROJECT_ID: "uranai-preview", PRODUCTION_FIREBASE_PROJECT_ID: "uranai-b6edf", FIREBASE_CLIENT_EMAIL: "stripe-test@uranai-preview.iam.gserviceaccount.com" };
 
 describe("Stripe のテスト決済を使える設定（欠けていたら使わない）", () => {
   it("Preview とローカルの Emulator（demo-）だけ。必要な設定がそろっているとき", () => {
