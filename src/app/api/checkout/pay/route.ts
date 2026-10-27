@@ -3,6 +3,7 @@ import { guardPost, jsonError, jsonOk, paymentStopResponse, readJson } from "@/l
 import { env, serviceStopReason } from "@/lib/env";
 import { getAccessToken } from "@/lib/cookies";
 import { CheckoutError, payCheckout } from "@/lib/services/checkout";
+import { notePaymentApiError } from "@/lib/services/payment-monitor";
 
 // 金額は受け取らない。疑似決済のトークン（mock_tok_…）だけ
 const bodySchema = z.object({ cardToken: z.string().min(1).max(200).regex(/^[A-Za-z0-9_]+$/) }).strict();
@@ -31,6 +32,7 @@ export async function POST(req: Request) {
   } catch (e) {
     if (e instanceof CheckoutError) return jsonError(e.httpStatus, e.code, e.userMessage);
     console.error("[api/checkout/pay] failed", (e as Error).message);
+    await notePaymentApiError("checkout_pay", 500, (e as Error)?.name);
     return jsonError(500, "internal", "決済処理でエラーが発生しました。お支払い状況を確認してから再度お試しください。");
   }
 }

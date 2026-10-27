@@ -27,6 +27,8 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
     managedPaymentsDefault: true,
     /** 応答の managed_payments.enabled を強制的に true にする（アプリが移動を止めるかの確認用） */
     forceManagedResponse: false,
+    /** これに一致する API（/v1/…）は 500 を返す（Stripe の障害・処理の失敗の再現用） */
+    failPaths: [] as RegExp[],
     /** 作成時の expires_at（ID ごと）と作成時刻 */
     created: new Map<string, number>(),
   };
@@ -62,6 +64,7 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
     const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
     const body = await readBody(req);
     if (!url.pathname.startsWith("/__test") && req.headers.authorization !== `Bearer ${apiKey}`) return send(res, 401, { error: { type: "invalid_request_error", message: "bad key" } });
+    if (url.pathname.startsWith("/v1/") && fake.failPaths.some((re) => re.test(url.pathname))) return stripeError(res, 500, "api_error", "simulated failure");
     const m = (re: RegExp) => re.exec(url.pathname);
     if (req.method === "POST" && url.pathname === "/v1/checkout/sessions") {
       const key = String(req.headers["idempotency-key"] ?? "");

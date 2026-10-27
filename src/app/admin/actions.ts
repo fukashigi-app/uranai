@@ -25,6 +25,7 @@ import {
 import { generateSettlements, updateSettlementStatus } from "@/lib/services/settlements";
 import { writeAudit } from "@/lib/services/audit";
 import { randomToken } from "@/lib/security/crypto";
+import { formatDateTimeJa } from "@/lib/time";
 import type { FormState } from "@/components/console/form";
 
 const uuid = z.uuid();
@@ -238,6 +239,42 @@ export async function resolvePaymentReviewAction(id: string, _prev: FormState): 
   const done = await resolvePaymentReview(id, actor);
   revalidatePath("/admin/payment-reviews");
   return done ? { ok: true, message: "確認済みにしました。" } : { message: "すでに確認済みです。" };
+}
+
+/** 決済監視の異常を確認済みにする（監査ログに記録。同じ異常がまた起きたら未確認に戻る） */
+export async function resolvePaymentAlertAction(id: string, _prev: FormState): Promise<FormState> {
+  const { actor } = await operator();
+  if (!/^[A-Za-z0-9_]{1,120}$/.test(id)) throw new Error("invalid id");
+  const { resolvePaymentAlert } = await import("@/lib/firestore/payment-alerts");
+  const done = await resolvePaymentAlert(id, actor);
+  revalidatePath("/admin/payment-monitor");
+  return done ? { ok: true, message: "確認済みにしました。" } : { message: "すでに確認済みです。" };
+}
+
+/** 決済監視の点検を今すぐ実行する（読み取り専用。決済の確定・返金・再決済はしない。監査ログに記録） */
+export async function runPaymentMonitorAction(_prev: FormState): Promise<FormState> {
+  const { actor } = await operator();
+  const { isFirestore } = await import("@/lib/data-provider");
+  if (!isFirestore()) return { message: "この機能は Firestore を使うときだけ利用できます。" };
+  const { runPaymentMonitor } = await import("@/lib/payments/payment-monitor");
+  let run: Awaited<ReturnType<typeof runPaymentMonitor>>;
+  try {
+    run = await runPaymentMonitor({ source: "admin" });
+  } catch (e) {
+    console.error("[admin] payment monitor failed", (e as Error)?.name);
+    return { message: "点検に失敗しました。異常の有無は確認できていません。" };
+  }
+  // 同じ環境で同時に1つだけ。開始できなかったときは理由を表示する（点検は行っていない）
+  if (!run.started) {
+    if (run.reason === "busy") return { message: `ほかの点検を実行中のため、開始しませんでした${run.heldUntil ? `（遅くとも ${formatDateTimeJa(run.heldUntil)} に終わります）` : ""}。終わってから、もう一度お試しください。` };
+    return { message: "点検の実行状態を記録できなかったため（データベースに接続できない可能性）、点検を開始しませんでした。異常の有無は確認できていません。" };
+  }
+  const r = run.report;
+  await writeAudit({ actorUserId: actor.userId, actorRole: actor.role, action: "payment_monitor.run", targetType: "payment_monitor", targetId: run.runId, after: { result: r.result, found: r.found, unchecked: r.unchecked.length } }).catch((e) => console.error("[admin] audit failed", (e as Error)?.name));
+  revalidatePath("/admin/payment-monitor");
+  if (r.result === "ok") return { ok: true, message: "点検しました。確認したすべての項目で異常は見つかりませんでした。" };
+  if (r.result === "issues") return { ok: true, message: `点検しました。異常が${r.found}件見つかりました。` };
+  return { message: `点検しましたが、確認できなかった項目があります（${r.unchecked.join("・")}）。` };
 }
 
 /** Stripe：異議申し立ての確認を終える（敗訴など結果が出たものだけ。監査ログに記録） */

@@ -9,6 +9,7 @@ import { isSettlementPayment } from "@/lib/payments/kind";
 import { applyAdjustments, entitledStoreShare, heldStoreShare, netSalesFigures } from "@/lib/payments/settlement-rules";
 import { stampTransaction, storesWithOpenAdjustments, txFacts } from "./settlement-adjustments";
 import { recordPaymentReview } from "./payment-reviews";
+import { recordPaymentAlert } from "./payment-alerts";
 
 /**
  * 月次精算（Firestore 版）。売上の計算元ではなく「振込状況（未払い／処理中／支払済）」の管理用。
@@ -159,7 +160,15 @@ export async function updateSettlementStatus(id: string, status: SettlementStatu
   const first = await ref.get();
   if (!first.exists) throw new Error("settlement not found");
   if (first.get("status") === "UNPAID" && status !== "UNPAID") {
-    await lockSettlement(ref, status, note, actor);
+    try {
+      await lockSettlement(ref, status, note, actor);
+    } catch (e) {
+      // 状態の誤り（古い月が未払い・既に確定）は運営の操作の問題なので監視の異常にしない。それ以外の失敗は記録する
+      if (!(e instanceof SettlementStateError)) {
+        await recordPaymentAlert({ kind: "settlement_lock_failed", objectType: "settlement", objectId: id, settlementId: id, storeId: String(first.get("storeId") ?? ""), mode: "live", errorName: (e as Error)?.name ?? null });
+      }
+      throw e;
+    }
     return;
   }
   await fsdb().runTransaction(async (tx) => {

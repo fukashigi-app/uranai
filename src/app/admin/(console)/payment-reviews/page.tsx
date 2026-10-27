@@ -48,6 +48,13 @@ export default async function PaymentReviewsPage(props: PageProps<"/admin/paymen
         title="決済要確認"
         description="Stripe の通知のうち、決済ID・店舗・金額などが記録と一致せず反映していないもの、以前に確定した精算の月の取引が後から変わったもの（支払った額が分からないため、自動では調整していません）です。Stripe のダッシュボードと照らし合わせて確認してください。"
       />
+      <p className="mb-3 text-[12px] text-ink-faint">
+        {"処理の失敗（Webhook・返金・精算の確定など）や点検で見つかった食い違いは"}
+        <Link href="/admin/payment-monitor" className="text-gold-200 hover:underline">
+          決済監視
+        </Link>
+        {"に表示します。"}
+      </p>
       <Card>
         <div className="mb-3 flex gap-2 text-[12px]">
           {(

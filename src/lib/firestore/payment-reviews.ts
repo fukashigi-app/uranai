@@ -1,8 +1,11 @@
 import "server-only";
-import { FieldValue, type DocumentData } from "firebase-admin/firestore";
+import type { DocumentData } from "firebase-admin/firestore";
 import { createHash } from "node:crypto";
 import { C, fsdb, safeId, toDate } from "./admin";
 import { writeAudit } from "./audit";
+import { upsertDedupedRecord } from "./deduped-record";
+import { recordPaymentAlert } from "./payment-alerts";
+import { alertModeOf } from "@/lib/payments/monitor-rules";
 
 /**
  * 決済要確認（Firestore 版）。運営が確認すべき決済の食い違いを記録する。
@@ -90,28 +93,16 @@ export async function recordPaymentReview(input: PaymentReviewInput): Promise<vo
   };
   // 内容が変わったか（食い違った項目・金額）。通知の種類や回数の違いでは変わらない
   const causeKey = JSON.stringify([fields.kind, fields.mismatches, fields.amount]);
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let r: { ok: true } | { ok: false; error: string };
   try {
-    const ref = col().doc(paymentReviewId(input.kind, objectId));
-    const work = fsdb().runTransaction(async (tx) => {
-      const cur = await tx.get(ref);
-      const now = new Date();
-      if (!cur.exists) {
-        tx.create(ref, { ...fields, causeKey, status: "OPEN", occurrences: 1, firstSeenAt: now, lastSeenAt: now, resolvedAt: null, resolvedBy: null });
-        return;
-      }
-      const changed = cur.get("causeKey") !== causeKey;
-      tx.update(ref, { ...fields, causeKey, occurrences: FieldValue.increment(1), lastSeenAt: now, ...(changed ? { status: "OPEN", resolvedAt: null, resolvedBy: null } : {}) });
-    });
-    work.catch(() => undefined); // 時間切れの後に失敗しても、未処理の例外にしない
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(Object.assign(new Error("payment review timed out"), { name: "TimeoutError" })), PAYMENT_REVIEW_TIMEOUT_MS);
-    });
-    await Promise.race([work, timeout]);
+    r = await upsertDedupedRecord(col().doc(paymentReviewId(input.kind, objectId)), fields, { causeKey, reopen: "on_change", timeoutMs: PAYMENT_REVIEW_TIMEOUT_MS });
   } catch (e) {
-    console.error("[payment-review] record failed", { kind: input.kind, objectType: input.objectType, error: (e as Error).name });
-  } finally {
-    if (timer) clearTimeout(timer);
+    r = { ok: false, error: (e as Error)?.name ?? "Error" };
+  }
+  if (!r.ok) {
+    console.error("[payment-review] record failed", { kind: input.kind, objectType: input.objectType, error: r.error });
+    // 決済監視にも残す（こちらも失敗したらサーバーのログだけ）
+    await recordPaymentAlert({ kind: "payment_review_record_failed", objectType: "review", objectId: `${input.kind}:${objectId}`, mode: alertModeOf(input.livemode), transactionId: input.transactionId ?? null, storeId: input.storeId ?? null, errorName: r.error });
   }
 }
 

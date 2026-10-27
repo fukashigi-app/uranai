@@ -79,6 +79,8 @@ export const C = {
   settlementAdjustments: "settlementAdjustments",
   /** 決済要確認（署名を確認できた通知のうち、照合に失敗したもの・以前に確定した精算の変化など） */
   paymentReviews: "paymentReviews",
+  /** 決済監視の異常（Webhook の失敗・確定待ちのままの注文・決済済みで権利なし など。種類・対象ごとに1件） */
+  paymentAlerts: "paymentAlerts",
   webhookEvents: "webhookEvents",
   auditLogs: "auditLogs",
   testFortuneLogs: "testFortuneLogs",

@@ -5,6 +5,7 @@ import { getAccessToken } from "@/lib/cookies";
 import { stripeTestConfig } from "@/lib/payments/stripe-guard";
 import { confirmStripeReturn } from "@/lib/payments/stripe-confirm";
 import { StripeReturnStatus } from "@/components/public/stripe-return-status";
+import { recordPaymentMonitorAlert } from "@/lib/services/payment-monitor";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "お支払いの確認", robots: { index: false } };
@@ -30,6 +31,7 @@ export default async function StripeReturnPage(props: PageProps<"/payment/return
     status = (await confirmStripeReturn(await getAccessToken(), sessionId)).status;
   } catch (e) {
     console.error("[payment/return] confirm failed", (e as Error).name);
+    await recordPaymentMonitorAlert({ kind: "checkout_confirm_failed", objectType: "checkout", objectId: /^cs_(test|live)_[A-Za-z0-9_]{1,200}$/.test(sessionId) ? sessionId : "unknown_session", mode: sessionId.startsWith("cs_live_") ? "live" : sessionId.startsWith("cs_test_") ? "test" : "unknown", errorName: (e as Error)?.name ?? null });
     status = "error";
   }
   if (status === "confirmed" || status === "duplicate") redirect("/fortune/input");

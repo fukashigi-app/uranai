@@ -31,7 +31,9 @@
     "e2e:stripe-live": "tsx --conditions=react-server scripts/e2e-stripe-live.ts",
     "e2e:stripe-public": "tsx --conditions=react-server scripts/e2e-stripe-public.ts",
     "e2e:stripe-settlement": "tsx --conditions=react-server scripts/e2e-stripe-settlement.ts",
-    "e2e:stripe-settlement-safety": "tsx --conditions=react-server scripts/e2e-stripe-settlement-safety.ts"
+    "e2e:stripe-settlement-safety": "tsx --conditions=react-server scripts/e2e-stripe-settlement-safety.ts",
+    "e2e:payment-monitor": "tsx --conditions=react-server scripts/e2e-payment-monitor.ts",
+    "monitor:payments": "tsx --conditions=react-server scripts/payment-monitor.ts"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.3",

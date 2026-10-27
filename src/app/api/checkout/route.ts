@@ -7,6 +7,7 @@ import { CheckoutError, createCheckout, getCheckoutByToken } from "@/lib/service
 import { isStripeProviderSelected, stripeCheckoutAccess } from "@/lib/payments/stripe-access";
 import { STRIPE_SESSION_TTL_MS } from "@/lib/payments/stripe-checkout";
 import { clearFreeSessions } from "@/lib/services/test-store";
+import { notePaymentApiError } from "@/lib/services/payment-monitor";
 
 const bodySchema = z.object({ fortuneType: z.enum(["BIRTHDAY", "ZODIAC", "BLOOD"]) }).strict();
 
@@ -56,6 +57,7 @@ export async function POST(req: Request) {
   } catch (e) {
     if (e instanceof CheckoutError) return jsonError(e.httpStatus, e.code, e.userMessage);
     console.error("[api/checkout] failed", (e as Error).message);
+    await notePaymentApiError("checkout", 500, (e as Error)?.name);
     return jsonError(500, "internal", "エラーが発生しました。時間をおいて再度お試しください。");
   }
 }

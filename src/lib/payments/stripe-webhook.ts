@@ -4,6 +4,8 @@ import type { StripeRuntime } from "./stripe-checkout";
 import { closeStripeCheckout, confirmStripeCheckout, refreshStripeFee, syncStripeDispute, syncStripeRefunds } from "./stripe-confirm";
 import { beginWebhookEvent, finishWebhookEvent } from "@/lib/firestore/payments";
 import { recordPaymentReview } from "@/lib/firestore/payment-reviews";
+import { recordPaymentAlert } from "@/lib/firestore/payment-alerts";
+import { alertKindForWebhookEvent, alertModeOf, hourBucket, newThrottleState, throttleTick } from "./monitor-rules";
 
 /**
  * Stripe の Webhook の処理（モードは Stripe との接続 rt で決まる。アプリの route からは stripeRuntime()＝今はテストだけを渡す）。
@@ -14,6 +16,15 @@ import { recordPaymentReview } from "@/lib/firestore/payment-reviews";
  *  4) 通知の中身は信用せず、Stripe API から取り直して処理する（stripe-confirm.ts。こちらもモードを照合する）
  * 処理に失敗したら 500 を返して Stripe に再送させる。関係ない通知は 200 で受け流す。
  */
+const signatureThrottle = newThrottleState();
+async function noteInvalidSignature() {
+  const n = throttleTick(signatureThrottle, Date.now());
+  if (!n) return; // 今回は書き込まない（メモリ上で数えるだけ。応答を待たせない）
+  const now = new Date();
+  const ok = await recordPaymentAlert({ kind: "webhook_signature_invalid", objectType: "webhook", objectId: `stripe:${hourBucket(now)}`, mode: "unknown", observedCount: n }, now);
+  if (!ok) signatureThrottle.pending += n; // 書き込めなかった分は次の書き込みに回す
+}
+
 export type StripeWebhookResult = { status: number; body: Record<string, unknown> | string };
 
 export async function handleStripeWebhook(rawBody: string, signature: string | null, rt: StripeRuntime): Promise<StripeWebhookResult> {
@@ -21,6 +32,9 @@ export async function handleStripeWebhook(rawBody: string, signature: string | n
   try {
     event = rt.client.webhooks.constructEvent(rawBody, signature ?? "", rt.webhookSecret, 300);
   } catch {
+    // 署名を確認できない通知は信用しない（中身・署名は記録しない）。1時間ごとに1件の記録で件数だけを数える。
+    // 大量に届いても書き込みが集中しないよう、書き込みは1分に1回まで（間の件数はまとめて加算。正確な総数ではない）
+    await noteInvalidSignature();
     return { status: 400, body: "Invalid signature" };
   }
   if (event.livemode !== (rt.mode === "live")) {
@@ -40,6 +54,8 @@ export async function handleStripeWebhook(rawBody: string, signature: string | n
     return { status: 200, body: { received: true, outcome } };
   } catch (e) {
     console.error("[stripe-webhook] processing failed", { eventId: event.id, type: event.type, error: (e as Error).name });
+    // 署名を確認できた通知の処理の失敗（Stripe が再送する）。通知ごとに1件（再送は回数だけ増える）
+    await recordPaymentAlert({ kind: alertKindForWebhookEvent(event.type), objectType: "event", objectId: event.id, eventType: event.type, mode: alertModeOf(event.livemode), errorName: (e as Error)?.name ?? null });
     return { status: 500, body: "error" };
   }
 }
