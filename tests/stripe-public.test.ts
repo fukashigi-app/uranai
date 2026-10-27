@@ -72,7 +72,21 @@ describe("一般のお客さんの Stripe 決済の受付（環境変数から�
   it("本番用のキー・本番決済のスイッチが混ざっていたら受け付けない（テストと本番の取り違え）", async () => {
     expect(await access({ ...LOCAL, STRIPE_SECRET_KEY: "sk_live_unit" })).toEqual({ ok: false, reason: "stripe_unavailable" });
     expect(await access({ ...LOCAL, STRIPE_LIVE_CHECKOUT: "on" })).toEqual({ ok: false, reason: "stripe_unavailable" });
-    expect(await access({ ...LOCAL, PAYJP_SECRET_KEY: "sk_live_unit_payjp" })).toEqual({ ok: false, reason: "stripe_unavailable" });
+    expect(await access({ ...LOCAL, STRIPE_RESTRICTED_KEY: "rk_live_unit" })).toEqual({ ok: false, reason: "stripe_unavailable" });
+  });
+
+  it("PAY.JP は廃止：PAYJP_* や PAYMENT_PROVIDER=payjp が残っていても PAY.JP には切り替えない", async () => {
+    // PAYJP_* は読まないので、Stripe の受付には影響しない（PAY.JP へは決して流れない）
+    expect(await access({ ...LOCAL, PAYJP_SECRET_KEY: "sk_live_unit_payjp", PAYJP_PUBLIC_KEY: "pk_live_unit", PAYJP_WEBHOOK_TOKEN: "whook_unit" })).toEqual({ ok: true, mode: "test" });
+    // PAYMENT_PROVIDER=payjp は「設定なし」：Stripe も疑似決済も使わない
+    expect(await access({ ...LOCAL, PAYMENT_PROVIDER: "payjp" })).toEqual({ ok: false, reason: "provider_not_stripe" });
+    stubAll({ ...LOCAL, PAYMENT_PROVIDER: "payjp", PAYJP_PUBLIC_KEY: "pk_test_unit", PAYJP_SECRET_KEY: "sk_test_unit_payjp", PAYJP_WEBHOOK_TOKEN: "whook_unit" });
+    vi.resetModules();
+    const { env } = await import("@/lib/env");
+    expect(env().PAYMENT_PROVIDER).toBeNull();
+    const payments = await import("@/lib/payments");
+    expect(() => payments.activeProvider()).toThrow(payments.PaymentUnavailableError);
+    expect(payments.isProviderId("payjp")).toBe(false);
   });
 
   it("Vercel の本番では受け付けない（Stripe の本番決済は未実装。テストの接続も本番では使えない）", async () => {

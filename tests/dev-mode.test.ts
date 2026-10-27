@@ -93,8 +93,6 @@ describe("SITE_STATUS=development の判定", () => {
     expect(serviceStopReason({ VERCEL_ENV: "production", SITE_STATUS: "development", ENABLE_TEST_PAYMENT: "true" })).toBe("dangerous_config");
     expect(serviceStopReason({ VERCEL_ENV: "production", SITE_STATUS: "development", PAYMENT_PROVIDER: "mock" })).toBe("dangerous_config");
     for (const [k, v] of [
-      ["PAYJP_SECRET_KEY", "sk_live_x"],
-      ["PAYJP_PUBLIC_KEY", "pk_live_x"],
       ["STRIPE_SECRET_KEY", "sk_live_x"],
       ["STRIPE_SECRET_KEY", "rk_live_x"],
       ["STRIPE_PUBLISHABLE_KEY", "pk_live_x"],
@@ -104,9 +102,15 @@ describe("SITE_STATUS=development の判定", () => {
       expect(isDevModeLiveKeyConflict({ SITE_STATUS: "development", [k]: v }), k).toBe(true);
     }
     // テスト用のキーは止めない（決済の API は開発モードでどのみち停止）。公開中の本番用キーは開発モードの判定に関係しない
-    expect(serviceStopReason({ SITE_STATUS: "development", PAYJP_SECRET_KEY: "sk_test_x" })).toBe("development");
-    expect(isDevModeLiveKeyConflict({ SITE_STATUS: "open", PAYJP_SECRET_KEY: "sk_live_x" })).toBe(false);
-    expect(livePaymentKeyNames({ PAYJP_SECRET_KEY: "sk_live_x", STRIPE_SECRET_KEY: "sk_test_x" })).toEqual(["PAYJP_SECRET_KEY"]);
+    expect(serviceStopReason({ SITE_STATUS: "development", STRIPE_SECRET_KEY: "sk_test_x" })).toBe("development");
+    expect(isDevModeLiveKeyConflict({ SITE_STATUS: "open", STRIPE_SECRET_KEY: "sk_live_x" })).toBe(false);
+    expect(livePaymentKeyNames({ STRIPE_RESTRICTED_KEY: "rk_live_x", STRIPE_SECRET_KEY: "sk_test_x" })).toEqual(["STRIPE_RESTRICTED_KEY"]);
+    // PAY.JP は廃止：PAYJP_* は読まない（本番用の値が残っていても課金できないので、受付を止める理由にしない）
+    for (const k of ["PAYJP_SECRET_KEY", "PAYJP_PUBLIC_KEY"]) {
+      expect(serviceStopReason({ SITE_STATUS: "development", [k]: "sk_live_x" }), k).toBe("development");
+      expect(isDevModeLiveKeyConflict({ SITE_STATUS: "development", [k]: "sk_live_x" }), k).toBe(false);
+    }
+    expect(livePaymentKeyNames({ PAYJP_SECRET_KEY: "sk_live_x", PAYJP_PUBLIC_KEY: "pk_live_x" })).toEqual([]);
     const issues = productionConfigIssues({ VERCEL_ENV: "production", CRON_SECRET: "x".repeat(32), SITE_STATUS: "development", STRIPE_SECRET_KEY: "sk_live_secretvalue" });
     expect(issues.filter((i) => i.level === "error").map((i) => i.key)).toEqual(["SITE_STATUS"]);
     expect(JSON.stringify(issues)).not.toContain("secretvalue"); // 値は出さない
@@ -147,7 +151,8 @@ describe("開発モードの利用者（サーバー側の判定）", () => {
     auth.sessionHash = "h-op";
     auth.user = OPERATOR;
     expect(await (await load({ ...DEV_ENV, ENABLE_TEST_PAYMENT: "true" })).testModeState()).toBe("halted");
-    expect(await (await load({ ...DEV_ENV, PAYJP_SECRET_KEY: "sk_live_x" })).testModeState()).toBe("halted");
+    expect(await (await load({ ...DEV_ENV, STRIPE_SECRET_KEY: "sk_live_x" })).testModeState()).toBe("halted");
+    expect(await (await load({ ...DEV_ENV, PAYJP_SECRET_KEY: "sk_live_x" })).testModeState()).toBe("dev"); // PAY.JP は廃止（読まない）
     expect(await (await load({ ...DEV_ENV, SESSION_SECRET: "s".repeat(40) })).testModeState()).toBe("development");
     expect(await (await load({ ...DEV_ENV, SESSION_SECRET: "" })).testModeState()).toBe("development");
     expect(await (await load({ ...DEV_ENV, FIREBASE_PROJECT_ID: "" })).testModeState()).toBe("development");
@@ -336,7 +341,8 @@ describe("決済 API の停止（サーバー側）", () => {
     const body = (b: unknown) => new Request("http://localhost/api/checkout", { method: "POST", headers: { origin: "http://localhost", "content-type": "application/json" }, body: JSON.stringify(b) });
     const r1 = await checkout.POST(body({ fortuneType: "ZODIAC" }));
     const r2 = await pay.POST(body({ cardToken: "tok_x" }));
-    expect([r1.status, r2.status]).toEqual([503, 503]);
+    // 注文は 503（開発モード）。疑似決済の支払い（/api/checkout/pay）は PAYMENT_PROVIDER=mock 以外では存在しない（404）
+    expect([r1.status, r2.status]).toEqual([503, 404]);
     expect(limiter.keys).toEqual([]); // 回数制限（データベース）にも届いていない
   });
 });
@@ -420,9 +426,9 @@ describe("/api/health の停止理由の文言（値は出さない）", () => {
     expect(dangerousConfigReasons({ ...prod, ENABLE_TEST_PAYMENT: "true" })).toEqual([{ kind: "test_payment_in_production" }]);
     expect(pausedMessage(dangerousConfigReasons({ ...prod, ENABLE_TEST_PAYMENT: "true" }))).toContain("本番で無料テストの設定（ENABLE_TEST_PAYMENT=true）が有効になっている");
     expect(pausedMessage(dangerousConfigReasons({ ...prod, PAYMENT_PROVIDER: "mock" }))).toContain("疑似決済（PAYMENT_PROVIDER=mock）");
-    const live = { SITE_STATUS: "development", STRIPE_SECRET_KEY: "sk_live_FAKEVAL1", PAYJP_PUBLIC_KEY: "pk_live_FAKEVAL2" };
+    const live = { SITE_STATUS: "development", STRIPE_SECRET_KEY: "sk_live_FAKEVAL1", STRIPE_PUBLISHABLE_KEY: "pk_live_FAKEVAL2" };
     const msg = pausedMessage(dangerousConfigReasons(live));
-    expect(msg).toContain("開発モードで本番用の決済キー（PAYJP_PUBLIC_KEY・STRIPE_SECRET_KEY）が設定されている");
+    expect(msg).toContain("開発モードで本番用の決済キー（STRIPE_SECRET_KEY・STRIPE_PUBLISHABLE_KEY）が設定されている");
     expect(msg).not.toMatch(/FAKEVAL|sk_live_|pk_live_/); // 値は出さない
     // 複数の理由はすべて並べる
     const both = pausedMessage(dangerousConfigReasons({ ...prod, ...live, ENABLE_TEST_PAYMENT: "true" }));
@@ -430,7 +436,8 @@ describe("/api/health の停止理由の文言（値は出さない）", () => {
     expect(both).toContain("本番用の決済キー");
     // 本番以外の ENABLE_TEST_PAYMENT・公開中の本番用キーは危険な設定ではない
     expect(dangerousConfigReasons({ VERCEL_ENV: "preview", ENABLE_TEST_PAYMENT: "true" })).toEqual([]);
-    expect(dangerousConfigReasons({ ...prod, PAYJP_SECRET_KEY: "sk_live_x" })).toEqual([]);
+    expect(dangerousConfigReasons({ ...prod, STRIPE_SECRET_KEY: "sk_live_x" })).toEqual([]);
+    expect(dangerousConfigReasons({ SITE_STATUS: "development", PAYJP_SECRET_KEY: "sk_live_x" })).toEqual([]); // PAY.JP は廃止
     expect(pausedMessage([])).toContain("危険な設定のため");
   });
 });

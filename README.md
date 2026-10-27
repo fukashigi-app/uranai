@@ -7,7 +7,7 @@
 
 ## 技術構成
 
-Next.js 16 (App Router) / TypeScript / Tailwind CSS v4 / **Cloud Firestore（Firebase Admin SDK）** または PostgreSQL + Drizzle ORM / PAY.JP（`PaymentProvider` で抽象化）
+Next.js 16 (App Router) / TypeScript / Tailwind CSS v4 / **Cloud Firestore（Firebase Admin SDK）** または PostgreSQL + Drizzle ORM / **Stripe Checkout**（決済。PAY.JP は廃止。自動テスト用の疑似決済 `mock` だけ `PaymentProvider` で抽象化）
 
 ## データベース（Cloud Firestore へ移行中）
 
@@ -83,29 +83,27 @@ seed 後に表示されるQR URL（`/s/xxxxxxxxxxxx`）をスマホ幅で開く�
 ```bash
 npm run typecheck   # 型チェック
 npm run lint
-npm test            # 単体テスト（配分計算・JST集計・占いの決定性・PAY.JP クライアント/Webhook検証）
-npm run e2e         # 起動中のアプリに対し QR→100円決済→Webhook→占い→店舗30円計上 と認可を検証
+npm test            # 単体テスト（配分計算・JST集計・占いの決定性・Stripe の照合・精算の調整の規則・設定の安全確認）
+npm run e2e         # 起動中のアプリ（疑似決済）に対し QR→100円決済→Webhook→占い→店舗30円計上 と認可を検証
 ```
 
-## PAY.JP の設定（テスト環境 → 本番）
+Stripe の E2E は、Firestore Emulator の `demo-` プロジェクトと、スクリプトが起動する localhost の模擬 Stripe API だけを使います（本物の Stripe・本番の Firebase には接続しません）。
+`npm run e2e:stripe`（運営の Sandbox テスト）・`e2e:stripe-public`（一般のお客さん）・`e2e:stripe-live`（本番モードの照合）・
+`e2e:stripe-settlement`（返金・異議申し立て・精算の調整）・`e2e:stripe-settlement-safety`（以前の精算・決済要確認・確定の順番など）。
 
-1. PAY.JP 管理画面で **テスト用** の公開鍵 `pk_test_…` / 秘密鍵 `sk_test_…` を取得
-2. 管理画面 > Webhook に `https://<APP_URL>/api/webhooks/payjp` を登録し、表示される **Webhookトークン** を控える
-3. 環境変数を設定
-   ```
-   PAYMENT_PROVIDER=payjp
-   PAYJP_PUBLIC_KEY=pk_test_...
-   PAYJP_SECRET_KEY=sk_test_...      # サーバー専用。フロントには絶対に置かない
-   PAYJP_WEBHOOK_TOKEN=whook_...
-   ```
-4. テストカードで「QR → 決済 → 占い → 店舗売上30円」を確認後、本番鍵 `pk_live_` / `sk_live_` に差し替え
+## 決済（Stripe Checkout）
 
-> ⚠️ この実装はサンドボックス環境（PAY.JPへの通信不可）で作成したため、PAY.JP の実API・payjp.js に対する
-> 疎通確認は未実施です（リクエスト形式・Webhookトークン検証は fetch をモックした単体テストで確認済み）。
-> 本番前に必ずテストモードで以下を確認してください:
-> - payjp.js v2 の `createToken(element, { three_d_secure: true })` による 3Dセキュア認証の挙動
-> - 3Dセキュアで求められるメールアドレス/電話番号の扱い（現在はメール任意入力。保存はしない）
-> - Webhook イベント（`charge.succeeded` / `charge.refunded`）の受信と `X-Payjp-Webhook-Token` の一致
+決済は Stripe Checkout だけです（PAY.JP は廃止しました。PAY.JP のコード・Webhook・カード入力フォームは削除済みで、`PAYJP_*` の環境変数は読みません）。
+お客さんは「同意して100円を支払う」ボタンで Stripe の決済画面に移動し、クレジットカード（Apple Pay・Google Pay を含む）または PayPay で支払います。
+支払いの確定は、Stripe API で Session・PaymentIntent・Charge を取り直して照合してから記録します（Webhook と戻り先のどちらでも、記録は1件）。
+
+- **テスト決済（Sandbox）**：Vercel の Preview・ローカルだけ。`STRIPE_TEST_CHECKOUT=on`・`STRIPE_SECRET_KEY`（`sk_test_`）・`STRIPE_WEBHOOK_SECRET`・
+  `STRIPE_TEST_FIREBASE_PROJECT_ID` がそろったときだけ有効。運営アカウントは `/fortune?pay=stripe-test` から、
+  一般のお客さんは公開中（`SITE_STATUS=open`）かつ `PAYMENT_PROVIDER=stripe` のときに使えます。テスト決済は売上・精算に含めません
+- **本番決済（Live）**：未実装・無効です（`STRIPE_LIVE_CHECKOUT` の判定だけがあり、決済の処理からは使っていません）
+- Webhook の URL は `https://<APP_URL>/api/webhooks/stripe`。必要なイベントは `docs/ARCHITECTURE.md` を参照
+- 返金・異議申し立て（チャージバック）は Stripe API で状態を取り直して反映し、振込済みの月の取引は「精算の調整」として次回の精算で差し引きます
+- 記録と照合できない通知（店舗・金額の食い違いなど）は反映せず、運営画面の「決済要確認」に記録します
 
 ## デプロイ（例: Vercel + Supabase / Neon）
 
@@ -123,10 +121,12 @@ npm run e2e         # 起動中のアプリに対し QR→100円決済→Webhook
 
 1. **店舗追加**: 運営画面 > 店舗 > 店舗を追加（店舗ログインアカウントも同時作成可）
 2. **QR発行**: 店舗詳細 / 店舗画面の「店舗QRコード」から PNG 保存・A4印刷用POP（A6×4面）
-3. **月次精算**: 翌月に 運営画面 > 月次精算 で対象月を選び「集計して精算を作成」
-   → 振込用CSVで振込 → 各行を「処理中」「支払済」に変更（店舗画面の「振込状況」に反映）
-4. **QR再発行**: 紛失・悪用時は店舗詳細から再発行（旧QRは即無効）
-5. **店舗停止**: 店舗詳細から停止すると新規決済を受け付けません（既存の売上・権利はそのまま）
+3. **月次精算**: 翌月に 運営画面 > 月次精算 で対象月を選び「集計して精算を作成」。振込は原則3か月ごとにまとめて行う
+   → 同じ店舗は古い月から「処理中」「支払済」にして確定（未反映の調整を合わせて振込額が決まる。確定後は未払いに戻せない）
+   → 振込用CSV（振込額・調整・繰越）で振込（店舗画面の「振込状況」に反映）
+4. **決済要確認**: 運営画面 > 決済要確認 で、照合できなかった Stripe の通知・以前に確定した精算の変化を確認し「確認済みにする」
+5. **QR再発行**: 紛失・悪用時は店舗詳細から再発行（旧QRは即無効）
+6. **店舗停止**: 店舗詳細から停止すると新規決済を受け付けません（既存の売上・権利はそのまま）
 
 ## ブランド変更
 
@@ -138,12 +138,12 @@ npm run e2e         # 起動中のアプリに対し QR→100円決済→Webhook
 ## セキュリティ要点
 
 - 金額はサーバー固定（`src/config/pricing.ts`）。API はクライアントから金額・storeId を受け付けない
-- 売上計上は Webhook（トークン検証）＋決済代行APIからの Charge 再取得でのみ行い、`UNIQUE(provider, provider_payment_id)` で二重計上を防止
+- 売上計上は Stripe の Webhook（署名と livemode の確認）または戻り先で、Stripe API から取り直した Session・PaymentIntent・Charge を注文と照合してから行い、取引のIDを決済ごとに決めて二重計上を防止
 - 占い権利・結果は HttpOnly Cookie のトークン（DBはハッシュ）で紐付け、URLにIDを含めない
 - 店舗画面の storeId は常にセッションから解決。運営画面は OPERATOR 以外 404
 - パスワード scrypt、ログインのRate Limit + アカウントロック、`__Host-` Secure Cookie
 - CSRF: Server Actions の Origin 検証 + 独自APIの Origin 検証 + SameSite=Lax
 - CSP / HSTS / X-Frame-Options 等をヘッダーで付与。口座情報は AES-256-GCM 暗号化、閲覧・変更は監査ログに記録
-- カード情報は payjp.js（PAY.JP の iframe）でのみ扱い、自社サーバー・DBには保存しない
+- カード情報は Stripe の決済画面（Stripe Checkout）でのみ扱い、自社サーバー・DBには送信・保存しない（このサイトに外部のスクリプト・iframe は読み込まない。CSP で禁止）
 - 生年月日はDBに保存しない（占いの seed 計算にのみ使用）
 <!-- Trigger Build Check for PR #3 -->

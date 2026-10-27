@@ -128,6 +128,9 @@ async function main() {
   await fsdb().collection(C.stores).doc(storeA.id).update({ storeShareBps: 5000 });
   res = await user.req("/api/checkout", { method: "POST", json: { fortuneType: "BIRTHDAY" } });
   assert.equal(res.status, 201, await res.clone().text());
+  // 疑似決済（自動テスト専用）の画面：カード入力なし・PAY.JP のスクリプトを読み込まない
+  const payHtml = await (await user.req("/payment")).text();
+  assert.ok(payHtml.includes("自動テスト用の疑似決済です") && !/pay\.jp|カード番号/.test(payHtml), "疑似決済の画面ではありません");
   res = await user.req("/api/checkout/pay", { method: "POST", json: { cardToken: "mock_tok_success" } });
   assert.equal(res.status, 200);
   let status = "";

@@ -8,9 +8,11 @@ import { z } from "zod";
  * 決済モード:
  *  - ENABLE_TEST_PAYMENT=true … テストモード。決済をスキップして無料で占える（売上には一切記録しない）
  *  - それ以外 …………………… 本番決済の成功確認が必須（決済が未設定なら占いは開始できない）
- *  - PAYMENT_PROVIDER=mock …… 自動テスト用の疑似決済（本番環境では ALLOW_MOCK_PAYMENTS_IN_PRODUCTION=true が無い限り無効）
  *  - PAYMENT_PROVIDER=stripe … 一般のお客さんの決済を Stripe Checkout で受け付ける（判定は lib/payments/stripe-access.ts）。
- *                              PAY.JP・疑似決済は使わない（env().PAYMENT_PROVIDER は null のまま）
+ *                              実際の決済は Stripe だけ（env().PAYMENT_PROVIDER は null のまま）
+ *  - PAYMENT_PROVIDER=mock …… 自動テスト用の疑似決済（Vercel の本番では常に無効。本番以外の next start は ALLOW_MOCK_PAYMENTS_IN_PRODUCTION=true が必要）
+ *  - PAYMENT_PROVIDER=payjp … 廃止（PAY.JP は削除済み）。起動は止めずに「設定なし」として扱い、設定の確認で警告する。
+ *                              PAYJP_* の環境変数は読まない（残っていても PAY.JP には一切接続しない）
  */
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -20,10 +22,8 @@ const schema = z.object({
   SESSION_SECRET: z.string().min(32, "SESSION_SECRET must be at least 32 chars"),
   DATA_ENCRYPTION_KEY: z.string().optional(),
   ENABLE_TEST_PAYMENT: z.string().optional(),
+  // payjp は廃止した値（残っていても起動を止めないために受け付け、設定なしとして扱う）
   PAYMENT_PROVIDER: z.enum(["payjp", "mock", "stripe"]).optional(),
-  PAYJP_PUBLIC_KEY: z.string().optional(),
-  PAYJP_SECRET_KEY: z.string().optional(),
-  PAYJP_WEBHOOK_TOKEN: z.string().optional(),
   MOCK_WEBHOOK_SECRET: z.string().optional(),
   CRON_SECRET: z.string().optional(),
   ALLOW_MOCK_PAYMENTS_IN_PRODUCTION: z.string().optional(),
@@ -32,8 +32,8 @@ const schema = z.object({
 type RawEnv = z.infer<typeof schema>;
 export type Env = Omit<RawEnv, "APP_URL" | "PAYMENT_PROVIDER" | "MOCK_WEBHOOK_SECRET"> & {
   APP_URL: string;
-  /** 有料フローの新規決済に使うプロバイダ（PAY.JP・疑似決済）。null = これらでは受け付けない（未設定、または PAYMENT_PROVIDER=stripe） */
-  PAYMENT_PROVIDER: "payjp" | "mock" | null;
+  /** 疑似決済（自動テスト専用）を使うか。null = 使わない（Stripe・未設定・廃止した payjp） */
+  PAYMENT_PROVIDER: "mock" | null;
   TEST_PAYMENT_ENABLED: boolean;
   MOCK_WEBHOOK_SECRET: string;
 };
@@ -54,17 +54,8 @@ export function env(): Env {
   // 本番の決済へ自動で切り替えることもしない（provider = null → 「お支払いを受け付けていません」で停止）
   const mockAllowed = !isProductionDeployment() && (e.NODE_ENV !== "production" || e.ALLOW_MOCK_PAYMENTS_IN_PRODUCTION === "true");
 
-  let provider: Env["PAYMENT_PROVIDER"] = null;
-  if (e.PAYMENT_PROVIDER === "mock") {
-    provider = mockAllowed ? "mock" : null;
-  } else if (e.PAYMENT_PROVIDER === "stripe") {
-    // Stripe を選んだときは PAY.JP のキーが残っていても PAY.JP では決済しない
-    provider = null;
-  } else {
-    const configured = Boolean(e.PAYJP_PUBLIC_KEY && e.PAYJP_SECRET_KEY && e.PAYJP_WEBHOOK_TOKEN);
-    if (configured && e.PAYJP_SECRET_KEY!.startsWith("pk_")) throw new Error("PAYJP_SECRET_KEY looks like a public key");
-    provider = configured ? "payjp" : null;
-  }
+  // 疑似決済だけを選べる。stripe（Stripe Checkout。lib/payments/stripe-access.ts）・未設定・廃止した payjp は null
+  const provider: Env["PAYMENT_PROVIDER"] = e.PAYMENT_PROVIDER === "mock" && mockAllowed ? "mock" : null;
 
   cached = {
     ...e,
@@ -221,7 +212,7 @@ export function productionConfigIssues(e: RawProcessEnv = process.env): Producti
     });
   }
   if (e.PAYMENT_PROVIDER === "mock") {
-    issues.push({ level: "error", key: "PAYMENT_PROVIDER", message: "本番で PAYMENT_PROVIDER=mock になっています。疑似決済は本番では使えないため、占いの受付（無料テスト・有料の決済とも）を停止しています。削除してください。" });
+    issues.push({ level: "error", key: "PAYMENT_PROVIDER", message: "本番で PAYMENT_PROVIDER=mock になっています。疑似決済は本番では使えないため、占いの受付（無料テスト・有料の決済とも）を停止しています。PAYMENT_PROVIDER=mock を削除してください。" });
   }
   if (e.PAYMENT_PROVIDER === "stripe") {
     issues.push({ level: "warning", key: "PAYMENT_PROVIDER", message: "PAYMENT_PROVIDER=stripe ですが、Stripe の本番決済はまだ実装されていないため、本番では決済を受け付けていません。" });
@@ -265,13 +256,10 @@ export function productionConfigIssues(e: RawProcessEnv = process.env): Producti
   if (prodFs && e.FIREBASE_PROJECT_ID && e.FIREBASE_PROJECT_ID.trim().toLowerCase() !== prodFs.toLowerCase()) {
     issues.push({ level: "warning", key: "FIREBASE_PROJECT_ID", message: "本番の Firebase プロジェクトが PRODUCTION_FIREBASE_PROJECT_ID と一致しません。本番以外のプロジェクトに接続していないか確認してください。" });
   }
-  const sk = e.PAYJP_SECRET_KEY ?? "";
-  const pk = e.PAYJP_PUBLIC_KEY ?? "";
-  if (sk.startsWith("sk_test_") || pk.startsWith("pk_test_")) {
-    issues.push({ level: "warning", key: "PAYJP_KEYS", message: "PAY.JP のテスト用キーが設定されています。テスト決済は売上・店舗の取り分・月次精算には含めません。公開時は本番用キーにしてください。" });
-  }
-  if ((sk.startsWith("sk_live_") && pk.startsWith("pk_test_")) || (sk.startsWith("sk_test_") && pk.startsWith("pk_live_"))) {
-    issues.push({ level: "warning", key: "PAYJP_KEYS", message: "PAY.JP の公開鍵と秘密鍵で、本番用とテスト用が混在しています。決済が失敗します。" });
+  // PAY.JP は廃止した（設定が残っていても使わない・接続しない）。残っていれば削除を促す（値は出さない）
+  const payjpVars = ["PAYJP_PUBLIC_KEY", "PAYJP_SECRET_KEY", "PAYJP_WEBHOOK_TOKEN"].filter((k) => (e[k] ?? "").trim());
+  if (e.PAYMENT_PROVIDER === "payjp" || payjpVars.length) {
+    issues.push({ level: "warning", key: "PAYJP_KEYS", message: `PAY.JP は廃止しました（使っていません）。残っている設定（${[...(e.PAYMENT_PROVIDER === "payjp" ? ["PAYMENT_PROVIDER=payjp"] : []), ...payjpVars].join("・")}）を削除してください。` });
   }
   return issues;
 }

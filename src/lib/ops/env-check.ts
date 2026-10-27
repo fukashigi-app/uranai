@@ -122,11 +122,12 @@ export function checkProductionEnv(env: Env): CheckResult[] {
   }
   if (env.PAYMENT_PROVIDER === "mock") add("PAYMENT_PROVIDER", "error", "mock（疑似決済）は本番では使えません。");
   else if (env.PAYMENT_PROVIDER === "stripe") add("PAYMENT_PROVIDER", "warn", "stripe です。Stripe の本番決済はまだ実装されていないため、本番では決済を受け付けません。");
-  else if (has(env.PAYMENT_PROVIDER) && !["payjp"].includes(env.PAYMENT_PROVIDER!)) add("PAYMENT_PROVIDER", "error", "対応していない値です（アプリが起動時にエラーになります）。");
+  else if (env.PAYMENT_PROVIDER === "payjp") add("PAYMENT_PROVIDER", "warn", "payjp は廃止しました（PAY.JP は使っていません。決済は受け付けません）。削除するか、stripe にしてください。");
+  else if (has(env.PAYMENT_PROVIDER)) add("PAYMENT_PROVIDER", "error", "対応していない値です（アプリが起動時にエラーになります）。");
   if (env.ALLOW_MOCK_PAYMENTS_IN_PRODUCTION === "true") add("ALLOW_MOCK_PAYMENTS_IN_PRODUCTION", "error", "本番では削除してください。");
   for (const k of ["PAYJP_PUBLIC_KEY", "PAYJP_SECRET_KEY", "PAYJP_WEBHOOK_TOKEN"]) {
     if (!has(env[k])) continue;
-    add(k, "warn", /_live_/.test(env[k]!) ? "PAY.JP の本番キーが登録されています。PAY.JP を使わない方針なら削除してください（本当の課金が起こり得ます）。" : "PAY.JP の設定が残っています。使わない方針なら削除してください。");
+    add(k, "warn", "PAY.JP は廃止しました（この設定は読まれず、PAY.JP には接続しません）。削除してください。");
   }
 
   // ---- Stripe（テスト決済は Preview だけ。本番では使わない） ----

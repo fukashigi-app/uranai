@@ -16,7 +16,7 @@ export type StripeCheckoutVariant = "operator_test" | "public_test" | "live";
 
 const NOTICE: Record<Exclude<StripeCheckoutVariant, "live">, string> = {
   operator_test: "Stripe のテスト決済です（運営アカウントのみ）。実際の請求は発生しません。決済画面ではクレジットカード（Apple Pay・Google Pay を含む）または PayPay を選べます。Stripe のテスト用の支払い情報を使ってください。",
-  public_test: "テスト環境です。実際の請求は発生しません。決済画面ではクレジットカード（Apple Pay・Google Pay を含む）または PayPay を選べます。Stripe のテスト用の支払い情報を使ってください。",
+  public_test: "テスト環境です。実際の請求は発生しません。決済画面に表示されるお支払い方法（クレジットカードなど）から選べます。Stripe のテスト用の支払い情報を使ってください。",
 };
 
 export function StripeCheckoutButton({ canceled, variant }: { canceled: boolean; variant: StripeCheckoutVariant }) {
@@ -53,7 +53,7 @@ export function StripeCheckoutButton({ canceled, variant }: { canceled: boolean;
   return (
     <div className="glass rounded-3xl p-5">
       {variant === "live" ? (
-        <p className="text-[12px] leading-relaxed text-ink-muted">決済画面ではクレジットカード（Apple Pay・Google Pay を含む）または PayPay を選べます。</p>
+        <p className="text-[12px] leading-relaxed text-ink-muted">決済画面に表示されるお支払い方法（クレジットカードなど）から選べます。</p>
       ) : (
         <p className="rounded-xl border border-sky-400/30 bg-sky-500/10 px-3 py-2.5 text-[12px] leading-relaxed text-sky-200">{NOTICE[variant]}</p>
       )}

@@ -1,39 +1,20 @@
 "use client";
 
-import Script from "next/script";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Spinner } from "@/components/ui/spinner";
-import { PAY_BUTTON_LABEL, TEST_PAY_BUTTON_LABEL } from "@/lib/legal/labels";
+import { TEST_PAY_BUTTON_LABEL } from "@/lib/legal/labels";
 
-/* ---- payjp.js v2 の最小型定義 ---- */
-type PayjpElement = { mount(selector: string): void; on(ev: string, cb: (e: { complete?: boolean; error?: { message: string } }) => void): void; unmount?(): void };
-type PayjpInstance = {
-  elements(): { create(type: "cardNumber" | "cardExpiry" | "cardCvc", opts?: object): PayjpElement };
-  createToken(
-    el: PayjpElement,
-    opts?: { three_d_secure?: boolean; card?: { email?: string; name?: string } },
-  ): Promise<{ id?: string; error?: { message: string; code?: string } }>;
-};
-declare global {
-  interface Window {
-    Payjp?: (publicKey: string, opts?: object) => PayjpInstance;
-  }
-}
-
-type Phase = "idle" | "tokenizing" | "charging" | "confirming" | "success" | "timeout";
+/**
+ * 疑似決済（自動テスト専用。PAYMENT_PROVIDER=mock のときだけサーバーが表示する。Vercel の本番では表示されない）。
+ * カード情報の入力はなく、実際の請求は発生しない。決済の結果は必ずサーバーで確認する（/api/checkout/status）。
+ * 実際の決済は Stripe Checkout（stripe-checkout-button.tsx）で、この画面は使わない。PAY.JP のカード入力フォームは廃止した。
+ */
+type Phase = "idle" | "charging" | "confirming" | "success" | "timeout";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export function PaymentForm({
-  provider,
-  publicKey,
-  initialStatus,
-}: {
-  provider: "payjp" | "mock";
-  publicKey: string | null;
-  initialStatus: "created" | "processing" | "failed";
-}) {
+export function MockPaymentForm({ initialStatus }: { initialStatus: "created" | "processing" | "failed" }) {
   const router = useRouter();
   const [phase, setPhase] = useState<Phase>(initialStatus === "processing" ? "confirming" : "idle");
   const [error, setError] = useState<string | null>(null);
@@ -54,7 +35,7 @@ export function PaymentForm({
         }
         if (data.status === "failed") {
           setPhase("idle");
-          setError("お支払いを完了できませんでした。カード情報をご確認のうえ、もう一度お試しください。");
+          setError("お支払いを完了できませんでした。もう一度お試しください。");
           return;
         }
         if (data.status === "expired") {
@@ -153,127 +134,17 @@ export function PaymentForm({
           {error}
         </p>
       ) : null}
-      {provider === "payjp" && publicKey ? (
-        <PayjpCardForm publicKey={publicKey} busy={busy} phase={phase} onToken={(t) => guarded(() => submitToken(t))} setPhase={setPhase} setError={setError} />
-      ) : (
-        <MockCardForm busy={busy} onToken={(t) => guarded(() => submitToken(t))} />
-      )}
+      <MockCardForm busy={busy} onToken={(t) => guarded(() => submitToken(t))} />
     </div>
   );
 }
 
-function PayButton({ busy, label }: { busy: boolean; label: string }) {
-  return (
-    <>
-      <button type="submit" disabled={busy} className="btn-gold mt-5 flex h-14 w-full items-center justify-center gap-2 rounded-2xl text-base font-bold tracking-wide">
-        {busy ? (
-          <>
-            <Spinner /> {label}
-          </>
-        ) : (
-          PAY_BUTTON_LABEL
-        )}
-      </button>
-      <p className="mt-2 text-center text-[11.5px] leading-relaxed text-ink-faint">ボタンを押すと、100円（税込）の決済が確定します。</p>
-    </>
-  );
-}
-
-const ELEMENT_STYLE = {
-  style: {
-    base: { color: "#eef0fa", fontSize: "16px", "::placeholder": { color: "#6f7596" } },
-    invalid: { color: "#ff8a8a" },
-  },
-};
-
-function PayjpCardForm({
-  publicKey,
-  busy,
-  phase,
-  onToken,
-  setPhase,
-  setError,
-}: {
-  publicKey: string;
-  busy: boolean;
-  phase: Phase;
-  onToken: (token: string) => void;
-  setPhase: (p: Phase) => void;
-  setError: (e: string | null) => void;
-}) {
-  const [ready, setReady] = useState(false);
-  const [email, setEmail] = useState("");
-  const payjp = useRef<PayjpInstance | null>(null);
-  const numberEl = useRef<PayjpElement | null>(null);
-
-  const init = useCallback(() => {
-    if (!window.Payjp || payjp.current) return;
-    payjp.current = window.Payjp(publicKey, { locale: "ja" });
-    const elements = payjp.current.elements();
-    numberEl.current = elements.create("cardNumber", ELEMENT_STYLE);
-    numberEl.current.mount("#card-number");
-    elements.create("cardExpiry", ELEMENT_STYLE).mount("#card-expiry");
-    elements.create("cardCvc", ELEMENT_STYLE).mount("#card-cvc");
-    setReady(true);
-  }, [publicKey]);
-
-  useEffect(() => {
-    init();
-  }, [init]);
-
-  async function onSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (busy || !payjp.current || !numberEl.current) return;
-    setPhase("tokenizing");
-    // カード番号は PAY.JP の iframe 内でのみ扱われ、当社サーバーには送られない。3Dセキュア認証を行う
-    const r = await payjp.current.createToken(numberEl.current, {
-      three_d_secure: true,
-      card: email ? { email } : undefined,
-    });
-    if (!r.id) {
-      setPhase("idle");
-      // PAY.JP のメッセージが日本語でない場合は、英語のままお客さんに見せない
-      const msg = r.error?.message;
-      setError(msg && /[ぁ-んァ-ヶ一-龠]/.test(msg) ? msg : "カード情報を確認できませんでした。入力内容をご確認ください。");
-      return;
-    }
-    onToken(r.id);
-  }
-
-  const box = "field flex h-[50px] items-center";
-  return (
-    <form onSubmit={onSubmit} className="glass rounded-3xl p-5">
-      <Script src="https://js.pay.jp/v2/pay.js" strategy="afterInteractive" onReady={init} />
-      <label className="mb-1.5 block text-[12px] text-ink-muted">カード番号</label>
-      <div id="card-number" className={box} />
-      <div className="mt-3 grid grid-cols-2 gap-3">
-        <div>
-          <label className="mb-1.5 block text-[12px] text-ink-muted">有効期限</label>
-          <div id="card-expiry" className={box} />
-        </div>
-        <div>
-          <label className="mb-1.5 block text-[12px] text-ink-muted">セキュリティコード</label>
-          <div id="card-cvc" className={box} />
-        </div>
-      </div>
-      <label className="mb-1.5 mt-3 block text-[12px] text-ink-muted" htmlFor="tds-email">
-        メールアドレス（3Dセキュア認証用・任意）
-      </label>
-      <input id="tds-email" type="email" inputMode="email" autoComplete="email" className="field" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="カード会社の本人認証に使用されます" />
-      <p className="mt-1.5 text-[11px] leading-relaxed text-ink-faint">カード会社の本人認証にのみ使用され、当サービスには保存されません。</p>
-      <PayButton busy={busy || !ready} label={phase === "tokenizing" ? "カード情報を確認しています…" : "読み込み中…"} />
-    </form>
-  );
-}
-
-/** テストモード（ENABLE_TEST_PAYMENT=true）。実際の請求は発生しない */
+/** 疑似決済のボタン（実際の請求は発生しない） */
 function MockCardForm({ busy, onToken }: { busy: boolean; onToken: (t: string) => void }) {
   return (
     <div className="glass rounded-3xl p-5">
       <p className="rounded-xl border border-violet-400/30 bg-violet-500/10 px-3 py-2.5 text-[12px] leading-relaxed text-violet-300">
-        テストモードです。カード情報の入力は不要で、実際の請求は発生しません。
-        <br />
-        本番の決済導入後は、ここにカード入力フォームが表示されます。
+        自動テスト用の疑似決済です。カード情報の入力は不要で、実際の請求は発生しません。
       </p>
       <form
         onSubmit={(e) => {

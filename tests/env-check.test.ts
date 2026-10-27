@@ -66,7 +66,8 @@ describe("check:env（本番の環境変数の形式確認）", () => {
     expect(levelOf({ ...good, PAYMENT_PROVIDER: "stripe" }, "PAYMENT_PROVIDER")).toEqual(["warn"]); // 本番決済は未実装のため、本番では受け付けない
     expect(levelOf({ ...good, PAYMENT_PROVIDER: "square" }, "PAYMENT_PROVIDER")).toEqual(["error"]); // 未対応の値はアプリが起動時にエラー
     expect(levelOf({ ...good, ALLOW_MOCK_PAYMENTS_IN_PRODUCTION: "true" }, "ALLOW_MOCK_PAYMENTS_IN_PRODUCTION")).toEqual(["error"]);
-    expect(levelOf({ ...good, PAYJP_SECRET_KEY: SECRETS.liveKey }, "PAYJP_SECRET_KEY")).toEqual(["warn"]);
+    expect(levelOf({ ...good, PAYJP_SECRET_KEY: SECRETS.liveKey }, "PAYJP_SECRET_KEY")).toEqual(["warn"]); // 廃止：削除を促す
+    expect(levelOf({ ...good, PAYMENT_PROVIDER: "payjp" }, "PAYMENT_PROVIDER")).toEqual(["warn"]); // 廃止：起動は止めない
     expect(levelOf({ ...good, CRON_SECRET: "" }, "CRON_SECRET")).toEqual(["error"]);
     expect(levelOf({ ...good, SESSION_SECRET: "short" }, "SESSION_SECRET")).toEqual(["error"]);
     expect(levelOf({ ...good, DATA_ENCRYPTION_KEY: "not-32-bytes" }, "DATA_ENCRYPTION_KEY")).toEqual(["error"]);
@@ -76,7 +77,8 @@ describe("check:env（本番の環境変数の形式確認）", () => {
     expect(levelOf({ ...good, APP_URL: "http://uranai.example.jp" }, "APP_URL")).toEqual(["error"]);
     expect(levelOf({ ...good, SITE_STATUS: "comingsoon" }, "SITE_STATUS")).toEqual(["error"]);
     expect(levelOf({ ...good, SITE_STATUS: "development" }, "SITE_STATUS")).toEqual(["ok"]);
-    expect(levelOf({ ...good, SITE_STATUS: "development", PAYJP_SECRET_KEY: "sk_live_abcdefgh" }, "SITE_STATUS")).toEqual(["error"]);
+    expect(levelOf({ ...good, SITE_STATUS: "development", STRIPE_SECRET_KEY: "sk_live_abcdefgh" }, "SITE_STATUS")).toEqual(["error"]);
+    expect(levelOf({ ...good, SITE_STATUS: "development", PAYJP_SECRET_KEY: "sk_live_abcdefgh" }, "SITE_STATUS")).toEqual(["ok"]); // PAY.JP は廃止（読まない）
     expect(levelOf({ ...good, SITE_STATUS: "development", SESSION_SECRET: "a".repeat(40) }, "SESSION_SECRET")).toContain("warn");
     expect(levelOf({ ...good, ENABLE_TEST_PAYMENT: "true" }, "ENABLE_TEST_PAYMENT")).toEqual(["warn"]);
     expect(levelOf({ ...good, PRODUCTION_FIREBASE_PROJECT_ID: "other-project" }, "PRODUCTION_FIREBASE_PROJECT_ID")).toEqual(["error"]);

@@ -3,7 +3,9 @@ import { PAY_BUTTON_LABEL, TEST_PAY_BUTTON_LABEL } from "@/lib/legal/labels";
 import {
   CHECKOUT_MINUTES,
   FORTUNE_USE_HOURS,
+  PAYMENT_METHODS_LABEL,
   PAYMENT_PROCESSOR,
+  paymentTimingText,
   PRICE_LABEL,
   REFUND_CASES,
   REFUND_REQUEST_DAYS,
@@ -13,22 +15,24 @@ import {
 /**
  * 購入確定前の確認事項（特定商取引法 12条の6 の最終確認画面で表示すべき事項を想定）。
  * 分量・価格・支払の時期と方法・提供の時期・期限・申込みの撤回（キャンセル）と返金 を、購入ボタンの前に表示する。
+ *  mode … stripe（Stripe Checkout の決済）・stripe_test（Stripe のテスト決済。実際の請求なし）・mock（自動テスト用の疑似決済）
  */
 export function PurchaseSummary({
   fortuneLabel,
   inputLabel,
   expiresAt,
-  testPayment,
+  mode,
   payButtonLabel,
 }: {
   fortuneLabel: string;
   inputLabel: string;
   expiresAt: Date;
-  /** テスト用の決済（実際の請求なし） */
-  testPayment: boolean;
-  /** 購入ボタンの文言（省略時は testPayment に合わせた PAY.JP・疑似決済の文言） */
+  mode: "stripe" | "stripe_test" | "mock";
+  /** 購入ボタンの文言（省略時は mode に合わせた文言） */
   payButtonLabel?: string;
 }) {
+  const label = payButtonLabel ?? (mode === "mock" ? TEST_PAY_BUTTON_LABEL : PAY_BUTTON_LABEL);
+  const viaStripe = mode !== "mock";
   const deadline = expiresAt.toLocaleTimeString("ja-JP", { timeZone: "Asia/Tokyo", hour: "2-digit", minute: "2-digit" });
   const rows: [string, React.ReactNode][] = [
     ["ご購入内容", `${fortuneLabel}（1回分）`],
@@ -41,16 +45,18 @@ export function PurchaseSummary({
     ],
     [
       "お支払い方法",
-      testPayment ? (
-        "テスト用の決済（実際の請求は発生しません）"
+      mode === "mock" ? (
+        "テスト用の疑似決済（実際の請求は発生しません）"
+      ) : mode === "stripe_test" ? (
+        `${PAYMENT_PROCESSOR}のテスト決済（実際の請求は発生しません）`
       ) : (
         <>
-          クレジットカード（決済代行：{PAYMENT_PROCESSOR}）
-          <span className="block text-[12px] text-ink-faint">カード情報は決済代行サービスが処理し、当サービスには保存されません。</span>
+          {`${PAYMENT_METHODS_LABEL}（決済代行：${PAYMENT_PROCESSOR}）`}
+          <span className="block text-[12px] text-ink-faint">{`お支払いは${PAYMENT_PROCESSOR}の決済画面で行います。カード情報は${PAYMENT_PROCESSOR}が処理し、当サービスには送信・保存されません。`}</span>
         </>
       ),
     ],
-    ["お支払い時期", `下の「${payButtonLabel ?? (testPayment ? TEST_PAY_BUTTON_LABEL : PAY_BUTTON_LABEL)}」ボタンを押した時点で決済されます。`],
+    ["お支払い時期", viaStripe ? paymentTimingText(label).replace("お支払い画面の", "下の") : `下の「${label}」ボタンを押した時点で決済されます（テスト用）。`],
     ["提供方法・時期", `決済の完了後すぐに、この画面から${inputLabel}を入力すると、占い結果が表示されます。`],
     [
       "ご利用期限",
@@ -68,7 +74,8 @@ export function PurchaseSummary({
     [
       "キャンセル・返金",
       <>
-        ボタンを押す前であれば、この画面を閉じるだけで料金はかかりません。占い結果をお届けした後の返金は、原則お受けしていません。
+        {viaStripe ? "決済画面でお支払いの手続きを完了する前であれば、画面を閉じるだけで料金はかかりません。" : "ボタンを押す前であれば、この画面を閉じるだけで料金はかかりません。"}
+        占い結果をお届けした後の返金は、原則お受けしていません。
         <span className="mt-1 block">ただし、次の場合は返金します（決済日から{REFUND_REQUEST_DAYS}日以内を目安にご連絡ください。法令上の権利を制限するものではありません）。</span>
         <ul className="mt-1 space-y-0.5 text-[12px]">
           {REFUND_CASES.map((c) => (

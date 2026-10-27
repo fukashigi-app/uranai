@@ -2,7 +2,7 @@
  * 一般のお客さん（ログイン不要）に Stripe Checkout の決済を受け付けてよいか（純粋な判定。単体テスト用に分けている）。
  *
  * 次のすべてを満たすときだけ受け付ける。1つでも欠けたら受け付けない（安全側）。
- *  - PAYMENT_PROVIDER=stripe を明示している（PAY.JP・疑似決済とは併用しない）
+ *  - PAYMENT_PROVIDER=stripe を明示している（疑似決済とは併用しない）
  *  - 公開中（SITE_STATUS=open）で、危険な設定が無い（開発モード・準備中では一般の方の決済を受け付けない）
  *  - 無料テスト（ENABLE_TEST_PAYMENT=true）が有効ではない（無料か有料か曖昧にしない）
  *  - Stripe との接続が使える。今はテスト（Sandbox）だけ（stripeRuntime）。本番決済は未実装のため、本番では常に受け付けない

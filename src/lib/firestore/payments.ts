@@ -113,7 +113,7 @@ export async function payCheckout(token: string | null, cardToken: string): Prom
   const { checkout } = found;
   if (checkout.status === "SUCCEEDED") return { status: "succeeded" };
   if (found.storeStatus !== "ACTIVE") throw new CheckoutError("store_suspended", "こちらの店舗では現在ご利用いただけません。", 403);
-  // 決済方法の確認は状態を変える前に行う（Stripe の注文などを PAY.JP・疑似決済の処理で PROCESSING にしない）
+  // 決済方法の確認は状態を変える前に行う（Stripe の注文などを疑似決済の処理で PROCESSING にしない）
   const provider = providerOrThrow();
   if (checkout.provider === "stripe" || provider.id !== checkout.provider) throw new CheckoutError("provider_changed", "決済方法が変更されました。占いの選択からやり直してください。", 409);
 

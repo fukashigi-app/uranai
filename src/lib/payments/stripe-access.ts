@@ -69,7 +69,7 @@ export const stripeCheckoutAccess = cache(async (): Promise<StripeCheckoutAccess
   return { ok: false };
 });
 
-/** PAYMENT_PROVIDER=stripe を選んでいるか（PAY.JP・疑似決済へは切り替えない） */
+/** PAYMENT_PROVIDER=stripe を選んでいるか（疑似決済などへは切り替えない） */
 export function isStripeProviderSelected(): boolean {
   return (process.env.PAYMENT_PROVIDER ?? "").trim() === "stripe";
 }

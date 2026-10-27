@@ -19,7 +19,7 @@ export async function POST(req: Request) {
   if (!stripe.ok) {
     const stopped = paymentStopResponse(serviceStopReason());
     if (stopped) return stopped;
-    // Stripe を選んでいるのに使えない（本番決済は未実装・設定の不足）：PAY.JP などへは切り替えない
+    // Stripe を選んでいるのに使えない（本番決済は未実装・設定の不足）：疑似決済などへは切り替えない
     if (isStripeProviderSelected()) return jsonError(503, "payment_unavailable", "ただいまお支払いを受け付けていません。");
   }
   const blocked = await guardPost(req, "checkout", 20, 60);

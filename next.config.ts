@@ -5,17 +5,18 @@ import { checkFirestoreTarget, FIRESTORE_TARGET_MESSAGE } from "./src/lib/firest
 const isDev = process.env.NODE_ENV !== "production";
 
 /**
- * セキュリティヘッダー。payjp.js（決済フォーム iframe）と 3Dセキュア認証画面のみ外部を許可。
+ * セキュリティヘッダー。外部のスクリプト・接続・埋め込みは許可しない。
+ * 決済は Stripe Checkout（Stripe のページへ移動する。3Dセキュアも Stripe のページで行う）なので、このサイトに
+ * Stripe のスクリプトや iframe は読み込まない。
  */
 const csp = [
   "default-src 'self'",
-  `script-src 'self' 'unsafe-inline' https://js.pay.jp${isDev ? " 'unsafe-eval'" : ""}`,
+  `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob: https://*.pay.jp",
+  "img-src 'self' data: blob:",
   "font-src 'self' data:",
-  "connect-src 'self' https://api.pay.jp https://*.pay.jp",
-  // 3Dセキュアはカード会社の認証ページを表示するため https 全般を許可
-  "frame-src https://js.pay.jp https://*.pay.jp https:",
+  "connect-src 'self'",
+  "frame-src 'none'",
   "frame-ancestors 'none'",
   "form-action 'self'",
   "base-uri 'self'",
@@ -28,7 +29,7 @@ const securityHeaders = [
   { key: "X-Frame-Options", value: "DENY" },
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
-  { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(), payment=(self)" },
+  { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(), payment=()" },
   ...(isDev ? [] : [{ key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains; preload" }]),
 ];
 

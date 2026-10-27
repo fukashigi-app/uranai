@@ -13,7 +13,7 @@ export const CURRENCY = "jpy" as const;
  */
 export const STORE_SHARE_BPS = 3000;
 
-/** 決済手数料率の既定値（bps）。PAY.JP は charge.fee_rate を優先して使う */
+/** 決済手数料率の既定値（bps）。Stripe の手数料が未確定のときの推定値（確定したら balance_transaction の値に更新する） */
 export function defaultFeeRateBps(): number {
   const v = Number(process.env.PAYMENT_FEE_RATE_BPS ?? "360");
   return Number.isInteger(v) && v >= 0 && v < 10000 ? v : 360;

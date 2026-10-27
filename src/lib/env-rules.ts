@@ -22,10 +22,13 @@ export function siteStatus(e: RawProcessEnv = process.env): { status: SiteStatus
   return { status: "coming_soon", unknown: true };
 }
 
-/** 決済サービスの本番用キー（実際に課金できるキー）の環境変数名。値は返さない */
+/**
+ * 決済サービスの本番用キー（実際に課金できるキー）の環境変数名。値は返さない。
+ * 対象は Stripe だけ。PAY.JP は廃止し、PAYJP_* はどこからも読まない（残っていても課金できない。設定の確認で削除を促す）
+ */
 export function livePaymentKeyNames(e: RawProcessEnv = process.env): string[] {
   const live = /^(sk|pk|rk)_live_/;
-  return ["PAYJP_SECRET_KEY", "PAYJP_PUBLIC_KEY", "STRIPE_SECRET_KEY", "STRIPE_PUBLISHABLE_KEY", "NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY"].filter((k) => live.test((e[k] ?? "").trim()));
+  return ["STRIPE_SECRET_KEY", "STRIPE_PUBLISHABLE_KEY", "NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY", "STRIPE_RESTRICTED_KEY"].filter((k) => live.test((e[k] ?? "").trim()));
 }
 
 /**

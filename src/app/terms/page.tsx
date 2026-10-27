@@ -7,7 +7,9 @@ import {
   FORTUNE_USE_HOURS,
   LEGAL_UPDATED,
   operatorInfo,
+  PAYMENT_METHODS_LABEL,
   PAYMENT_PROCESSOR,
+  paymentTimingText,
   PRICE_LABEL,
   REFUND_CASES,
   REFUND_REQUEST_NOTE,
@@ -55,9 +57,9 @@ export default function TermsPage() {
       <h2>第4条（料金・お支払い・提供期限）</h2>
       <ol>
         <li>料金は、占い1回につき{PRICE_LABEL}です。</li>
-        <li>お支払いは、運営者が指定する決済代行サービス（{PAYMENT_PROCESSOR}）を通じたクレジットカード決済によります。</li>
+        <li>{`お支払いは、運営者が指定する決済代行サービス（${PAYMENT_PROCESSOR}）を通じた${PAYMENT_METHODS_LABEL}によります。`}</li>
         <li>
-          決済は、お支払い画面で「{PAY_BUTTON_LABEL}」ボタンを押した時点で行われます。お支払い画面を開いてから{CHECKOUT_MINUTES}分を過ぎた場合、そのお手続きは無効となり、決済は行われません。
+          {`${paymentTimingText(PAY_BUTTON_LABEL)}お支払い画面を開いてから${CHECKOUT_MINUTES}分を過ぎた場合、そのお手続きは無効となり、決済は行われません。`}
         </li>
         <li>1回のお支払いでご利用いただける占いは1回です。決済の完了から{FORTUNE_USE_HOURS}時間以内に占いを実行してください。期限を過ぎた場合、その回の占いはご利用いただけません。</li>
         <li>占い結果は、占いを実行してから{RESULT_VIEW_HOURS}時間、お支払いをした同じブラウザでのみ再表示できます。期間を過ぎると表示できません。</li>

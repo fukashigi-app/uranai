@@ -8,6 +8,7 @@ import {
   FORTUNE_USE_HOURS,
   LEGAL_UPDATED,
   operatorInfo,
+  PAYMENT_METHODS_LABEL,
   PAYMENT_PROCESSOR,
   REPLY_NOTE,
   RESULT_VIEW_HOURS,
@@ -76,7 +77,7 @@ export default function PrivacyPage() {
       <p>読み込んだQRコードの店舗を、利用状況・売上の集計と提携店舗への報酬の精算のために記録します。</p>
       <h3 className="mt-4 font-bold text-ink">(4) 決済に関する情報</h3>
       <p>
-        決済代行サービスの決済識別番号・金額・決済日時・決済の状況・返金の有無・利用店舗・占いの種類を、売上の管理、提携店舗への報酬の精算、返金などのお問い合わせへの対応、不正利用の防止のために保存します。
+        決済代行サービスの決済識別番号・金額・決済日時・決済の状況・支払い方法の種類（カードなど。カード番号は含みません）・返金や異議申し立て（チャージバック）の状況・利用店舗・占いの種類を、売上の管理、提携店舗への報酬の精算、返金などのお問い合わせへの対応、不正利用の防止のために保存します。
       </p>
       <h3 className="mt-4 font-bold text-ink">(5) お問い合わせの情報</h3>
       <p>メールでお問い合わせいただいた際のメールアドレス・お名前（ご記載があった場合）・お問い合わせの内容を、回答と返金などの対応のために使用します。</p>
@@ -102,10 +103,11 @@ export default function PrivacyPage() {
         ))}
       </div>
 
-      <h2>4. クレジットカード情報</h2>
+      <h2>4. お支払いの情報（カード情報など）</h2>
       <ul>
-        <li>カード情報は、決済代行サービス（{PAYMENT_PROCESSOR}）の入力フォームで直接処理され、運営者のサーバーには送信されず、保存もしません。</li>
-        <li>3Dセキュア（本人認証）のために入力されたメールアドレスは、決済代行サービスとカード会社に送信され、運営者は保存しません。</li>
+        <li>{`お支払いは、決済代行サービス（${PAYMENT_PROCESSOR}）の決済画面で行います。決済画面で入力されたカード情報は${PAYMENT_PROCESSOR}が直接処理し、運営者のサーバーには送信されず、保存もしません。`}</li>
+        <li>{`決済画面で入力されたメールアドレスなどの情報は${PAYMENT_PROCESSOR}が取り扱います。運営者は、本サービスのデータベースにこれらを保存しません。`}</li>
+        <li>決済画面から別の事業者の画面に移動してお支払いいただく方法では、その事業者の画面でお支払いの手続きを行います。</li>
         <li>決済代行サービスでの情報の取扱いは、同サービスのプライバシーポリシーに従います。</li>
       </ul>
 
@@ -123,7 +125,7 @@ export default function PrivacyPage() {
       <ul>
         <li>Google LLC（Firebase / Cloud Firestore）：データの保存</li>
         <li>Vercel Inc.：本サービスの配信・サーバーの実行</li>
-        <li>{PAYMENT_PROCESSOR}：クレジットカード決済</li>
+        <li>{`${PAYMENT_PROCESSOR}：${PAYMENT_METHODS_LABEL}の決済`}</li>
         <li>Google LLC（Gmail）：お問い合わせへの対応</li>
       </ul>
       <p>これらの事業者には米国の事業者が含まれ、情報が日本国外のサーバーで取り扱われる場合があります。</p>

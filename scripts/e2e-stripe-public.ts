@@ -44,9 +44,6 @@ function appEnv(overrides: Record<string, string>): NodeJS.ProcessEnv {
     PAYMENT_PROVIDER: "stripe",
     ENABLE_TEST_PAYMENT: "false",
     ALLOW_MOCK_PAYMENTS_IN_PRODUCTION: "false",
-    PAYJP_PUBLIC_KEY: "",
-    PAYJP_SECRET_KEY: "",
-    PAYJP_WEBHOOK_TOKEN: "",
     STRIPE_TEST_CHECKOUT: "on",
     STRIPE_SECRET_KEY: SECRET_KEY,
     STRIPE_WEBHOOK_SECRET: WEBHOOK_SECRET,
@@ -430,11 +427,11 @@ async function main() {
   }
   step("準備中・不明な公開状態（SITE_STATUS=live など）：注文 503・決済画面 404");
 
-  // ================= テストと本番の取り違え：受け付けない（PAY.JP などへ切り替えもしない） =================
+  // ================= テストと本番の取り違え：受け付けない（ほかの決済へ切り替えもしない） =================
   const mixups: [string, Record<string, string>][] = [
     ["sk_live_ のキー", { STRIPE_SECRET_KEY: "sk_live_e2e_dummy" }],
     ["本番決済のスイッチ", { STRIPE_LIVE_CHECKOUT: "on" }],
-    ["PAY.JP の本番用キー", { PAYJP_SECRET_KEY: "sk_live_e2e_dummy_payjp", PAYJP_PUBLIC_KEY: "pk_live_e2e_dummy", PAYJP_WEBHOOK_TOKEN: "whook_e2e_dummy" }],
+    ["Stripe の本番用の制限付きキー", { STRIPE_RESTRICTED_KEY: "rk_live_e2e_dummy" }],
     ["Stripe のテストのスイッチなし", { STRIPE_TEST_CHECKOUT: "" }],
   ];
   for (const [label, o] of mixups) {
@@ -446,15 +443,34 @@ async function main() {
     assert.equal((await g.req("/api/checkout/stripe-session", { method: "POST", json: {} })).status, 404, label);
     assert.equal((await webhook("checkout.session.completed", { id: p6.sessionId, object: "checkout.session" })).status, 404, `${label}: Webhook`);
   }
-  step("取り違え（sk_live_・本番決済のスイッチ・PAY.JP の本番用キー・テストのスイッチなし）：注文 503・決済画面 404・Webhook 404（ほかの決済へ切り替えない）");
+  step("取り違え（sk_live_・本番決済のスイッチ・本番用の制限付きキー・テストのスイッチなし）：注文 503・決済画面 404・Webhook 404（ほかの決済へ切り替えない）");
 
-  // ================= PAYMENT_PROVIDER が stripe 以外：一般のお客さんに Stripe を使わない =================
-  await startApp("PAYMENT_PROVIDER=payjp（PAY.JP のキーなし）", { PAYMENT_PROVIDER: "payjp" });
-  const g2 = new Client();
+  // ================= PAY.JP は廃止：設定が残っていても PAY.JP には流れない =================
+  const PAYJP_LEFTOVER = { PAYJP_SECRET_KEY: "sk_live_e2e_dummy_payjp", PAYJP_PUBLIC_KEY: "pk_live_e2e_dummy", PAYJP_WEBHOOK_TOKEN: "whook_e2e_dummy" };
+  const payjpClosed = async (label: string) => {
+    const g = new Client();
+    await g.req(`/s/${storeA.storeCode}`);
+    assert.equal((await g.req("/api/checkout/pay", { method: "POST", json: { cardToken: "tok_e2e_payjp" } })).status, 404, `${label}: カード決済の API`);
+    const wh = await fetch(`${BASE}/api/webhooks/payjp`, { method: "POST", headers: { "content-type": "application/json", "x-payjp-webhook-token": "whook_e2e_dummy" }, body: JSON.stringify({ id: "evt_payjp_e2e", type: "charge.succeeded", data: { id: "ch_payjp_e2e" } }) });
+    assert.equal(wh.status, 404, `${label}: PAY.JP の Webhook`);
+    const html = await (await g.req("/payment")).text();
+    assert.doesNotMatch(html, /pay\.jp/i, `${label}: 決済画面に PAY.JP`);
+    return g;
+  };
+  // PAYMENT_PROVIDER=stripe のまま PAY.JP の本番用キーが残っている：Stripe で決済できる（PAY.JP の設定は読まない）
+  await startApp("PAY.JP の本番用キーが残っている（stripe）", PAYJP_LEFTOVER);
+  const gp = await payjpClosed("stripe + PAYJP_*");
+  const pp = await startPurchase(gp, storeA.storeCode, "ZODIAC");
+  assert.match(pp.sessionId, /^cs_test_/, "Stripe の決済画面に移動しません");
+  // PAYMENT_PROVIDER=payjp：設定なしとして扱い、Stripe にも疑似決済にも流さない
+  await startApp("PAYMENT_PROVIDER=payjp（PAY.JP の本番用キーあり）", { PAYMENT_PROVIDER: "payjp", ...PAYJP_LEFTOVER });
+  const g2 = await payjpClosed("payjp");
   await g2.req(`/s/${storeA.storeCode}`);
   assert.equal((await g2.req("/api/checkout", { method: "POST", json: { fortuneType: "ZODIAC" } })).status, 503);
   assert.equal((await g2.req("/api/checkout/stripe-session", { method: "POST", json: {} })).status, 404);
-  step("PAYMENT_PROVIDER=payjp（PAY.JP のキーなし）：一般のお客さんに Stripe を使わない（注文 503・決済画面 404）");
+  const health = (await (await fetch(`${BASE}/api/health`)).json()) as { checks?: Record<string, string> };
+  assert.doesNotMatch(JSON.stringify(health), /payjp \(|sk_live_e2e_dummy_payjp/, "ヘルスチェックに PAY.JP の決済・キーの値が出ています");
+  step("PAY.JP は廃止：PAY.JP の本番用キーが残っていても Stripe で決済（PAY.JP の設定は読まない）。PAYMENT_PROVIDER=payjp は設定なし（注文 503）。カード決済の API・PAY.JP の Webhook は 404、画面に PAY.JP なし");
 
   await stopApp();
   await fakeStripe.stop();

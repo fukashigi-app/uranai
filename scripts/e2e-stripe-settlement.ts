@@ -305,7 +305,7 @@ async function fetchAs(userId: string, path: string) {
   return fetch(`http://localhost:${APP_PORT}${path}`, { headers: { cookie: `sid=${token}`, "x-real-ip": "203.0.113.77" }, redirect: "manual" });
 }
 async function startApp(): Promise<ChildProcess> {
-  const env: NodeJS.ProcessEnv = { ...process.env, PORT: String(APP_PORT), APP_URL: `http://localhost:${APP_PORT}`, DB_PROVIDER: "firestore", SITE_STATUS: "open", ENABLE_TEST_PAYMENT: "false", PAYMENT_PROVIDER: "payjp", PAYJP_PUBLIC_KEY: "", PAYJP_SECRET_KEY: "", PAYJP_WEBHOOK_TOKEN: "", SESSION_SECRET: `e2e-settle-${randomToken(24)}` };
+  const env: NodeJS.ProcessEnv = { ...process.env, PORT: String(APP_PORT), APP_URL: `http://localhost:${APP_PORT}`, DB_PROVIDER: "firestore", SITE_STATUS: "open", ENABLE_TEST_PAYMENT: "false", PAYMENT_PROVIDER: "stripe", SESSION_SECRET: `e2e-settle-${randomToken(24)}` };
   delete env.VERCEL_ENV;
   const child = spawn("node_modules/.bin/next", ["start", "-p", String(APP_PORT)], { env, stdio: ["ignore", "pipe", "pipe"] });
   let log = "";

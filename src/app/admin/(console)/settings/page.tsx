@@ -30,18 +30,14 @@ export default async function AdminSettingsPage() {
       : "Stripe（PAYMENT_PROVIDER=stripe）：決済を受け付けていません（本番決済は未実装、または設定の不足）"
     : e.PAYMENT_PROVIDER === "mock"
       ? "自動テスト用の疑似決済（PAYMENT_PROVIDER=mock）"
-      : !e.PAYMENT_PROVIDER
-      ? "未設定（決済を受け付けていません）"
-      : e.PAYJP_SECRET_KEY?.startsWith("sk_live_")
-        ? "本番（ライブ）"
-        : "PAY.JP テストモード";
+      : "未設定（決済を受け付けていません。決済は Stripe だけです）";
   const protection = status === "development" ? await getProtectionStatus() : null;
   const rows: [string, string][] = [
     ["サービス名", siteConfig.name],
     ["公開URL", e.APP_URL],
     ["価格（サーバー固定）", `${PRICE_JPY}円`],
     ["店舗の取り分（全店舗一律・固定）", `${STORE_SHARE_BPS / 100}%（運営 ${100 - STORE_SHARE_BPS / 100}%。決済手数料は運営の負担）`],
-    ["決済手数料率（既定）", `${defaultFeeRateBps() / 100}%（PAY.JPは決済ごとの fee_rate を優先）`],
+    ["決済手数料率（既定）", `${defaultFeeRateBps() / 100}%（推定値。Stripe の手数料が確定したら確定値に更新。手数料は運営の負担）`],
     ["決済プロバイダ", isStripeProviderSelected() ? "stripe" : (e.PAYMENT_PROVIDER ?? "—")],
     ["決済モード", mode],
     ["Webhook URL", isStripeProviderSelected() ? `${e.APP_URL}/api/webhooks/stripe` : e.PAYMENT_PROVIDER ? `${e.APP_URL}/api/webhooks/${e.PAYMENT_PROVIDER}` : "—"],

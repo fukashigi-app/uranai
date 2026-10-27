@@ -11,10 +11,21 @@ import { readOperatorInfo } from "@/config/operator";
 export const LEGAL_UPDATED = "2026年10月16日";
 
 /**
- * 現在の決済代行サービス（実装: src/lib/payments/payjp.ts）。
- * Stripe へ移行するときは、ここと各文書の決済代行に関する記載を見直すこと。
+ * 決済代行サービス（実装: src/lib/payments/stripe-*.ts。Stripe Checkout）。PAY.JP は廃止した。
+ * 表示はサービス名。契約の相手方（法人名）は運営者が確認して、必要なら各文書に追記する（推測で書かない）。
  */
-export const PAYMENT_PROCESSOR = "PAY.JP";
+export const PAYMENT_PROCESSOR = "Stripe";
+
+/**
+ * 支払方法の表示。実装では Stripe Checkout にカード・PayPay の表示を許可している（lib/payments/stripe-checkout.ts の
+ * allowed_payment_method_types。Apple Pay・Google Pay はカードの一部として表示される場合がある）が、
+ * 実際に表示されるかは本番の Stripe アカウントの設定・審査による。運営者が本番で確認するまでは、特定の方法を利用できると断定しない。
+ */
+export const PAYMENT_METHODS_LABEL = "クレジットカードなど、決済画面に表示されるお支払い方法";
+
+/** 支払時期（Stripe Checkout：購入ボタンで Stripe の決済画面に移動し、決済画面で手続きを完了した時点で決済） */
+export const paymentTimingText = (buttonLabel: string) =>
+  `お支払い画面の「${buttonLabel}」ボタンを押すと、${PAYMENT_PROCESSOR}の決済画面に移動します。決済画面でお支払いの手続きを完了した時点で決済されます。`;
 
 /** 返金の申し出の目安（決済日から） */
 export const REFUND_REQUEST_DAYS = 30;

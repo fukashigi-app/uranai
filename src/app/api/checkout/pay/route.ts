@@ -1,13 +1,18 @@
 import { z } from "zod";
 import { guardPost, jsonError, jsonOk, paymentStopResponse, readJson } from "@/lib/api";
-import { serviceStopReason } from "@/lib/env";
+import { env, serviceStopReason } from "@/lib/env";
 import { getAccessToken } from "@/lib/cookies";
 import { CheckoutError, payCheckout } from "@/lib/services/checkout";
 
-// 金額は受け取らない。カードトークン（決済代行が発行）のみ
+// 金額は受け取らない。疑似決済のトークン（mock_tok_…）だけ
 const bodySchema = z.object({ cardToken: z.string().min(1).max(200).regex(/^[A-Za-z0-9_]+$/) }).strict();
 
+/**
+ * 疑似決済（自動テスト専用）の支払い。PAYMENT_PROVIDER=mock のときだけ存在し、それ以外（Stripe・未設定・Vercel の本番）では 404。
+ * 実際の決済は Stripe Checkout（/api/checkout/stripe-session）。PAY.JP のカード決済の受付は廃止した。
+ */
 export async function POST(req: Request) {
+  if (env().PAYMENT_PROVIDER !== "mock") return jsonError(404, "not_found", "ただいまお支払いを受け付けていません。");
   // 危険な設定・開発モード・準備中のときは、誰に対しても決済を受け付けない（サーバー側で判定。運営アカウントも例外なし）
   const stopped = paymentStopResponse(serviceStopReason());
   if (stopped) return stopped;
@@ -17,7 +22,7 @@ export async function POST(req: Request) {
   try {
     body = bodySchema.parse(await readJson(req));
   } catch {
-    return jsonError(400, "invalid_request", "カード情報を確認できませんでした。もう一度入力してください。");
+    return jsonError(400, "invalid_request", "お支払いの内容を確認できませんでした。もう一度お試しください。");
   }
   try {
     const result = await payCheckout(await getAccessToken(), body.cardToken);

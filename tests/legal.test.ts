@@ -32,7 +32,8 @@ const text = (el: React.ReactElement) =>
 const page = (Page: () => React.ReactElement) => text(createElement(Page));
 
 /** 未確定事項を確定した事実や架空の値として表示していないこと（全ページ共通） */
-const FORBIDDEN = ["example.com", "【", "】", "[要", "要設定", "要確認", "設定してください", "Stripe", "7年", "一切の責任", "専属的合意管轄", "法令に基づき省略", "適法"];
+// 本番の Stripe アカウントで利用できるか未確認の支払い方法を、利用できると断定しない
+const FORBIDDEN = ["PayPay", "Apple Pay", "Google Pay", "example.com", "【", "】", "[要", "要設定", "要確認", "設定してください", "PAY.JP", "pay.jp", "7年", "一切の責任", "専属的合意管轄", "法令に基づき省略", "適法"];
 
 beforeEach(() => {
   for (const k of OPERATOR_KEYS) vi.stubEnv(k, "");
@@ -96,8 +97,9 @@ describe("特定商取引法に基づく表記", () => {
       "koyomi100yen@gmail.com",
       "100円占い",
       "占い1回 100円（税込）",
-      "クレジットカード（決済代行：PAY.JP）",
-      `「${PAY_BUTTON_LABEL}」ボタンを押した時点で決済`,
+      "クレジットカードなど、決済画面に表示されるお支払い方法（決済代行：Stripe）",
+      `「${PAY_BUTTON_LABEL}」ボタンを押すと、Stripeの決済画面に移動します。決済画面でお支払いの手続きを完了した時点で決済されます。`,
+      "カード会社など、お支払い方法の提供会社からのご請求",
       "30分以内にお支払いください",
       "決済の完了から24時間以内に占いを実行",
       "占いを実行してから24時間、お支払いをした同じブラウザでのみ再表示",
@@ -181,6 +183,8 @@ describe("利用規約", () => {
       "提携店舗はQRコードの設置場所を提供しているものであり、本サービスの販売者ではありません",
       "利用者と運営者との間で成立",
       "占い1回につき100円（税込）",
+      "決済代行サービス（Stripe）を通じたクレジットカードなど、決済画面に表示されるお支払い方法によります",
+      "Stripeの決済画面に移動します。決済画面でお支払いの手続きを完了した時点で決済されます",
       "決済の完了から24時間以内に占いを実行",
       "同じブラウザでのみ再表示",
       "重複して決済された場合",
@@ -214,7 +218,10 @@ describe("プライバシーポリシー", () => {
       "Firebase",
       "Vercel",
       "Gmail",
-      "PAY.JP",
+      "Stripe：クレジットカードなど、決済画面に表示されるお支払い方法の決済",
+      "決済画面で入力されたカード情報はStripeが直接処理し、運営者のサーバーには送信されず",
+      "本サービスのデータベースにこれらを保存しません",
+      "異議申し立て（チャージバック）の状況",
       "売上の管理、提携店舗への報酬の精算",
       "振込先口座は暗号化して保管",
       "現在は自動で削除する仕組みがなく、保存を続けています",
@@ -231,13 +238,15 @@ describe("プライバシーポリシー", () => {
 describe("購入画面の確認事項", () => {
   const expiresAt = new Date("2026-10-16T03:30:00Z"); // JST 12:30
   it("購入内容・価格・支払方法と時期・提供時期・期限・キャンセルと返金・未成年・3文書へのリンクを表示する", () => {
-    const html = renderToStaticMarkup(createElement(PurchaseSummary, { fortuneLabel: "星座占い", inputLabel: "星座", expiresAt, testPayment: false }));
-    const t = text(createElement(PurchaseSummary, { fortuneLabel: "星座占い", inputLabel: "星座", expiresAt, testPayment: false }));
+    const html = renderToStaticMarkup(createElement(PurchaseSummary, { fortuneLabel: "星座占い", inputLabel: "星座", expiresAt, mode: "stripe" }));
+    const t = text(createElement(PurchaseSummary, { fortuneLabel: "星座占い", inputLabel: "星座", expiresAt, mode: "stripe" }));
     for (const s of [
       "星座占い（1回分）",
       "100円（税込）",
-      "クレジットカード（決済代行：PAY.JP）",
-      `「${PAY_BUTTON_LABEL}」ボタンを押した時点で決済`,
+      "クレジットカードなど、決済画面に表示されるお支払い方法（決済代行：Stripe）",
+      "カード情報はStripeが処理し、当サービスには送信・保存されません",
+      `「${PAY_BUTTON_LABEL}」ボタンを押すと、Stripeの決済画面に移動します。決済画面でお支払いの手続きを完了した時点で決済されます`,
+      "決済画面でお支払いの手続きを完了する前であれば、画面を閉じるだけで料金はかかりません",
       "決済の完了後すぐに",
       "24時間以内",
       "このブラウザでのみ再表示",
@@ -254,9 +263,12 @@ describe("購入画面の確認事項", () => {
   });
 
   it("テスト用の決済では、請求が発生しないことと実際のボタン名を表示する", () => {
-    const t = text(createElement(PurchaseSummary, { fortuneLabel: "血液型占い", inputLabel: "血液型", expiresAt, testPayment: true }));
-    expect(t).toContain("実際の請求は発生しません");
-    expect(t).toContain(`「${TEST_PAY_BUTTON_LABEL}」ボタン`);
+    const t = text(createElement(PurchaseSummary, { fortuneLabel: "血液型占い", inputLabel: "血液型", expiresAt, mode: "mock" }));
+    expect(t).toContain("テスト用の疑似決済（実際の請求は発生しません）");
+    expect(t).toContain(`「${TEST_PAY_BUTTON_LABEL}」ボタンを押した時点で決済されます（テスト用）`);
     expect(t).not.toContain("PAY.JP");
+    const st = text(createElement(PurchaseSummary, { fortuneLabel: "血液型占い", inputLabel: "血液型", expiresAt, mode: "stripe_test", payButtonLabel: "同意して100円を支払う（テスト）" }));
+    expect(st).toContain("Stripeのテスト決済（実際の請求は発生しません）");
+    expect(st).toContain("「同意して100円を支払う（テスト）」ボタンを押すと、Stripeの決済画面に移動します");
   });
 });

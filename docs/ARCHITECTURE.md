@@ -14,7 +14,7 @@ QRコード → 100円決済 → Webhook確認 → 占い → 店舗売上計上
 | DB | PostgreSQL (Supabase / Neon / RDS 等どれでも可) | 制約・トランザクション・UNIQUE によるidempotency |
 | ORM | Drizzle ORM + node-postgres | 型安全、SQLに近く、プリペアドステートメントでSQLインジェクションを防止 |
 | 認証 | 自前のDBセッション（scrypt + HttpOnly Cookie） | 外部Authに依存せず、店舗/運営のロール分離をサーバーで完結 |
-| 決済 | PAY.JP（`PaymentProvider` で抽象化）/ 開発用 Mock | Stripe/Square へ差し替え可能 |
+| 決済 | Stripe Checkout（`lib/payments/stripe-*.ts`）/ 自動テスト用の疑似決済 Mock | PAY.JP は廃止（コード・Webhook・カード入力フォームを削除） |
 | バリデーション | zod | 全API・Server Action の入力検証 |
 | QR | `qrcode` | サーバー側でPNG/SVG生成 |
 
@@ -48,8 +48,8 @@ uranai/ (リポジトリルート)
 │   │   ├─ api/
 │   │   │   ├─ checkout/       … 決済セッション作成 / 支払い / 状態確認
 │   │   │   ├─ fortune/        … 占い実行
-│   │   │   ├─ webhooks/payjp/ … PAY.JP Webhook
-│   │   │   ├─ webhooks/mock/  … 開発用Mock Webhook（本番では404）
+│   │   │   ├─ webhooks/stripe/ … Stripe Webhook（署名・livemode を確認）
+│   │   │   ├─ webhooks/mock/  … 自動テスト用の疑似決済の Webhook（PAYMENT_PROVIDER=mock 以外では404）
 │   │   │   ├─ store/qr/       … QR PNG ダウンロード（要店舗認証）
 │   │   │   └─ cron/maintenance … 期限切れ処理・個人情報の定期削除
 │   │   └─ terms / privacy / commercial-transaction
@@ -57,7 +57,7 @@ uranai/ (リポジトリルート)
 │   └─ lib/
 │       ├─ db/                 … schema.ts / client
 │       ├─ auth/               … パスワード・セッション・認可ガード
-│       ├─ payments/           … PaymentProvider 抽象 + payjp + mock + confirm(冪等計上)
+│       ├─ payments/           … Stripe（Checkout・照合・返金・異議申し立て・精算の調整の規則）+ 疑似決済 mock（自動テスト専用）
 │       ├─ fortune/            … seed RNG・テンプレート・エンジン(将来AIに差替え可)
 │       ├─ security/           … 暗号化(AES-GCM)・Rate Limit・Origin検証
 │       ├─ services/           … 集計・精算・店舗管理などのドメインロジック
@@ -101,17 +101,19 @@ uranai/ (リポジトリルート)
 | `APP_URL` | 公開URL（QRのURL生成・Origin検証） |
 | `SESSION_SECRET` | Cookie署名用（32byte以上の乱数） |
 | `DATA_ENCRYPTION_KEY` | 口座情報暗号化キー（base64 32byte） |
-| `PAYMENT_PROVIDER` | `payjp` / `mock`（`mock` は本番起動時に拒否） |
-| `PAYJP_PUBLIC_KEY` | フロント用公開鍵（`pk_test_…`）※公開鍵のみフロントへ |
-| `PAYJP_SECRET_KEY` | **サーバー専用**秘密鍵（`sk_test_…`） |
-| `PAYJP_WEBHOOK_TOKEN` | PAY.JP管理画面のWebhookトークン（`X-Payjp-Webhook-Token` 検証） |
-| `MOCK_WEBHOOK_SECRET` | Mock Webhook の HMAC 秘密鍵 |
-| `PAYMENT_FEE_RATE_BPS` | 手数料率の既定値（PAY.JPは charge.fee_rate を優先） |
+| `PAYMENT_PROVIDER` | `stripe`（一般のお客さんの決済を Stripe Checkout で受け付ける）/ `mock`（自動テスト専用。Vercel の本番では無効）。`payjp` は廃止（設定なしとして扱い警告） |
+| `STRIPE_TEST_CHECKOUT` | `on` で Stripe のテスト決済（Sandbox）を有効にする（Preview・ローカルだけ） |
+| `STRIPE_SECRET_KEY` | **サーバー専用**の Stripe の秘密鍵（テストは `sk_test_`。本番用 `sk_live_` はテストの環境では拒否） |
+| `STRIPE_WEBHOOK_SECRET` | Stripe の Webhook の署名の値（`whsec_`） |
+| `STRIPE_TEST_FIREBASE_PROJECT_ID` | テスト決済を使う Firebase プロジェクト（本番のIDとは別であること） |
+| `STRIPE_LIVE_CHECKOUT` / `STRIPE_LIVE_OPERATOR_TEST` | 本番決済の判定だけ（本番決済は未実装・無効） |
+| `MOCK_WEBHOOK_SECRET` | 疑似決済の Webhook の HMAC 秘密鍵（自動テスト用） |
+| `PAYMENT_FEE_RATE_BPS` | 決済手数料率の推定値（Stripe の手数料が確定したら確定値に更新。手数料は運営の負担） |
 | `CRON_SECRET` | `/api/cron/maintenance` の Bearer トークン |
 | `NEXT_PUBLIC_SITE_NAME` 等 | サービス名・テーマなどブランド設定 |
 
-`PAYJP_SECRET_KEY` 等はすべて `server-only` モジュール（`src/lib/env.ts`）からのみ読み込み、
-クライアントバンドルに混入するとビルドエラーになる。
+`STRIPE_SECRET_KEY` 等はすべて `server-only` モジュールからのみ読み込み、クライアントバンドルに混入するとビルドエラーになる。
+`PAYJP_*` は読まない（残っていれば設定の確認で削除を促す）。
 
 ---
 
@@ -140,24 +142,18 @@ uranai/ (リポジトリルート)
        ・Cookieの storeCode を **DBで再照会**、ACTIVEでなければ拒否
        ・金額はサーバーの `PRICE_JPY=100` を使用（クライアント値は受け取らない）
        ・checkouts 作成、32byteアクセストークンを HttpOnly Cookie `fx_access` に発行（DBはハッシュ）
-[決済] /payment
-  └ payjp.js v2 の Elements（カード番号はPAY.JPのiframe内、当社サーバーに来ない）
-    createToken(…, {three_d_secure:true}) で 3Dセキュア認証 → tok_xxx
-  └ POST /api/checkout/pay {cardToken}
-       ・checkout を CREATED→PROCESSING に原子的更新（連打・二重課金防止）
-       ・PAY.JP Charge 作成（amount=100, Idempotency-Key, metadata{checkoutId, storeId, fortuneType}）
-       ・この時点では売上計上しない
-  └ 画面「決済を確認しています…」→ GET /api/checkout/status をポーリング
-[Webhook] POST /api/webhooks/payjp  (charge.succeeded)
-       ・X-Payjp-Webhook-Token を定数時間比較で検証
-       ・さらに PAY.JP API から Charge を取得し直して paid/captured/amount=100/jpy を確認
-       ・confirmPayment(): 1トランザクションで
-           transactions INSERT … ON CONFLICT DO NOTHING（UNIQUE で二重計上防止）
-           store_share = floor(100 × 3000 / 10000) = 30円、operator_share = 70円、payment_fee = 100×fee_rate
-           fortune_sessions INSERT（status=PAID, 24時間有効）
-           checkouts → SUCCEEDED
-  ※ Webhook遅延時は status API が一定時間後に同じ confirmPayment() を
-    「PAY.JP APIからの取得結果」で実行（クライアント申告は一切信用しない）
+[決済] /payment（購入前の確認事項を表示）
+  └ POST /api/checkout/stripe-session
+       ・注文（Cookie）と Stripe の Checkout Session を紐付け（金額100円・店舗・注文IDを metadata に入れる。
+         支払い方法はカード・PayPay に絞る。同じ注文では同じ Session を使い、何度押しても増えない）
+       ・お客さんを Stripe の決済画面へ移動（カード情報は Stripe のページだけで扱い、当社サーバーに来ない）
+[戻り先] /payment/return?session_id=… ／ [Webhook] POST /api/webhooks/stripe
+       ・Webhook は署名（STRIPE_WEBHOOK_SECRET）と livemode を確認。通知の中身は信用しない
+       ・どちらも Stripe API から Session・PaymentIntent・Charge を取り直し、注文・金額・店舗・支払い方法を照合
+       ・確定（1トランザクション。Webhook と戻り先が同時でも1件）:
+           transactions/stripe_{PaymentIntent} 作成（store_share = 30円・operator_share = 70円・手数料は確定値または推定値）
+           fortune_sessions 作成（status=PAID, 24時間有効）・checkouts → SUCCEEDED
+       ・PayPay などの確定待ちは、確定の通知か照合で確定するまで権利を付与しない
 [入力] /fortune/input → POST /api/fortune
        ・Cookieのトークンで fortune_session を特定、`UPDATE … WHERE status='PAID' AND expires_at>now()` で原子的に USED
        ・seed = hash(JST日付, 占い種別, 入力) で結果生成 → fortune_results 保存（生年月日は保存しない）
@@ -166,19 +162,30 @@ uranai/ (リポジトリルート)
        ・USED後24時間は同じ結果を再表示可能（通信断対策）
 ```
 
-返金Webhook（`charge.refunded`）は transaction を `REFUNDED` にし、売上集計から除外する。
+### 返金・異議申し立て・精算の調整
 
-### PaymentProvider 抽象
+- 返金（`charge.refunded`・`refund.*`）・異議申し立て（`charge.dispute.*`）は、Stripe API で状態を取り直し、記録と照合してから反映する。
+  処理中・失敗の返金は売上を減らさない。全額の返金・敗訴は売上から除き、一部返金・一部の額の敗訴は残りの金額で集計する
+- 精算を確定（処理中・支払済）すると、その月の取引に「支払った額」を記録する。その後の返金・異議申し立ては
+  `settlementAdjustments`（調整）として記録し、次に確定する精算で差し引く（振込額を超える分は繰越）。過去の取引・支払済みの精算は書き換えない
+- 記録と照合できない通知・以前の仕組みで確定した精算の変化は `paymentReviews`（決済要確認）に記録し、運営が確認する
 
-```ts
-interface PaymentProvider {
-  id: 'payjp' | 'mock'
-  createCharge(input): Promise<ChargeResult>            // サーバーのみ
-  retrieveCharge(id): Promise<ProviderCharge>           // Webhook検証・照合
-  parseWebhook(headers, rawBody): Promise<WebhookEvent> // 署名/トークン検証込み
-}
-```
-Stripe 追加時は `stripe.ts` を実装し `PAYMENT_PROVIDER=stripe` にするだけ（confirmPayment は共通）。
+### Stripe の Webhook に登録するイベント
+
+`checkout.session.completed` / `checkout.session.async_payment_succeeded` / `checkout.session.async_payment_failed` / `checkout.session.expired` /
+`charge.refunded` / `charge.refund.updated` / `refund.created` / `refund.updated` / `refund.failed` /
+`charge.dispute.created` / `charge.dispute.updated` / `charge.dispute.closed` / `charge.dispute.funds_withdrawn` / `charge.dispute.funds_reinstated` /
+`charge.updated` / `charge.succeeded`（手数料の確定）
+
+### 疑似決済（自動テスト専用）
+
+`PAYMENT_PROVIDER=mock` のときだけ `/api/checkout/pay`・`/api/webhooks/mock` と疑似決済の画面（`mock-payment-form.tsx`）が使える。
+それ以外（Stripe・未設定・Vercel の本番）では 404・表示なし。疑似決済は売上の画面には数えるが（自動テスト環境だけ）、精算には決して含めない。
+
+### 過去の PAY.JP の記録
+
+`paymentProvider: "payjp"` の記録は削除・変更しない。集計・精算・管理画面は `paymentProvider` と `livemode` から種類を判定して読む
+（外部の API には問い合わせない）。PAY.JP の注文が残っていても、決済の画面は出さない。
 
 ---
 

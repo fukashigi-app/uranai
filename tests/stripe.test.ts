@@ -29,7 +29,7 @@ describe("Stripe のテスト決済を使える設定（欠けていたら使わ
       [{ ...PREVIEW, STRIPE_SECRET_KEY: "sk_live_x" }, "secret_key_not_test"],
       [{ ...PREVIEW, STRIPE_SECRET_KEY: "rk_test_x" }, "secret_key_not_test"],
       [{ ...PREVIEW, STRIPE_WEBHOOK_SECRET: undefined }, "webhook_secret_missing"],
-      [{ ...PREVIEW, PAYJP_SECRET_KEY: "sk_live_payjp" }, "live_key_present"],
+      [{ ...PREVIEW, STRIPE_RESTRICTED_KEY: "rk_live_x" }, "live_key_present"],
       [{ ...PREVIEW, STRIPE_PUBLISHABLE_KEY: "pk_live_x" }, "live_key_present"],
       [{ ...PREVIEW, PAYMENT_PROVIDER: "mock" }, "dangerous_config"],
       [{ ...PREVIEW, STRIPE_API_BASE: "http://127.0.0.1:12111" }, "api_base_not_allowed"], // Preview では接続先を差し替えない
@@ -41,6 +41,8 @@ describe("Stripe のテスト決済を使える設定（欠けていたら使わ
     ];
     for (const [env, reason] of cases) expect(stripeTestConfig(env), JSON.stringify(env)).toEqual({ ok: false, reason });
     expect(stripeTestConfig({ ...LOCAL, STRIPE_API_BASE: "http://127.0.0.1:12111" })).toMatchObject({ ok: true, apiBase: { host: "127.0.0.1", port: 12111, protocol: "http" } });
+    // PAY.JP は廃止：PAYJP_* が残っていても読まない（Stripe のテスト決済の判定に影響しない）
+    expect(stripeTestConfig({ ...PREVIEW, PAYJP_SECRET_KEY: "sk_live_payjp", PAYJP_PUBLIC_KEY: "pk_live_payjp" })).toMatchObject({ ok: true, mode: "preview" });
   });
 
   it("本番の環境変数に Stripe のテスト設定があれば警告する（値は出さない）", () => {

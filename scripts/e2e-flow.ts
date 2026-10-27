@@ -331,7 +331,7 @@ async function main() {
   assert.equal(res.status, 404);
   // 本番設定（PAYMENT_PROVIDER が mock 以外）では、疑似決済（旧テストモード含む）は売上集計に入らない
   const savedProvider = process.env.PAYMENT_PROVIDER;
-  process.env.PAYMENT_PROVIDER = "payjp";
+  process.env.PAYMENT_PROVIDER = "stripe";
   const realOnly = await totalsForRange(null);
   const nonMock = (await db().execute(sql`SELECT count(*)::int AS c, coalesce(sum(amount),0)::int AS g FROM transactions WHERE payment_status='SUCCEEDED' AND payment_provider <> 'mock' AND livemode = true`)).rows[0];
   assert.deepEqual([realOnly.count, realOnly.gross], [Number(nonMock.c), Number(nonMock.g)]);

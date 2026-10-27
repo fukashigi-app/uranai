@@ -32,11 +32,7 @@ export async function GET() {
           ? stripePublicCheckoutAccess().ok
             ? "stripe (test: Sandbox。売上・精算には含めない)"
             : "stripe (決済を受け付けていません：本番決済は未実装、または設定が不足しています)"
-        : process.env.PAYJP_SECRET_KEY
-          ? process.env.PAYJP_SECRET_KEY.startsWith("sk_live_")
-            ? "payjp (live)"
-            : "payjp (test keys: 売上・精算には含めない)"
-          : "none (決済未設定)",
+          : "none (決済未設定。決済は Stripe だけ：PAYMENT_PROVIDER=stripe)",
     CRON_SECRET: process.env.CRON_SECRET ? "set" : "missing (定期処理が実行されません)",
   };
   // 本番環境の危険な設定・設定漏れ（値は返さない）。error があれば ok=false

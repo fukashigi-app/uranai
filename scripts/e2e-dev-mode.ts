@@ -3,7 +3,7 @@
  *
  *   firebase emulators:start --only firestore --project demo-uranai
  *   （別ターミナル）npm run build && FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 FIREBASE_PROJECT_ID=demo-uranai-dev \
- *       SITE_STATUS=development ENABLE_TEST_PAYMENT=false PAYMENT_PROVIDER=payjp npx next start
+ *       SITE_STATUS=development ENABLE_TEST_PAYMENT=false PAYMENT_PROVIDER=stripe npx next start
  *   （別ターミナル）FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 FIREBASE_PROJECT_ID=demo-uranai-dev npm run e2e:dev-mode
  *
  * E2E_DEV_SCENARIO=halted のときは、危険な設定（ENABLE_TEST_PAYMENT=true など）が残っている本番を想定し、
@@ -140,8 +140,9 @@ async function main() {
   let r = await anon.req("/api/checkout", { method: "POST", json: { fortuneType: "ZODIAC" } });
   assert.equal(r.status, 503);
   assert.equal(((await r.json()) as { error: { code: string } }).error.code, "development_mode");
-  assert.equal((await anon.req("/api/checkout/pay", { method: "POST", json: { cardToken: "tok_x" } })).status, 503);
-  step("ログインなし：どのページも「準備中」。無料の占いは 404、決済の API は 503（development_mode）");
+  // 疑似決済の支払い（/api/checkout/pay）は PAYMENT_PROVIDER=mock 以外では存在しない（PAY.JP のカード決済の受付は廃止）
+  assert.equal((await anon.req("/api/checkout/pay", { method: "POST", json: { cardToken: "tok_x" } })).status, 404);
+  step("ログインなし：どのページも「準備中」。無料の占いは 404、注文の API は 503（development_mode）、疑似決済の支払いの API は 404");
 
   // ---- 2. 店舗アカウント：使えない ----
   const { c: staff } = await loggedIn(staffId);
@@ -169,12 +170,12 @@ async function main() {
   assert.match(html, /別の占いも試す（無料）/);
   r = await op.req("/api/fortune", { method: "POST", json: { type: "ZODIAC", sign: "leo" } }); // 二重送信は同じ結果
   assert.equal(r.status, 200);
-  for (const [p, b] of [
-    ["/api/checkout", { fortuneType: "ZODIAC" }],
-    ["/api/checkout/pay", { cardToken: "tok_x" }],
+  for (const [p, b, code] of [
+    ["/api/checkout", { fortuneType: "ZODIAC" }, 503],
+    ["/api/checkout/pay", { cardToken: "tok_x" }, 404], // 疑似決済の支払い（mock 以外では存在しない）
   ] as const) {
     r = await op.req(p, { method: "POST", json: b });
-    assert.equal(r.status, 503, `${p} が運営アカウントで止まっていません`);
+    assert.equal(r.status, code, `${p} が運営アカウントで止まっていません`);
   }
   assert.match(await op.text("/payment"), /data-service-paused="development"/);
   // 生年月日占い（生年月日はどこにも保存しない）

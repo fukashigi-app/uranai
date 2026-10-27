@@ -2,7 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { PublicShell, Notice, ServicePausedNotice } from "@/components/public/public-shell";
 import { serviceStopReason } from "@/lib/env";
-import { PaymentForm } from "@/components/public/payment-form";
+import { MockPaymentForm } from "@/components/public/mock-payment-form";
 import { PurchaseSummary } from "@/components/public/purchase-summary";
 import { FortuneIcon } from "@/components/public/fortune-icons";
 import { getAccessToken } from "@/lib/cookies";
@@ -58,7 +58,7 @@ export default async function PaymentPage(props: PageProps<"/payment">) {
       <PublicShell storeName={storeName} step={2}>
         <h1 className="mb-4 font-serif text-2xl font-bold tracking-wide">お支払い</h1>
         <PaymentHeader fortuneType={checkout.fortuneType} label={item.label} storeName={storeName} amount={checkout.amount} />
-        <PurchaseSummary fortuneLabel={item.label} inputLabel={item.inputLabel} expiresAt={checkout.expiresAt} testPayment={stripe.mode === "test"} payButtonLabel={stripe.mode === "test" ? STRIPE_TEST_PAY_BUTTON_LABEL : PAY_BUTTON_LABEL} />
+        <PurchaseSummary fortuneLabel={item.label} inputLabel={item.inputLabel} expiresAt={checkout.expiresAt} mode={stripe.mode === "test" ? "stripe_test" : "stripe"} payButtonLabel={stripe.mode === "test" ? STRIPE_TEST_PAY_BUTTON_LABEL : PAY_BUTTON_LABEL} />
         <StripeCheckoutButton canceled={canceled} variant={stripe.audience === "operator_test" ? "operator_test" : stripe.mode === "test" ? "public_test" : "live"} />
         <p className="mt-4 text-center">
           <Link href="/fortune" className="text-[12px] text-ink-muted underline underline-offset-4">
@@ -76,18 +76,23 @@ export default async function PaymentPage(props: PageProps<"/payment">) {
     );
   }
 
-  let config: ReturnType<ReturnType<typeof activeProvider>["publicConfig"]>;
+  // Stripe 以外の注文は、自動テスト用の疑似決済（PAYMENT_PROVIDER=mock）だけ。
+  // 過去の PAY.JP の注文（provider=payjp）などには決済の画面を出さない（PAY.JP は廃止した）
+  let mockAvailable = false;
   try {
-    config = activeProvider().publicConfig();
+    mockAvailable = checkout.provider === "mock" && activeProvider().id === "mock";
   } catch (e) {
     if (!(e instanceof PaymentUnavailableError)) throw e;
+  }
+  if (!mockAvailable) {
     return (
       <PublicShell storeName={storeName}>
-        <Notice title="ただいまお支払いを受け付けていません">お支払いは行われていません。お手数ですが、お店のスタッフにお知らせください。</Notice>
+        <Notice title="ただいまお支払いを受け付けていません" action={<Link href="/fortune" className="btn-gold inline-block rounded-2xl px-6 py-3 font-bold">占いを選び直す</Link>}>
+          お支払いは行われていません。お手数ですが、占いの選択からやり直してください。
+        </Notice>
       </PublicShell>
     );
   }
-  const { provider, publicKey } = config;
   return (
     <PublicShell storeName={storeName} step={2}>
       <h1 className="mb-4 font-serif text-2xl font-bold tracking-wide">お支払い</h1>
@@ -108,12 +113,8 @@ export default async function PaymentPage(props: PageProps<"/payment">) {
         </ul>
         <p className="mt-2 text-[11.5px] text-ink-muted">お支払い後、{item.inputLabel}を入力するとすぐに結果が表示されます。</p>
       </section>
-      <PurchaseSummary fortuneLabel={item.label} inputLabel={item.inputLabel} expiresAt={checkout.expiresAt} testPayment={provider === "mock"} />
-      <PaymentForm
-        provider={provider}
-        publicKey={publicKey}
-        initialStatus={checkout.status === "PROCESSING" ? "processing" : checkout.status === "FAILED" ? "failed" : "created"}
-      />
+      <PurchaseSummary fortuneLabel={item.label} inputLabel={item.inputLabel} expiresAt={checkout.expiresAt} mode="mock" />
+      <MockPaymentForm initialStatus={checkout.status === "PROCESSING" ? "processing" : checkout.status === "FAILED" ? "failed" : "created"} />
       <p className="mt-4 text-center">
         <Link href="/fortune" className="text-[12px] text-ink-muted underline underline-offset-4">
           占いを選び直す

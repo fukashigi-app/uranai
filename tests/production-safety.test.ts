@@ -75,11 +75,16 @@ describe("本番での無料テストモード・疑似決済の安全対策", (
     const env = { ...PROD, ENABLE_TEST_PAYMENT: "true", PAYMENT_PROVIDER: "mock", ALLOW_MOCK_PAYMENTS_IN_PRODUCTION: "true", PAYJP_SECRET_KEY: secret, PAYJP_PUBLIC_KEY: "pk_live_PUBLICVALUE" };
     const issues = productionConfigIssues(env);
     expect(issues.filter((i) => i.level === "error").map((i) => i.key).sort()).toEqual(["ALLOW_MOCK_PAYMENTS_IN_PRODUCTION", "CRON_SECRET", "ENABLE_TEST_PAYMENT", "PAYMENT_PROVIDER"]);
-    expect(issues.filter((i) => i.level === "warning").map((i) => i.key)).toEqual(["PAYJP_KEYS", "PAYJP_KEYS"]);
+    expect(issues.filter((i) => i.level === "warning").map((i) => i.key)).toEqual(["PAYJP_KEYS"]); // PAY.JP は廃止：削除を促す（1件にまとめる）
     expect(JSON.stringify(issues)).not.toContain("THIS_IS_SECRET_VALUE");
     expect(JSON.stringify(issues)).not.toContain("PUBLICVALUE");
     expect(productionConfigIssues({ ...env, VERCEL_ENV: "preview" })).toEqual([]);
-    expect(productionConfigIssues({ ...PROD, CRON_SECRET: "x".repeat(32), PAYJP_SECRET_KEY: "sk_live_a", PAYJP_PUBLIC_KEY: "pk_live_b" })).toEqual([]);
+    const payjpOnly = productionConfigIssues({ ...PROD, CRON_SECRET: "x".repeat(32), PAYJP_SECRET_KEY: "sk_live_a", PAYJP_PUBLIC_KEY: "pk_live_b" });
+    expect(payjpOnly.map((i) => [i.level, i.key])).toEqual([["warning", "PAYJP_KEYS"]]); // 停止はしない（読まないので課金できない）
+    expect(payjpOnly[0].message).toContain("PAYJP_PUBLIC_KEY・PAYJP_SECRET_KEY");
+    expect(JSON.stringify(payjpOnly)).not.toMatch(/sk_live_a|pk_live_b/);
+    expect(productionConfigIssues({ ...PROD, CRON_SECRET: "x".repeat(32), PAYMENT_PROVIDER: "payjp" }).map((i) => i.key)).toEqual(["PAYJP_KEYS"]);
+    expect(productionConfigIssues({ ...PROD, CRON_SECRET: "x".repeat(32) })).toEqual([]);
   });
 
   it("本番では PAYMENT_PROVIDER=mock・ALLOW_MOCK_PAYMENTS_IN_PRODUCTION=true でも疑似決済を使わず、決済の受付を止める（本番の決済へ自動で切り替えない）", async () => {

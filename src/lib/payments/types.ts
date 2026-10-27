@@ -1,6 +1,16 @@
-/** 決済代行サービスを差し替え可能にするための抽象。 */
+/**
+ * 疑似決済（自動テスト専用）の抽象。実際の決済は Stripe Checkout だけ（lib/payments/stripe-*.ts。この抽象は使わない）。
+ * PAY.JP は廃止した（決済・Webhook・カード入力フォームとも削除）。
+ */
 
-export type ProviderId = "payjp" | "mock";
+/** 新しい決済に使えるプロバイダ（疑似決済だけ） */
+export type ProviderId = "mock";
+
+/**
+ * 過去の記録に残っている可能性がある決済方法の値（読み取りだけ。新しい決済には使わない）。
+ * "payjp" の記録は削除・変更せず、集計・精算・管理画面では paymentProvider と livemode から判定する（lib/payments/kind.ts）。
+ */
+export type RecordedProviderId = ProviderId | "payjp" | "stripe";
 
 export type ChargeMetadata = {
   checkoutId: string;
