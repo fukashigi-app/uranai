@@ -21,8 +21,11 @@ Next.js 16 (App Router) / TypeScript / Tailwind CSS v4 / **Cloud Firestore（Fir
 - Firestore へは **Vercel 上のサーバーから Firebase Admin SDK でのみ**アクセスします。`firestore.rules` でブラウザからの読み書きは全面禁止です（Firebase Console の「ルール」に同じ内容を設定してください）。
 - 店舗ごとの閲覧制限は、これまでどおりサーバー側のコードで行います。
 - 二重計上防止: `transactions` のドキュメントIDを「決済会社_決済ID」にし、トランザクション内で存在確認します。
-- 集計はすべて「1つの等価条件」の検索なので、**複合インデックスの作成は不要**です。
-- コレクション: `users` `userEmails` `authSessions` `stores` `storeCodes` `storeUsers` `checkouts` `transactions` `fortuneSessions` `fortuneResults` `settlements` `webhookEvents` `auditLogs` `testFortuneLogs` `rateLimits`
+- 集計・決済・精算の検索は「等価条件だけ」か「同じフィールドの範囲と並べ替え」なので、単一フィールドのインデックス（自動）で動きます。
+- **例外：決済監視の一覧（`paymentAlerts`）は複合インデックスが必要**です（`firestore.indexes.json` に2件定義）。
+  デプロイの前に、接続先のプロジェクトへ適用してください（例：`firebase deploy --only firestore:indexes --project <プロジェクトID>`）。
+  適用前に運営画面の「決済監視」を開くと Firestore がエラーを返します。Firestore Emulator はインデックスを確かめないため、自動テストでは検出できません
+- コレクション: `users` `userEmails` `authSessions` `stores` `storeCodes` `storeUsers` `checkouts` `transactions` `fortuneSessions` `fortuneResults` `settlements` `settlementAdjustments` `paymentReviews` `paymentAlerts` `webhookEvents` `auditLogs` `testFortuneLogs` `rateLimits` `system`
 
 ### Firestore Emulator でのテスト（本番に触れない）
 
@@ -102,6 +105,7 @@ Stripe の E2E は、Firestore Emulator の `demo-` プロジェクトと、ス�
   一般のお客さんは公開中（`SITE_STATUS=open`）かつ `PAYMENT_PROVIDER=stripe` のときに使えます。テスト決済は売上・精算に含めません
 - **本番決済（Live）**：未実装・無効です（`STRIPE_LIVE_CHECKOUT` の判定だけがあり、決済の処理からは使っていません）
 - Webhook の URL は `https://<APP_URL>/api/webhooks/stripe`。必要なイベントは `docs/ARCHITECTURE.md` を参照
+- Vercel の Preview・Stripe の Sandbox での検証の手順は [docs/preview-verification.md](docs/preview-verification.md) を参照
 - 返金・異議申し立て（チャージバック）は Stripe API で状態を取り直して反映し、振込済みの月の取引は「精算の調整」として次回の精算で差し引きます
 - 記録と照合できない通知（店舗・金額の食い違いなど）は反映せず、運営画面の「決済要確認」に記録します
 

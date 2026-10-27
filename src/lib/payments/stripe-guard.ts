@@ -17,11 +17,15 @@
  *  - Vercel の本番（VERCEL_ENV=production）ではない
  *  - 実行場所が次のどちらか
  *      preview … Vercel の Preview。FIREBASE_PROJECT_ID が STRIPE_TEST_FIREBASE_PROJECT_ID（テスト用プロジェクト）と一致し、
- *                PRODUCTION_FIREBASE_PROJECT_ID・本番のプロジェクトID とは異なる
+ *                Preview 用のプロジェクト（uranai-preview）であり、PRODUCTION_FIREBASE_PROJECT_ID・本番のプロジェクトID とは異なる。
+ *                Firestore Emulator・STRIPE_API_BASE は使えない
  *      local   … ローカルの自動テスト。Firestore Emulator（localhost）の demo- プロジェクトだけ
  *  - STRIPE_SECRET_KEY が sk_test_、STRIPE_WEBHOOK_SECRET が whsec_ で始まる（本番用キー sk_live_ / rk_live_ は不可）
- *  - 危険な設定（本番の ENABLE_TEST_PAYMENT・mock、開発モードでの本番用決済キー）が無い
- * 利用できるのは運営アカウントだけ（stripe-access.ts で毎回確認する）。
+ *  - 危険な設定（本番の ENABLE_TEST_PAYMENT・mock、開発モードでの本番用決済キー）・本番決済のスイッチ（STRIPE_LIVE_*）が無い
+ * これは「Stripe との接続（Sandbox）を使ってよい環境か」の判定だけ。誰が決済できるかは stripe-access.ts で毎回確認する：
+ *  - 運営アカウントのテスト決済（/fortune?pay=stripe-test）… 運営アカウントでログイン中なら、開発モード・準備中でも使える
+ *  - 一般のお客さん（ログイン不要）… 公開中（SITE_STATUS=open）・PAYMENT_PROVIDER=stripe・無料テストが無効のときだけ（stripe-public.ts）
+ * どちらも Sandbox の決済（livemode=false）なので、売上・店舗の取り分・月次精算には含めない（payments/kind.ts）。
  * next.config やスクリプト・テストからも読み込めるよう、server-only に依存しない。
  */
 import { checkFirestoreTarget } from "@/lib/firestore/target-guard";
