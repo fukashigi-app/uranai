@@ -120,3 +120,27 @@ export function NewStoreUserForm({ action }: { action: Action }) {
     </ActionForm>
   );
 }
+
+/**
+ * 返金で止めた占い権利を戻す（理由の入力は必須・200文字まで）。画面の制御は補助で、権限・理由・戻せるかはサーバーで確かめる。
+ * 理由は監査ログだけに残す（お客さんには表示しない）。
+ */
+export function RestoreEntitlementForm({ action, maxLength }: { action: Action; maxLength: number }) {
+  const [state, formAction, pending] = useActionState(action, null);
+  return (
+    <form
+      action={formAction}
+      onSubmit={(e) => {
+        if (!window.confirm("占い権利を戻しますか？（有効期限は今から24時間。理由は監査ログに残ります）")) e.preventDefault();
+      }}
+      className="flex min-w-56 flex-col gap-2"
+    >
+      <textarea name="reason" required maxLength={maxLength} rows={2} placeholder="戻す理由（必須・監査ログに残ります）" aria-label="戻す理由" className="field !py-1.5 !text-[13px]" />
+      <button disabled={pending} className="btn-gold inline-flex h-10 items-center justify-center gap-2 rounded-xl px-4 text-[13px] disabled:opacity-60">
+        {pending ? <Spinner className="h-4 w-4" /> : null}
+        占い権利を戻す
+      </button>
+      {state?.message ? <p className={`max-w-md break-all text-[12px] ${state.ok ? "text-success" : "text-danger"}`}>{state.message}</p> : null}
+    </form>
+  );
+}

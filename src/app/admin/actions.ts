@@ -213,22 +213,24 @@ export async function changeAdminPasswordAction(_prev: FormState, fd: FormData):
 
 const stripeTxId = z.string().regex(/^stripe_[A-Za-z0-9_]{1,200}$/);
 
-/** Stripe のテスト決済：返金に失敗した決済の占い権利を戻す（Stripe API で返金の状態を取り直してから。監査ログに記録） */
-export async function restoreStripeEntitlementAction(transactionId: string, _prev: FormState): Promise<FormState> {
+/**
+ * Stripe の決済：返金で止めた占い権利を戻す（運営だけ。理由の入力は必須。監査ログに記録）。
+ * 権限の確認・入力の確認はここ（サーバー）で行う。戻せるかの判断は restoreStripeEntitlement（Stripe API で最新の状態を確かめてから）。
+ */
+export async function restoreStripeEntitlementAction(transactionId: string, _prev: FormState, fd: FormData): Promise<FormState> {
   const { actor } = await operator();
   if (!stripeTxId.safeParse(transactionId).success) throw new Error("invalid id");
   const { restoreStripeEntitlement } = await import("@/lib/payments/stripe-confirm");
+  const { RESTORE_OUTCOME_MESSAGE } = await import("@/lib/payments/stripe-sync-rules");
   let r: Awaited<ReturnType<typeof restoreStripeEntitlement>>;
   try {
-    r = await restoreStripeEntitlement(transactionId, actor);
+    r = await restoreStripeEntitlement(transactionId, actor, fd.get("reason"));
   } catch (e) {
     console.error("[admin] stripe entitlement restore failed", (e as Error).name);
-    return { message: "Stripe で返金の状態を確認できませんでした。少し時間をおいてから、もう一度お試しください。" };
+    return { message: "占い権利を戻せませんでした。少し時間をおいてから、もう一度お試しください。" };
   }
   revalidatePath("/admin/transactions");
-  if (r === "restored") return { ok: true, message: "占い権利を戻しました（有効期限は今から24時間）。" };
-  if (r === "refund_not_failed") return { message: "返金が失敗の状態ではないため、戻せません（返金が処理中・成功の可能性があります）。" };
-  return { message: "戻せる占い権利がありません（使用済み・返金で止めたものではない・すでに戻した、など）。" };
+  return r === "restored" ? { ok: true, message: RESTORE_OUTCOME_MESSAGE.restored } : { message: RESTORE_OUTCOME_MESSAGE[r] };
 }
 
 /** 決済要確認を確認済みにする（監査ログに記録） */

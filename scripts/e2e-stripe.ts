@@ -250,7 +250,7 @@ async function main() {
   assert.deepEqual([co2.status, co2.refundReason], ["REFUNDED", "refund"]);
   r = await webhook("charge.refunded", { id: pay2.charge, object: "charge" });
   assert.equal(((await r.json()) as { outcome: string }).outcome, "unchanged");
-  assert.equal(await restoreStripeEntitlement(t2.id, { userId: opId, role: "OPERATOR" }), "refund_not_failed"); // 返金が成功した権利は戻せない
+  assert.equal(await restoreStripeEntitlement(t2.id, { userId: opId, role: "OPERATOR" }, "テストの理由"), "payment_not_succeeded"); // 全額の返金が成功した権利は戻せない
   await ctl(`refund/${t1.get("stripeChargeId")}`);
   await webhook("charge.refunded", { id: t1.get("stripeChargeId"), object: "charge" });
   assert.equal((await fsdb().collection(C.transactions).doc(t1.id).get()).get("paymentStatus"), "REFUNDED");
@@ -401,7 +401,7 @@ async function main() {
   assert.deepEqual([(await fsdb().collection(C.checkouts).doc(p12.checkoutId).get()).get("status"), (await fsdb().collection(C.checkouts).doc(p12.checkoutId).get()).get("refundReason")], ["REFUNDED", "refund"]);
   r = await opR.req("/api/fortune", { method: "POST", json: { type: "ZODIAC", sign: "leo" } });
   assert.notEqual(r.status, 200, "返金の処理中に占えました");
-  assert.equal(await restoreStripeEntitlement(stripeTxIdOf(pay12.paymentIntent!), { userId: opId, role: "OPERATOR" }), "refund_not_failed"); // 処理中は戻せない
+  assert.equal(await restoreStripeEntitlement(stripeTxIdOf(pay12.paymentIntent!), { userId: opId, role: "OPERATOR" }, "テストの理由"), "refund_pending"); // 処理中は戻せない
   await ctl(`refund-status/${rf12.refund}`, { status: "failed" });
   r = await webhook("refund.failed", { id: rf12.refund, object: "refund", charge: pay12.charge });
   assert.equal(((await r.json()) as { outcome: string }).outcome, "refund_failed");
@@ -419,13 +419,25 @@ async function main() {
   const adminHtml = await (await op.req("/admin/transactions")).text();
   assert.match(adminHtml, /返金の確認が必要な決済/);
   assert.match(adminHtml, /占い権利を戻す/);
-  assert.equal(await restoreStripeEntitlement(t12.id, { userId: opId, role: "OPERATOR" }), "restored");
-  assert.equal(await restoreStripeEntitlement(t12.id, { userId: opId, role: "OPERATOR" }), "not_eligible"); // 2回目は何もしない
+  assert.match(adminHtml, /name="reason"/, "理由の入力欄がありません");
+  // 権限：店舗アカウントには 404、ログインなしはログイン画面へ（画面のボタンではなくサーバーで確認する）
+  assert.equal((await staff.req("/admin/transactions")).status, 404);
+  assert.ok([302, 303, 307].includes((await new Client().req("/admin/transactions")).status));
+  assert.equal(await restoreStripeEntitlement(t12.id, { userId: opId, role: "OPERATOR" }, "   "), "reason_required"); // 理由が無ければ戻さない
+  assert.equal(await restoreStripeEntitlement(t12.id, { userId: opId, role: "OPERATOR" }, "あ".repeat(201)), "reason_too_long");
+  assert.equal(await restoreStripeEntitlement(t12.id, { userId: opId, role: "OPERATOR" }, "返金が失敗したため、お客さまに確認して戻す"), "restored");
+  assert.equal(await restoreStripeEntitlement(t12.id, { userId: opId, role: "OPERATOR" }, "2回目"), "entitlement_not_suspended"); // 2回目は何もしない
   const ent12 = await fsdb().collection(C.fortuneSessions).doc(t12.id).get();
   assert.deepEqual([ent12.get("status"), ent12.get("suspendedByRefund"), ent12.get("restoredBy")], ["PAID", false, opId]);
   assert.equal((await fsdb().collection(C.transactions).doc(t12.id).get()).get("refundNeedsReview"), false);
   const audits = await fsdb().collection(C.auditLogs).where("targetId", "==", t12.id).get();
   assert.deepEqual(audits.docs.map((d) => [d.get("action"), d.get("actorUserId")]), [["stripe_test.entitlement_restored", opId]]);
+  const au12 = audits.docs[0];
+  assert.deepEqual(
+    [au12.get("after").reason, au12.get("after").refundState, au12.get("before").refundStatus, au12.get("before").amountRefunded, au12.get("before").refundFailedAmount, au12.get("before").checkout, au12.get("after").checkout, au12.get("before").fortuneSession, au12.get("after").fortuneSession],
+    ["返金が失敗したため、お客さまに確認して戻す", "failed", "failed", 0, 100, "REFUNDED", "SUCCEEDED", "EXPIRED", "PAID"],
+  );
+  assert.ok(au12.get("createdAt") && au12.get("after").restoredAt, "操作日時がありません");
   // 権利を戻すと、注文も同じトランザクションで SUCCEEDED に戻る
   const co12 = (await fsdb().collection(C.checkouts).doc(p12.checkoutId).get()).data()!;
   assert.deepEqual([co12.status, co12.refundReason], ["SUCCEEDED", null]);
@@ -849,6 +861,147 @@ async function main() {
   st13 = await stateOf(b.p.checkoutId);
   assert.deepEqual([st13.co.status, st13.co.refundReason], ["REFUNDED", "chargeback"]);
   step("同時実行・再送：返金の通知（同じ ID の重複を含む）と確定の通知が同時でも REFUNDED・権利停止で一致。再送・古い確定の通知で戻らない。返金の後の敗訴は理由を chargeback に");
+
+  // ---- 15. 運営による権利の復旧の安全対策（理由必須・Stripe の最新の状態で判断・同時の操作でも1回） ----
+  const OPR = { userId: opId, role: "OPERATOR" as const };
+  const OPR2 = { userId: op2Id, role: "OPERATOR" as const };
+  const auditsOf = async (txId: string) => (await fsdb().collection(C.auditLogs).where("targetId", "==", txId).where("action", "==", "stripe_test.entitlement_restored").get()).docs;
+  const toDismiss: string[] = [];
+
+  // 15a. 一部の返金：理由なしは戻さない・理由ありで戻す（権利 PAID・注文 SUCCEEDED・監査ログに理由と返金額）。その後は占える
+  b = await buy();
+  assert.equal(await outcomeOf(await completed(b.p.sessionId)), "confirmed");
+  await ctl(`refund/${b.charge}`, { amount: 30 });
+  assert.equal(await outcomeOf(await webhook("charge.refunded", { id: b.charge, object: "charge" })), "partial");
+  st13 = await stateOf(b.p.checkoutId);
+  assert.deepEqual([st13.fs.get("status"), st13.co.status], ["EXPIRED", "REFUNDED"]);
+  let html15 = await op.req("/admin/transactions").then((x) => x.text());
+  assert.match(html15, /一部返金/);
+  assert.equal(await restoreStripeEntitlement(st13.t.id, OPR, ""), "reason_required");
+  assert.equal((await auditsOf(st13.t.id)).length, 0);
+  assert.equal(await restoreStripeEntitlement(st13.t.id, OPR, "一部返金の後、残りの代金で占いを提供するため"), "restored");
+  st13 = await stateOf(b.p.checkoutId);
+  assert.deepEqual([st13.fs.get("status"), st13.fs.get("suspendedByRefund"), st13.co.status, st13.co.refundReason, st13.t.get("refundNeedsReview")], ["PAID", false, "SUCCEEDED", null, false]);
+  let au15 = await auditsOf(st13.t.id);
+  assert.equal(au15.length, 1);
+  assert.deepEqual([au15[0].get("actorUserId"), au15[0].get("after").reason, au15[0].get("after").refundState, au15[0].get("before").amountRefunded], [opId, "一部返金の後、残りの代金で占いを提供するため", "partial", 30]);
+  assert.deepEqual(await (await b.c.req("/api/checkout/status")).json(), { status: "succeeded" });
+  // 理由はお客さんの画面に出さない
+  assert.doesNotMatch(await (await b.c.req(`/payment/return?session_id=${b.p.sessionId}`)).text().catch(() => ""), /残りの代金で占いを提供するため/);
+  // 権利を戻した後に、止めない通知（対応中の異議申し立て）が届いても、注文は SUCCEEDED・権利は PAID のまま
+  const d15a = await ctl(`dispute/${b.charge}`, { amount: 70 });
+  assert.equal(await outcomeOf(await webhook("charge.dispute.created", { id: d15a.dispute, object: "dispute" })), "dispute_open");
+  st13 = await stateOf(b.p.checkoutId);
+  assert.deepEqual([st13.fs.get("status"), st13.co.status], ["PAID", "SUCCEEDED"], "戻した権利と注文の状態がずれました");
+  assert.equal((await b.c.req("/api/fortune", { method: "POST", json: { type: "ZODIAC", sign: "leo" } })).status, 200);
+  assert.equal(await restoreStripeEntitlement(st13.t.id, OPR, "使用済みの確認"), "dispute_open"); // 異議申し立ての対応中は戻さない（使用済みの確認より先）
+  step("一部の返金：理由なしは戻さない（監査ログなし）→ 理由ありで戻す（権利 PAID・注文 SUCCEEDED・監査ログに運営・理由・返金額）。戻した後の対応中の異議申し立てでも注文・権利はそのまま。お客さんの画面に理由は出ない");
+
+  // 15b. 返金の失敗の後の異議申し立て：対応中・敗訴（一部の額。決済は SUCCEEDED のまま）とも戻さない
+  b = await buy();
+  assert.equal(await outcomeOf(await completed(b.p.sessionId)), "confirmed");
+  const rf15b = await ctl(`refund/${b.charge}`, { status: "pending" });
+  await webhook("refund.created", { id: rf15b.refund, object: "refund", charge: b.charge });
+  await ctl(`refund-status/${rf15b.refund}`, { status: "failed" });
+  assert.equal(await outcomeOf(await webhook("refund.failed", { id: rf15b.refund, object: "refund", charge: b.charge })), "refund_failed");
+  const d15b = await ctl(`dispute/${b.charge}`, { amount: 40 });
+  await webhook("charge.dispute.created", { id: d15b.dispute, object: "dispute" });
+  st13 = await stateOf(b.p.checkoutId);
+  toDismiss.push(st13.t.id);
+  assert.equal(await restoreStripeEntitlement(st13.t.id, OPR, "異議申し立て中"), "dispute_open");
+  html15 = await op.req("/admin/transactions").then((x) => x.text());
+  assert.match(html15, /data-restore-blocked="dispute_open"/, "戻せない理由が管理画面にありません");
+  await ctl(`dispute-status/${d15b.dispute}`, { status: "lost" });
+  // 通知を送らなくても、操作のときに Stripe の最新の状態（敗訴）を反映してから判断する
+  assert.equal(await restoreStripeEntitlement(st13.t.id, OPR, "敗訴の後"), "dispute_lost");
+  st13 = await stateOf(b.p.checkoutId);
+  assert.deepEqual([st13.t.get("paymentStatus"), st13.t.get("disputeStatus"), st13.fs.get("status"), st13.co.status, st13.co.refundReason], ["SUCCEEDED", "lost", "EXPIRED", "REFUNDED", "chargeback"]);
+  assert.equal((await auditsOf(st13.t.id)).length, 0);
+  step("返金の失敗の後の異議申し立て：対応中・敗訴（一部の額で決済は SUCCEEDED のまま）とも戻さない。敗訴は通知が無くても操作のときに Stripe の最新の状態で判断。管理画面に戻せない理由を表示");
+
+  // 15c. Stripe API の取得の失敗・検証できない状態：戻さない
+  b = await buy();
+  assert.equal(await outcomeOf(await completed(b.p.sessionId)), "confirmed");
+  const rf15c = await ctl(`refund/${b.charge}`, { status: "pending" });
+  await webhook("refund.created", { id: rf15c.refund, object: "refund", charge: b.charge });
+  await ctl(`refund-status/${rf15c.refund}`, { status: "failed" });
+  await webhook("refund.failed", { id: rf15c.refund, object: "refund", charge: b.charge });
+  st13 = await stateOf(b.p.checkoutId);
+  toDismiss.push(st13.t.id);
+  for (const path of [/^\/v1\/disputes$/, /^\/v1\/refunds$/, /^\/v1\/charges\//]) {
+    fake.failPaths = [path];
+    assert.equal(await restoreStripeEntitlement(st13.t.id, OPR, "障害中"), "stripe_unavailable", `Stripe を確認できないのに戻しました（${path}）`);
+  }
+  fake.failPaths = [];
+  const d15c = await ctl(`dispute/${b.charge}`, { currency: "usd" });
+  assert.equal(await restoreStripeEntitlement(st13.t.id, OPR, "検証できない"), "stripe_unverified");
+  fake.disputes.delete(d15c.dispute!);
+  // 記録と Stripe の決済が一致しない（店舗の食い違い）
+  await ctl(`pi-metadata/${b.pi}`, { metadataStoreId: storeB.id });
+  assert.equal(await restoreStripeEntitlement(st13.t.id, OPR, "決済の食い違い"), "payment_mismatch");
+  await ctl(`pi-metadata/${b.pi}`, { metadataStoreId: storeA.id });
+  st13 = await stateOf(b.p.checkoutId);
+  assert.deepEqual([st13.fs.get("status"), st13.co.status], ["EXPIRED", "REFUNDED"]);
+  assert.equal((await auditsOf(st13.t.id)).length, 0);
+  // Webhook が届いていない新しい返金（処理中）：操作のときに反映して、処理中として戻さない
+  await ctl(`refund/${b.charge}`, { status: "pending" });
+  assert.equal(await restoreStripeEntitlement(st13.t.id, OPR, "新しい返金"), "refund_pending");
+  step("Stripe API の取得の失敗（異議申し立て・返金・Charge）・検証できない状態・決済の食い違いでは戻さない（監査ログなし）。通知の届いていない新しい返金も操作のときに反映して判断");
+
+  // 15d. 確認の途中で状態が変わった（Stripe を確かめた直後に新しい返金）：古い確認のまま戻さない
+  b = await buy();
+  assert.equal(await outcomeOf(await completed(b.p.sessionId)), "confirmed");
+  const rf15d = await ctl(`refund/${b.charge}`, { status: "pending" });
+  await webhook("refund.created", { id: rf15d.refund, object: "refund", charge: b.charge });
+  await ctl(`refund-status/${rf15d.refund}`, { status: "failed" });
+  await webhook("refund.failed", { id: rf15d.refund, object: "refund", charge: b.charge });
+  st13 = await stateOf(b.p.checkoutId);
+  toDismiss.push(st13.t.id);
+  fake.afterRefundListOnce.set(b.charge, () => void fakeStripe.addRefund(b.charge, { status: "pending" }));
+  assert.equal(await restoreStripeEntitlement(st13.t.id, OPR, "途中で変わる"), "state_changed");
+  st13 = await stateOf(b.p.checkoutId);
+  assert.deepEqual([st13.t.get("refundStatus"), st13.fs.get("status"), st13.co.status], ["pending", "EXPIRED", "REFUNDED"]);
+  assert.equal((await auditsOf(st13.t.id)).length, 0);
+  step("Stripe を確かめた後・書き込みの前に返金の状態が変わったら state_changed で戻さない（最新の処理中の状態を記録）");
+
+  // 15e. 二重の操作・運営2人の同時の操作：成功は1回だけ（権利・注文・監査ログ）
+  b = await buy();
+  assert.equal(await outcomeOf(await completed(b.p.sessionId)), "confirmed");
+  const rf15e = await ctl(`refund/${b.charge}`, { status: "pending" });
+  await webhook("refund.created", { id: rf15e.refund, object: "refund", charge: b.charge });
+  await ctl(`refund-status/${rf15e.refund}`, { status: "failed" });
+  await webhook("refund.failed", { id: rf15e.refund, object: "refund", charge: b.charge });
+  st13 = await stateOf(b.p.checkoutId);
+  const both15 = await Promise.all([restoreStripeEntitlement(st13.t.id, OPR, "運営1の理由"), restoreStripeEntitlement(st13.t.id, OPR2, "運営2の理由"), restoreStripeEntitlement(st13.t.id, OPR, "運営1の2回目")]);
+  assert.equal(both15.filter((x) => x === "restored").length, 1, `同時の操作で復旧が1回ではありません: ${both15}`);
+  assert.ok(both15.filter((x) => x !== "restored").every((x) => x === "entitlement_not_suspended" || x === "state_changed"), String(both15));
+  au15 = await auditsOf(st13.t.id);
+  assert.equal(au15.length, 1, "同時の操作で監査ログが1件ではありません");
+  st13 = await stateOf(b.p.checkoutId);
+  assert.deepEqual([st13.fs.get("status"), st13.fs.get("restoredBy"), st13.co.status], ["PAID", au15[0].get("actorUserId"), "SUCCEEDED"]);
+  step("二重の操作・運営2人の同時の操作：成功は1回（権利 PAID・注文 SUCCEEDED・監査ログ1件・操作した運営が一致）");
+
+  // 15f. 使用済みの権利は戻さない
+  b = await buy();
+  assert.equal(await outcomeOf(await completed(b.p.sessionId)), "confirmed");
+  assert.equal((await b.c.req("/api/fortune", { method: "POST", json: { type: "ZODIAC", sign: "leo" } })).status, 200);
+  const rf15f = await ctl(`refund/${b.charge}`, { status: "pending" });
+  await webhook("refund.created", { id: rf15f.refund, object: "refund", charge: b.charge });
+  await ctl(`refund-status/${rf15f.refund}`, { status: "failed" });
+  await webhook("refund.failed", { id: rf15f.refund, object: "refund", charge: b.charge });
+  st13 = await stateOf(b.p.checkoutId);
+  toDismiss.push(st13.t.id);
+  assert.equal(st13.fs.get("status"), "USED");
+  assert.equal(await restoreStripeEntitlement(st13.t.id, OPR, "使用済み"), "entitlement_used");
+  // 全額の返金済み・チャージバックも戻さない
+  b = await buy();
+  await ctl(`refund/${b.charge}`);
+  assert.equal(await outcomeOf(await completed(b.p.sessionId)), "refunded");
+  assert.equal(await restoreStripeEntitlement((await stateOf(b.p.checkoutId)).t.id, OPR, "全額返金"), "payment_not_succeeded");
+  step("使用済みの権利・全額の返金済みの決済は戻さない");
+
+  // 次の実行の前半の「確認が必要な決済が無い」の確認に残さない
+  for (const id of toDismiss) await dismissStripeRefundReview(id, OPR);
 
   console.log("\nSTRIPE E2E PASSED");
 }

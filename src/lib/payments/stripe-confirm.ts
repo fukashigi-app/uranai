@@ -15,7 +15,21 @@ import { writeAudit } from "@/lib/firestore/audit";
 import { reconcileTransactionInTx, settlementRefForTx } from "@/lib/firestore/settlement-adjustments";
 import { recordPaymentReview, type PaymentReviewInput } from "@/lib/firestore/payment-reviews";
 import type { DisputeState } from "./settlement-rules";
-import { chargeMismatches, decideCheckoutAfterSync, decideConfirmState, decideDisputeSync, decideRefundSync, disputeAmountProblem, disputeKeyOf, isOurPayment, refundKeyOf } from "./stripe-sync-rules";
+import {
+  chargeMismatches,
+  decideCheckoutAfterSync,
+  decideConfirmState,
+  decideDisputeSync,
+  decideEntitlementRestore,
+  decideRefundSync,
+  disputeAmountProblem,
+  disputeKeyOf,
+  isOurPayment,
+  normalizeRestoreReason,
+  refundKeyOf,
+  RESTORE_REASON_MAX,
+  type RestoreOutcomeCode,
+} from "./stripe-sync-rules";
 import { recordPaymentAlert } from "@/lib/firestore/payment-alerts";
 import { alertModeOf } from "./monitor-rules";
 import {
@@ -24,6 +38,7 @@ import {
   isStripeSessionId,
   listStripeRefunds,
   readStripeChargeAdjustments,
+  StripeAdjustmentsUnverifiedError,
   retrieveStripeCharge,
   retrieveStripeDispute,
   retrieveStripePaymentIntent,
@@ -376,7 +391,7 @@ async function linkedCheckoutInTx(tx: Transaction, t: DocumentSnapshot): Promise
 }
 
 /** 反映の後の決済の状態に合わせて、注文を REFUNDED にする（決済記録・権利の更新と同じトランザクション。REFUNDED から自動では戻さない） */
-function updateCheckoutAfterSync(tx: Transaction, co: DocumentSnapshot | null, after: { refundStatus: unknown; disputeStatus: unknown }) {
+function updateCheckoutAfterSync(tx: Transaction, co: DocumentSnapshot | null, after: { refundStatus: unknown; disputeStatus: unknown; entitlementActive: boolean }) {
   if (!co) return;
   const next = decideCheckoutAfterSync({ status: co.get("status"), refundReason: co.get("refundReason") }, after);
   if (next) tx.update(co.ref, { ...next, updatedAt: FieldValue.serverTimestamp() });
@@ -426,7 +441,7 @@ export async function syncStripeRefunds(chargeId: string, rt?: StripeRuntime, ev
       tx.update(sessionRef, { status: "EXPIRED", suspendedByRefund: true, suspendedAt: new Date() });
     }
     // 注文も同じトランザクションで REFUNDED にする（返金の処理中・成功・一部。返金の失敗では戻さない）
-    updateCheckoutAfterSync(tx, co, { refundStatus: summary.state, disputeStatus: t.get("disputeStatus") });
+    updateCheckoutAfterSync(tx, co, { refundStatus: summary.state, disputeStatus: t.get("disputeStatus"), entitlementActive: fs.exists && fs.get("status") === "PAID" && !d.suspendEntitlement });
     const outcome = d.outcome;
     return { outcome, review: adj.review ? { ...adj.review, eventType: eventType ?? null } : undefined };
   });
@@ -504,7 +519,7 @@ export async function syncStripeDispute(disputeId: string, rt?: StripeRuntime, e
     // 敗訴：未使用の権利を止める（使用済みはそのまま）
     if (d.suspendEntitlement && fs.exists && fs.get("status") === "PAID") tx.update(sessionRef, { status: "EXPIRED", suspendedByDispute: true, suspendedAt: new Date() });
     // 注文も同じトランザクションで REFUNDED（chargeback）にする（勝訴では戻さない）
-    updateCheckoutAfterSync(tx, co, { refundStatus: t.get("refundStatus"), disputeStatus: d.state });
+    updateCheckoutAfterSync(tx, co, { refundStatus: t.get("refundStatus"), disputeStatus: d.state, entitlementActive: fs.exists && fs.get("status") === "PAID" && !d.suspendEntitlement });
     const outcome = d.outcome;
     return { outcome, review: adj.review ? { ...adj.review, eventType: eventType ?? null } : undefined, state: d.state };
   });
@@ -524,7 +539,9 @@ export type StripeRefundReview = {
   refundStatus: string;
   paymentMethod: string | null;
   paidAt: Date;
-  entitlement: "suspended" | "used" | "active" | "expired" | "missing";
+  entitlement: "suspended" | "suspended_by_dispute" | "used" | "active" | "expired" | "missing";
+  /** 戻せない理由（記録の今の状態から。null なら理由を入力して戻せる。最終の判断は操作のときに Stripe の最新の状態で行う） */
+  restoreBlocked: RestoreOutcomeCode | null;
 };
 
 /** 返金の確認が必要な決済（管理画面） */
@@ -534,7 +551,17 @@ export async function listStripeRefundReviews(): Promise<StripeRefundReview[]> {
   const sessions = docs.length ? await fsdb().getAll(...docs.map((d) => fsdb().collection(C.fortuneSessions).doc(d.id))) : [];
   return docs.map((d, i) => {
     const s = sessions[i];
-    const entitlement = !s?.exists ? "missing" : s.get("status") === "USED" ? "used" : s.get("status") === "PAID" ? "active" : s.get("suspendedByRefund") === true ? "suspended" : "expired";
+    const entitlement = !s?.exists ? "missing" : s.get("status") === "USED" ? "used" : s.get("status") === "PAID" ? "active" : s.get("suspendedByDispute") === true ? "suspended_by_dispute" : s.get("suspendedByRefund") === true ? "suspended" : "expired";
+    // 画面の案内用（理由の入力以外の条件だけを見る）
+    const pre = decideEntitlementRestore(
+      {
+        paymentStatus: d.get("paymentStatus"),
+        refundStatus: d.get("refundStatus"),
+        disputeStatus: d.get("disputeStatus"),
+        entitlement: { exists: Boolean(s?.exists), status: s?.get("status"), suspendedByRefund: s?.get("suspendedByRefund"), suspendedByDispute: s?.get("suspendedByDispute"), usedAt: s?.get("usedAt") },
+      },
+      "(check)",
+    );
     return {
       transactionId: d.id,
       storeId: String(d.get("storeId")),
@@ -545,40 +572,87 @@ export async function listStripeRefundReviews(): Promise<StripeRefundReview[]> {
       paymentMethod: typeof d.get("stripePaymentMethod") === "string" ? d.get("stripePaymentMethod") : null,
       paidAt: mustDate(d.get("paidAt")),
       entitlement,
+      restoreBlocked: pre.ok ? null : pre.deny,
     };
   });
 }
 
 type Actor = { userId: string; role: "OPERATOR" };
-export type RestoreOutcome = "restored" | "not_eligible" | "refund_not_failed";
+export type RestoreOutcome = RestoreOutcomeCode;
 
 /**
- * 返金に失敗した決済の占い権利を戻す（運営の操作。監査ログに残す）。
- * Stripe API で返金の状態を取り直し、返金が成功・処理中でない（すべて失敗・取り消し）ことを確かめてから、
- * 返金で止めた未使用の権利だけを PAID に戻す（有効期限は戻した時点から24時間）。2回目以降は何もしない。
+ * 返金で止めた占い権利を戻す（運営の理由付きの操作。権限の確認は呼び出し側（運営画面のサーバーの処理）で行う）。
+ *  1. 決済記録が Stripe の決済で、今のモードの決済であること（別のモードは Stripe にも問い合わせない）
+ *  2. 理由が入力されていること（Stripe に問い合わせる前に確かめる）
+ *  3. Stripe API から Charge・PaymentIntent・返金・異議申し立ての最新の状態を取得・検証し、決済記録と一致すること
+ *     （取得の失敗は stripe_unavailable、検証できない内容は stripe_unverified、食い違いは payment_mismatch。どれも戻さない）
+ *  4. 最新の状態を決済記録に反映してから（syncStripeRefunds・syncStripeDispute）、1つのトランザクションで判断・書き込み：
+ *     - 決済記録の状態が、3 で Stripe から確かめた状態（キー）と同じこと（途中で通知が届いて変わっていれば state_changed）
+ *     - decideEntitlementRestore の条件（返金がすべて失敗・一部の返金、異議申し立てが対応中・敗訴でない、未使用、返金で止めた権利）
+ *     - 権利を PAID（有効期限は今から24時間）、注文を SUCCEEDED（REFUNDED から戻すのはこの操作だけ）、監査ログ（理由・前後の状態・返金の状態と額）
+ * 同じ権利を同時に・2回戻そうとしても、トランザクションの中で「返金で止めた権利」を確かめるので、成功するのは1回だけ（監査ログも1件）。
  */
-export async function restoreStripeEntitlement(transactionId: string, actor: Actor, rt?: StripeRuntime): Promise<RestoreOutcome> {
+export async function restoreStripeEntitlement(transactionId: string, actor: Actor, reasonInput: unknown, rt?: StripeRuntime): Promise<RestoreOutcome> {
   if (!/^stripe_[A-Za-z0-9_]{1,200}$/.test(transactionId)) return "not_eligible";
+  const r0 = rt ?? stripeRuntime();
   const txRef = fsdb().collection(C.transactions).doc(transactionId);
   const first = await txRef.get();
   const chargeId = first.get("stripeChargeId");
   if (!first.exists || first.get("paymentProvider") !== STRIPE_PROVIDER || typeof chargeId !== "string") return "not_eligible";
   // 別のモードの決済（テストの環境で本番の決済など）は扱わない（Stripe にも問い合わせない）
-  if (first.get("livemode") !== ((rt ?? stripeRuntime()).mode === "live")) return "not_eligible";
-  await syncStripeRefunds(chargeId, rt); // 最新の返金の状態を反映してから判断する
+  if (first.get("livemode") !== (r0.mode === "live")) return "not_eligible";
+  const reason = normalizeRestoreReason(reasonInput);
+  if (!reason) return "reason_required";
+  if ([...reason].length > RESTORE_REASON_MAX) return "reason_too_long";
+
+  // Stripe の最新の状態（取得・検証できなければ戻さない）
+  let verified: { refundKey: string | null; disputeKey: string | null; disputeId: string | null };
+  try {
+    const charge = await retrieveStripeCharge(chargeId, r0);
+    if (charge.livemode !== (r0.mode === "live")) return "not_eligible";
+    const piId = idOfRef(charge.payment_intent);
+    if (!piId || stripeTransactionId(piId) !== transactionId) return "payment_mismatch";
+    const pi = await retrieveStripePaymentIntent(piId, r0);
+    if (chargeMismatches(first.data()!, charge, pi).length) return "payment_mismatch";
+    const adj = await readStripeChargeAdjustments({ id: charge.id, amount: charge.amount, livemode: charge.livemode }, r0);
+    verified = { refundKey: adj.refunds.state === "none" ? null : refundKeyOf(adj.refunds), disputeKey: adj.dispute ? disputeKeyOf(adj.dispute) : null, disputeId: adj.dispute?.id ?? null };
+    // 最新の状態を決済記録に反映してから判断する（Webhook が遅れていても、Stripe の今の状態で判断する）
+    await syncStripeRefunds(charge.id, r0, "entitlement_restore");
+    if (verified.disputeId) await syncStripeDispute(verified.disputeId, r0, "entitlement_restore");
+  } catch (e) {
+    if (e instanceof StripeAdjustmentsUnverifiedError) {
+      console.error("[stripe] entitlement restore: refunds/disputes could not be verified", { transactionId, reason: e.reason });
+      return "stripe_unverified";
+    }
+    console.error("[stripe] entitlement restore: Stripe check failed", { transactionId, error: (e as Error)?.name });
+    return "stripe_unavailable";
+  }
+
   const sessionRef = fsdb().collection(C.fortuneSessions).doc(transactionId);
-  return fsdb().runTransaction(async (tx) => {
+  return fsdb().runTransaction(async (tx): Promise<RestoreOutcome> => {
     const [t, fs] = await Promise.all([tx.get(txRef), tx.get(sessionRef)]);
-    if (t.get("refundStatus") !== "failed" || t.get("paymentStatus") !== "SUCCEEDED") return "refund_not_failed" as const;
-    if (!fs.exists || fs.get("status") !== "EXPIRED" || fs.get("suspendedByRefund") !== true || fs.get("usedAt")) return "not_eligible" as const;
+    if (!t.exists) return "not_eligible";
     const co = await linkedCheckoutInTx(tx, t);
-    const expiresAt = new Date(Date.now() + FORTUNE_SESSION_TTL_MS);
-    tx.update(sessionRef, { status: "PAID", suspendedByRefund: false, expiresAt, restoredAt: new Date(), restoredBy: actor.userId });
-    // 返金で REFUNDED にした注文は、権利と同じトランザクションで SUCCEEDED に戻す（占いを始められる状態と注文の状態をそろえる）。
-    // チャージバック（chargeback）の注文は戻さない
-    const checkoutRestored = co?.get("status") === "REFUNDED" && co.get("refundReason") === "refund";
-    if (checkoutRestored) tx.update(co!.ref, { status: "SUCCEEDED", refundReason: null, updatedAt: FieldValue.serverTimestamp() });
-    tx.update(txRef, { refundNeedsReview: false, refundReviewedAt: new Date(), refundReviewResult: "entitlement_restored", updatedAt: FieldValue.serverTimestamp() });
+    // Stripe で確かめた状態と記録が同じこと（確かめた後に通知などで変わっていれば、古い確認のまま戻さない）
+    if ((t.get("refundKey") ?? null) !== verified.refundKey || (t.get("disputeKey") ?? null) !== verified.disputeKey) return "state_changed";
+    // 決済記録に紐付いた注文（確定の注文）があり、占いを始められる・返金で止めた注文であること
+    if (!co || (co.get("status") !== "SUCCEEDED" && co.get("status") !== "REFUNDED")) return "payment_mismatch";
+    const d = decideEntitlementRestore(
+      {
+        paymentStatus: t.get("paymentStatus"),
+        refundStatus: t.get("refundStatus"),
+        disputeStatus: t.get("disputeStatus"),
+        entitlement: { exists: fs.exists, status: fs.get("status"), suspendedByRefund: fs.get("suspendedByRefund"), suspendedByDispute: fs.get("suspendedByDispute"), usedAt: fs.get("usedAt") },
+      },
+      reason,
+    );
+    if (!d.ok) return d.deny;
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + FORTUNE_SESSION_TTL_MS);
+    tx.update(sessionRef, { status: "PAID", suspendedByRefund: false, expiresAt, restoredAt: now, restoredBy: actor.userId });
+    // REFUNDED から SUCCEEDED に戻すのは、この操作（理由付きの手動の復旧）だけ
+    if (co.get("status") === "REFUNDED") tx.update(co.ref, { status: "SUCCEEDED", refundReason: null, updatedAt: FieldValue.serverTimestamp() });
+    tx.update(txRef, { refundNeedsReview: false, refundReviewedAt: now, refundReviewResult: "entitlement_restored", updatedAt: FieldValue.serverTimestamp() });
     await writeAudit(
       {
         actorUserId: actor.userId,
@@ -587,12 +661,23 @@ export async function restoreStripeEntitlement(transactionId: string, actor: Act
         targetType: "transaction",
         targetId: transactionId,
         storeId: String(t.get("storeId")),
-        before: { fortuneSession: "EXPIRED", refundStatus: "failed", ...(checkoutRestored ? { checkout: "REFUNDED" } : {}) },
-        after: { fortuneSession: "PAID", expiresAt: expiresAt.toISOString(), ...(checkoutRestored ? { checkout: "SUCCEEDED" } : {}) },
+        before: {
+          fortuneSession: fs.get("status"),
+          suspendedByRefund: fs.get("suspendedByRefund") === true,
+          checkout: co.get("status"),
+          checkoutRefundReason: co.get("refundReason") ?? null,
+          paymentStatus: t.get("paymentStatus"),
+          refundStatus: t.get("refundStatus"),
+          amountRefunded: Number(t.get("amountRefunded") ?? 0),
+          refundPendingAmount: Number(t.get("refundPendingAmount") ?? 0),
+          refundFailedAmount: Number(t.get("refundFailedAmount") ?? 0),
+          disputeStatus: t.get("disputeStatus") ?? null,
+        },
+        after: { fortuneSession: "PAID", expiresAt: expiresAt.toISOString(), checkout: "SUCCEEDED", restoredAt: now.toISOString(), reason: d.reason, refundState: d.refundState, chargeId: t.get("stripeChargeId") },
       },
       tx,
     );
-    return "restored" as const;
+    return "restored";
   });
 }
 

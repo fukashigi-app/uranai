@@ -194,7 +194,7 @@ async function main() {
   assert.deepEqual([t1r.get("paymentStatus"), t1r.get("countable"), t1r.get("livemode")], ["REFUNDED", false, true]);
   // テストの接続では本番の返金を扱わない（Stripe も別のモードの Charge は「見つからない」と返す。記録は変わらない）
   await assert.rejects(syncStripeRefunds(String(t1.get("stripeChargeId")), test), /No such charge/);
-  assert.equal(await restoreStripeEntitlement(t1.id, { userId: "op-unit", role: "OPERATOR" }, test), "not_eligible");
+  assert.equal(await restoreStripeEntitlement(t1.id, { userId: "op-unit", role: "OPERATOR" }, "モードの違う決済", test), "not_eligible");
   assert.equal((await fsdb().collection(C.transactions).doc(t1.id).get()).get("paymentStatus"), "REFUNDED");
   assert.deepEqual(await monthTotals(ym, store.id), { count: 1, gross: 100, storeShare: 30, operatorShare: 70, fee: 4 });
   step("本番モードの返金：処理中 → 成功で REFUNDED・countable=false、売上から外れる（2件→1件）。同時の通知でも反映は1回。テストの接続では扱わない");

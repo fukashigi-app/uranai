@@ -346,11 +346,41 @@ export function checkoutRefundReasonOf(refundStatus: unknown, disputeStatus: unk
  *  - 決済の今の状態が返金（処理中・成功・一部）か敗訴なら、SUCCEEDED の注文を REFUNDED にする（理由も今の状態に合わせる）
  *  - REFUNDED から SUCCEEDED には戻さない（返金の失敗・勝訴でも自動では戻さない。権利の復旧は運営の操作だけ）
  *  - SUCCEEDED・REFUNDED 以外の注文（決済記録と紐付いていないもの）は変えない
+ *  - 反映の後も占い権利が有効（PAID）のままなら変えない（運営が理由付きで戻した権利に、止めない通知（対応中の異議申し立てなど）が
+ *    届いたとき。注文と権利の状態をそろえる。権利を止める通知なら、権利と一緒に REFUNDED にする）
  */
-export function decideCheckoutAfterSync(cur: { status: unknown; refundReason: unknown }, after: { refundStatus: unknown; disputeStatus: unknown }): { status: "REFUNDED"; refundReason: CheckoutRefundReason } | null {
+export function decideCheckoutAfterSync(
+  cur: { status: unknown; refundReason: unknown },
+  after: { refundStatus: unknown; disputeStatus: unknown; entitlementActive?: boolean },
+): { status: "REFUNDED"; refundReason: CheckoutRefundReason } | null {
+  if (after.entitlementActive) return null;
   const reason = checkoutRefundReasonOf(after.refundStatus, after.disputeStatus);
   if (!reason) return null;
   if (cur.status !== "SUCCEEDED" && cur.status !== "REFUNDED") return null;
   if (cur.status === "REFUNDED" && cur.refundReason === reason) return null;
   return { status: "REFUNDED", refundReason: reason };
 }
+
+/** 復旧の操作の結果（decideEntitlementRestore の理由に、Stripe・決済の照合の結果を加えたもの） */
+export type RestoreOutcomeCode = "restored" | RestoreDenyReason | "not_eligible" | "payment_mismatch" | "stripe_unavailable" | "stripe_unverified" | "state_changed";
+
+/** 運営画面に出す説明（お客さんには表示しない。理由の入力の内容は含めない） */
+export const RESTORE_OUTCOME_MESSAGE: Record<RestoreOutcomeCode, string> = {
+  restored: "占い権利を戻しました（有効期限は今から24時間）。注文も占いを始められる状態に戻しました。",
+  payment_not_succeeded: "全額の返金済み・チャージバックの決済のため、戻せません。",
+  refund_pending: "返金の処理中のため、戻せません（Stripe で返金の結果が出るまでお待ちください）。",
+  refund_not_restorable: "返金がすべて失敗・一部の返金のときだけ戻せます。",
+  dispute_open: "異議申し立て（チャージバック）の対応中のため、戻せません。",
+  dispute_lost: "異議申し立て（チャージバック）で敗訴した決済のため、戻せません。",
+  entitlement_missing: "占い権利の記録がありません。",
+  entitlement_used: "占い権利は使用済みのため、戻せません。",
+  entitlement_not_suspended: "戻せる占い権利がありません（返金で止めたものではない・すでに戻した、など）。",
+  entitlement_suspended_by_dispute: "異議申し立てで止めた占い権利のため、戻せません。",
+  reason_required: "戻す理由を入力してください。",
+  reason_too_long: `戻す理由は${RESTORE_REASON_MAX}文字以内で入力してください。`,
+  not_eligible: "この決済の占い権利は戻せません。",
+  payment_mismatch: "Stripe の決済と記録・注文が一致しないため、戻せません。",
+  stripe_unavailable: "Stripe で返金・異議申し立ての状態を確認できませんでした。少し時間をおいてから、もう一度お試しください。",
+  stripe_unverified: "Stripe の返金・異議申し立ての状態を確認できない内容があるため、戻せません（決済要確認を確認してください）。",
+  state_changed: "確認の途中で返金・異議申し立ての状態が変わりました。画面を開き直して、もう一度確認してください。",
+};

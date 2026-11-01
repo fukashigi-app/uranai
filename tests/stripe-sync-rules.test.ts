@@ -18,6 +18,7 @@ import {
   initialEntitlementOf,
   isOurPayment,
   normalizeRestoreReason,
+  RESTORE_OUTCOME_MESSAGE,
   RESTORE_REASON_MAX,
   refundKeyOf,
   refundSuspendsEntitlement,
@@ -470,5 +471,23 @@ describe("返金・異議申し立ての反映の後の注文の状態", () => {
     }
     expect(decideCheckoutAfterSync({ status: "SUCCEEDED", refundReason: null }, { refundStatus: "failed", disputeStatus: "open" })).toBeNull();
     expect(decideCheckoutAfterSync({ status: "SUCCEEDED", refundReason: null }, { refundStatus: null, disputeStatus: "won" })).toBeNull();
+  });
+});
+
+describe("運営が戻した権利と注文の状態", () => {
+  it("反映の後も権利が有効（PAID）なら、注文を REFUNDED にしない（止めない通知・対応中の異議申し立てなど）", () => {
+    expect(decideCheckoutAfterSync({ status: "SUCCEEDED", refundReason: null }, { refundStatus: "partial", disputeStatus: "open", entitlementActive: true })).toBeNull();
+    expect(decideCheckoutAfterSync({ status: "SUCCEEDED", refundReason: null }, { refundStatus: "failed", disputeStatus: "lost", entitlementActive: true })).toBeNull();
+    // 権利を止める通知（有効でなくなる）なら REFUNDED
+    expect(decideCheckoutAfterSync({ status: "SUCCEEDED", refundReason: null }, { refundStatus: "partial", disputeStatus: null, entitlementActive: false })).toEqual({ status: "REFUNDED", refundReason: "refund" });
+  });
+});
+
+describe("復旧の結果の説明", () => {
+  it("すべての結果に運営画面の説明がある（理由の入力の内容は含めない）", () => {
+    const codes = ["restored", "payment_not_succeeded", "refund_pending", "refund_not_restorable", "dispute_open", "dispute_lost", "entitlement_missing", "entitlement_used", "entitlement_not_suspended", "entitlement_suspended_by_dispute", "reason_required", "reason_too_long", "not_eligible", "payment_mismatch", "stripe_unavailable", "stripe_unverified", "state_changed"] as const;
+    expect(Object.keys(RESTORE_OUTCOME_MESSAGE).sort()).toEqual([...codes].sort());
+    for (const c of codes) expect(RESTORE_OUTCOME_MESSAGE[c].length).toBeGreaterThan(5);
+    expect(RESTORE_OUTCOME_MESSAGE.reason_too_long).toContain(String(RESTORE_REASON_MAX));
   });
 });
