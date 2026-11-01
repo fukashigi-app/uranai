@@ -63,22 +63,41 @@ function writeDeduped(tx: Transaction, ref: DocumentReference, cur: DocumentSnap
 export async function upsertDedupedRecord(
   ref: DocumentReference,
   fields: Record<string, unknown>,
-  opts: DedupeOpts & { timeoutMs: number },
-): Promise<{ ok: true } | { ok: false; error: string }> {
+  opts: DedupeOpts & {
+    timeoutMs: number;
+    /** 待つのをやめた後に、書き込みの結果が分かったときに呼ばれる（committed＝保存された、failed＝保存されなかった） */
+    onSettledAfterTimeout?: (result: "committed" | "failed") => void;
+  },
+): Promise<DedupedRecordResult> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
   try {
     const work = fsdb().runTransaction(async (tx) => {
       writeDeduped(tx, ref, await tx.get(ref), fields, opts);
     });
-    work.catch(() => undefined); // 時間切れの後に失敗しても、未処理の例外にしない
+    // 時間切れの後も書き込みは止まらない（Firestore のトランザクションは中止できない）。結果だけを知らせ、未処理の例外にしない
+    work.then(
+      () => timedOut && opts.onSettledAfterTimeout?.("committed"),
+      () => timedOut && opts.onSettledAfterTimeout?.("failed"),
+    );
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(Object.assign(new Error("record timed out"), { name: "TimeoutError" })), opts.timeoutMs);
+      timer = setTimeout(() => {
+        timedOut = true;
+        reject(Object.assign(new Error("record timed out"), { name: "TimeoutError" }));
+      }, opts.timeoutMs);
     });
     await Promise.race([work, timeout]);
     return { ok: true };
   } catch (e) {
-    return { ok: false, error: (e as Error)?.name ?? "Error" };
+    // 待つのをやめた（時間切れ）は「保存されたか不明」。書き込みが失敗した（例外）は「保存されていない」
+    return timedOut ? { ok: false, error: "TimeoutError", unknown: true } : { ok: false, error: (e as Error)?.name ?? "Error", unknown: false };
   } finally {
     if (timer) clearTimeout(timer);
   }
 }
+
+/**
+ * 記録の結果。unknown=true は、待つのをやめた（時間切れ）ので保存されたかどうか分からないこと（裏で書き込みが続き、後で保存されることがある）。
+ * unknown=false は、書き込みが失敗して保存されていないこと。
+ */
+export type DedupedRecordResult = { ok: true } | { ok: false; error: string; unknown: boolean };

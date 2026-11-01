@@ -153,7 +153,7 @@ describe("決済監視の記録：重複をまとめる・確認済みからの�
     store.mode = "hang";
     const started = Date.now();
     const r = await upsertDedupedRecord({ path: "x/y" } as never, {}, { causeKey: "k", reopen: "always", timeoutMs: 50 });
-    expect(r).toEqual({ ok: false, error: "TimeoutError" });
+    expect(r).toEqual({ ok: false, error: "TimeoutError", unknown: true }); // 待つのをやめただけ（保存されたかは不明）
     expect(Date.now() - started).toBeLessThan(1000);
   });
 
@@ -266,5 +266,78 @@ describe("記録が必須の決済要確認（recordRequiredPaymentReview）", (
     expect(store.docs.get(reviewPath("ch_req_4"))).toMatchObject({ status: "RESOLVED", occurrences: 2 });
     await recordRequiredPaymentReview(input("ch_req_4", 30), { occurrenceKey: "event:e3" });
     expect(store.docs.get(reviewPath("ch_req_4"))).toMatchObject({ status: "OPEN", occurrences: 3, resolvedBy: null, amount: 30 });
+  });
+});
+
+describe("記録が必須の決済要確認の待ち時間と、保存されたか不明の扱い", () => {
+  beforeEach(() => {
+    store.docs.clear();
+    store.mode = "ok";
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+  const reviewPath = (objectId: string) => `paymentReviews/${paymentReviewId("transaction_not_found", objectId)}`;
+  const input = (objectId: string) => ({ kind: "transaction_not_found" as const, objectType: "charge" as const, objectId, livemode: true });
+
+  it("待ち時間：失敗しても止めない記録・決済監視は3秒のまま、記録が必須の決済要確認だけ6秒", async () => {
+    const reviews = await import("@/lib/firestore/payment-reviews");
+    const alerts = await import("@/lib/firestore/payment-alerts");
+    expect([reviews.PAYMENT_REVIEW_TIMEOUT_MS, alerts.PAYMENT_ALERT_TIMEOUT_MS, reviews.REQUIRED_PAYMENT_REVIEW_TIMEOUT_MS]).toEqual([3000, 3000, 6000]);
+  });
+
+  it("応答しない Firestore：失敗しても止めない記録は3秒で返り、記録が必須の決済要確認は6秒で「保存されたか不明」の例外", async () => {
+    vi.useFakeTimers();
+    store.mode = "hang";
+    const errors = vi.mocked(console.error);
+    const optionalGaveUp = () => errors.mock.calls.some((c) => c[0] === "[payment-review] record failed" && (c[1] as { error?: string })?.error === "TimeoutError");
+    void recordPaymentReview(input("ch_hang_1")); // この後に決済監視の記録（同じく3秒）も試みる
+    let required: unknown = null;
+    void recordRequiredPaymentReview(input("ch_hang_2")).catch((e) => (required = e));
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(optionalGaveUp()).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(optionalGaveUp()).toBe(true); // 失敗しても止めない記録は3秒で待つのをやめる
+    expect(required).toBeNull(); // 記録が必須の決済要確認は、3秒ではまだ待っている
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(required).toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(required).toMatchObject({ name: "PaymentReviewRecordUnknownError" });
+  });
+
+  it("書き込みの失敗は「保存されていない」例外（PaymentReviewRecordError）で、「不明」とは区別する", async () => {
+    store.mode = "fail";
+    await expect(recordRequiredPaymentReview(input("ch_fail_1"))).rejects.toMatchObject({ name: "PaymentReviewRecordError" });
+  });
+
+  it("待つのをやめた後に保存された：記録は1件・回数1。同じ通知の再送では回数を増やさない", async () => {
+    const admin = await import("@/lib/firestore/admin");
+    const real = admin.fsdb();
+    const orig = real.runTransaction;
+    // 1回目の書き込みだけ遅らせる（待つのをやめた後に確定する）
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => (release = r));
+    let first = true;
+    (real as { runTransaction: unknown }).runTransaction = async (fn: never) => {
+      if (first) {
+        first = false;
+        await gate;
+      }
+      return orig(fn);
+    };
+    try {
+      await expect(recordRequiredPaymentReview(input("ch_late_1"), { occurrenceKey: "event:evt_late", timeoutMs: 20 })).rejects.toMatchObject({ name: "PaymentReviewRecordUnknownError" });
+      expect(store.docs.has(reviewPath("ch_late_1"))).toBe(false); // まだ保存されていない（不明）
+      release();
+      await new Promise((r) => setTimeout(r, 10));
+      expect(store.docs.get(reviewPath("ch_late_1"))).toMatchObject({ occurrences: 1, recentOccurrenceKeys: ["event:evt_late"] }); // 後から保存された
+      await recordRequiredPaymentReview(input("ch_late_1"), { occurrenceKey: "event:evt_late" }); // Stripe の再送
+      expect(store.docs.get(reviewPath("ch_late_1"))?.occurrences).toBe(1);
+    } finally {
+      (real as { runTransaction: unknown }).runTransaction = orig;
+    }
   });
 });

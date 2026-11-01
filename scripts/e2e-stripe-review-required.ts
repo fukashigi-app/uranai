@@ -207,6 +207,31 @@ async function main() {
     step("照合できない返金・状態の後戻り：記録の失敗で 500 → 再送で記録（反映はしない・敗訴を戻さない）");
   }
 
+  // ================= 6. 待つのをやめた（保存されたか不明）→ 500 → 裏で保存 → 再送で回数は増えない =================
+  {
+    // 待ち時間だけを 1ms にした接続（同じ模擬 Stripe・同じ Emulator）。書き込みは止まらずに続く
+    const quick = createSimulatedStripeRuntime("live", { apiBase: `http://127.0.0.1:${PORT}`, secretKey: KEY, webhookSecret: "whsec_e2e_review_required_dummy", testHooks: { reviewRecordTimeoutMs: 1 } });
+    const p = await paidOnly(rt, code);
+    await stripe.ctl(`refund/${p.charge}`);
+    const e = refundEv(p);
+    const r1 = await deliver(quick, e);
+    assert.equal(r1.status, 500, "保存されたか不明なのに Webhook が成功を返しました");
+    assert.ok(!(await eventDoc(e.id))?.processedAt, "保存されたか不明なのに通知が処理済みになりました");
+    assert.equal((await alertOf("refund_sync_failed", e.id))?.errorName, "PaymentReviewRecordUnknownError", "決済監視で「保存されたか不明」と「保存の失敗」を区別できません");
+    let rv = null;
+    for (let i = 0; i < 50 && !rv; i++) {
+      await new Promise((ok) => setTimeout(ok, 100));
+      rv = await reviewOf("transaction_not_found", p.charge);
+    }
+    assert.ok(rv, "待つのをやめた後の書き込みが保存されていません（この場面の前提）");
+    assert.equal(rv!.occurrences, 1);
+    const r2 = await deliver(rt, e); // Stripe の再送（通常の待ち時間）
+    assert.equal(r2.status, 200);
+    assert.equal(outcomeOf(r2), "ignored");
+    assert.deepEqual([(await reviewOf("transaction_not_found", p.charge))?.occurrences, Boolean((await eventDoc(e.id))?.processedAt)], [1, true], "後から保存された記録を、再送で二重に数えました");
+    step("待つのをやめた：500・処理済みにしない・決済監視に PaymentReviewRecordUnknownError → 裏で保存された記録を、同じ通知の再送で二重に数えない（回数1・処理済み）");
+  }
+
   assert.equal([...failRecord.values()].reduce((a, n) => a + n, 0), 0, "（前提）用意した記録の失敗がすべて使われていません");
   console.log("\nSTRIPE REQUIRED REVIEW E2E PASSED");
 }

@@ -540,7 +540,8 @@ export async function syncStripeRefunds(chargeId: string, rt?: StripeRuntime, ev
 async function recordSyncReview(review: PaymentReviewInput | undefined, r0: StripeRuntime, eventId: string | undefined): Promise<void> {
   if (!review) return;
   r0.testHooks?.beforeReviewRecord?.(review.kind);
-  await recordRequiredPaymentReview(review, eventId ? { occurrenceKey: `event:${eventId}` } : {});
+  const timeoutMs = r0.testHooks?.reviewRecordTimeoutMs;
+  await recordRequiredPaymentReview(review, { ...(eventId ? { occurrenceKey: `event:${eventId}` } : {}), ...(timeoutMs ? { timeoutMs } : {}) });
 }
 
 /**

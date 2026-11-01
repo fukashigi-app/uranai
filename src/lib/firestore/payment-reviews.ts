@@ -67,8 +67,17 @@ const clean = (v: unknown) => (typeof v === "string" && ID_RE.test(v) ? v : null
 
 export const paymentReviewId = (kind: PaymentReviewKind, objectId: string) => safeId(kind, createHash("sha256").update(objectId).digest("hex").slice(0, 40));
 
-/** 記録を待つ上限（Firestore に接続できないときに、Webhook の応答が止まらないように） */
+/** 記録を待つ上限（Firestore に接続できないときに、Webhook の応答が止まらないように）。失敗しても止めない記録（recordPaymentReview） */
 export const PAYMENT_REVIEW_TIMEOUT_MS = 3000;
+
+/**
+ * 記録が必須の決済要確認（recordRequiredPaymentReview）を待つ上限。
+ * 同じ記録に複数の通知が同時に届くと、Firestore の SDK がトランザクションをやり直す（最大5回。2回目以降の待ち時間は
+ * 0秒・約1秒・約1.5秒・約2.25秒、それぞれ ±50%）。3秒では3回目以降のやり直しが収まらず、不要な 500 になっていた。
+ * 6秒なら4回目までがおおむね収まる。長くしすぎると、関数の実行時間の上限（maxDuration は未設定。Vercel の設定は未確認）の中で、
+ * Stripe API の呼び出しと合わせて上限を超えるおそれがあるため、10秒にはしない（docs/preview-verification.md §11）。
+ */
+export const REQUIRED_PAYMENT_REVIEW_TIMEOUT_MS = 6000;
 
 /**
  * 記録する（同じ種類・対象なら回数を増やすだけ）。失敗・時間切れでも決済の処理は止めない。
@@ -76,7 +85,7 @@ export const PAYMENT_REVIEW_TIMEOUT_MS = 3000;
  */
 export async function recordPaymentReview(input: PaymentReviewInput): Promise<void> {
   const objectId = clean(input.objectId) ?? "invalid";
-  let r: { ok: true } | { ok: false; error: string };
+  let r: { ok: true } | { ok: false; error: string; unknown?: boolean };
   try {
     const { ref, fields, causeKey } = reviewWrite(input); // Firestore に接続できない設定でも例外にしない（参照の作成も含める）
     r = await upsertDedupedRecord(ref, fields, { causeKey, reopen: "on_change", timeoutMs: PAYMENT_REVIEW_TIMEOUT_MS });
@@ -92,22 +101,34 @@ export async function recordPaymentReview(input: PaymentReviewInput): Promise<vo
 
 /**
  * 記録が必須の異常で使う（決済記録が無い・照合できないなど、記録だけが運営に異常を知らせる手段のとき）。
- * 記録できなかった・時間切れのときは例外（名前は PaymentReviewRecordError）。呼び出し側（Webhook）は処理済みにせず 500 を返し、
- * Stripe の再送で記録し直す。異常の内容の検証の失敗（Stripe API の失敗など）は、この関数を呼ぶ前の別の例外になる。
+ * 記録できなかったときは例外。呼び出し側（Webhook）は処理済みにせず 500 を返し、Stripe の再送で記録し直す。
+ *  - PaymentReviewRecordError        … 書き込みが失敗した（保存されていない）
+ *  - PaymentReviewRecordUnknownError … 待つのをやめた（REQUIRED_PAYMENT_REVIEW_TIMEOUT_MS）。保存されたかは不明で、
+ *                                      裏で書き込みが続き後で保存されることがある（再送では occurrenceKey で二重に数えない）
+ * 異常の内容の検証の失敗（Stripe API の失敗など）は、この関数を呼ぶ前の別の例外になる。
  * occurrenceKey（通知の ID など）を渡すと、記録の後に処理が失敗して同じ通知が再送されても回数を増やさない。
  * ID・重複のまとめ方・確認済みの扱い・内容が変わったときに未確認へ戻す規則は recordPaymentReview と同じ。
  */
-export async function recordRequiredPaymentReview(input: PaymentReviewInput, opts: { occurrenceKey?: string } = {}): Promise<void> {
-  let r: { ok: true } | { ok: false; error: string };
+export async function recordRequiredPaymentReview(input: PaymentReviewInput, opts: { occurrenceKey?: string; /** 自動テスト用（既定は REQUIRED_PAYMENT_REVIEW_TIMEOUT_MS） */ timeoutMs?: number } = {}): Promise<void> {
+  let r: { ok: true } | { ok: false; error: string; unknown: boolean };
   try {
     const { ref, fields, causeKey } = reviewWrite(input);
-    r = await upsertDedupedRecord(ref, fields, { causeKey, reopen: "on_change", timeoutMs: PAYMENT_REVIEW_TIMEOUT_MS, ...(opts.occurrenceKey ? { occurrenceKey: opts.occurrenceKey } : {}) });
+    r = await upsertDedupedRecord(ref, fields, {
+      causeKey,
+      reopen: "on_change",
+      timeoutMs: opts.timeoutMs ?? REQUIRED_PAYMENT_REVIEW_TIMEOUT_MS,
+      ...(opts.occurrenceKey ? { occurrenceKey: opts.occurrenceKey } : {}),
+      onSettledAfterTimeout: (result) => console.warn("[payment-review] required record settled after the wait ended", { kind: input.kind, objectType: input.objectType, result }),
+    });
   } catch (e) {
-    r = { ok: false, error: (e as Error)?.name ?? "Error" };
+    r = { ok: false, error: (e as Error)?.name ?? "Error", unknown: false };
   }
   if (!r.ok) {
-    console.error("[payment-review] required record failed", { kind: input.kind, objectType: input.objectType, error: r.error });
-    throw Object.assign(new Error("payment review could not be recorded"), { name: "PaymentReviewRecordError", cause: r.error });
+    console.error(r.unknown ? "[payment-review] required record result unknown (wait ended)" : "[payment-review] required record failed", { kind: input.kind, objectType: input.objectType, error: r.error });
+    throw Object.assign(new Error(r.unknown ? "payment review record result is unknown" : "payment review could not be recorded"), {
+      name: r.unknown ? "PaymentReviewRecordUnknownError" : "PaymentReviewRecordError",
+      cause: r.error,
+    });
   }
 }
 
