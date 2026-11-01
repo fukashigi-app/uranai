@@ -4,7 +4,8 @@
     "deploymentEnabled": {
       "backup-tools": false,
       "dev-mode": false,
-      "recovery/uranai-20261031": false
+      "recovery/uranai-20261031": false,
+      "preview/stripe-verification": false
     }
   }
 }
