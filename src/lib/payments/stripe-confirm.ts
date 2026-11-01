@@ -13,8 +13,8 @@ import { siteConfig } from "@/config/site";
 import { writeAudit } from "@/lib/firestore/audit";
 import { reconcileTransactionInTx, settlementRefForTx } from "@/lib/firestore/settlement-adjustments";
 import { recordPaymentReview, type PaymentReviewInput } from "@/lib/firestore/payment-reviews";
-import { chargebackCoversRemainder, disputeStateOf } from "./settlement-rules";
-import type Stripe from "stripe";
+import type { DisputeState } from "./settlement-rules";
+import { chargeMismatches, decideDisputeSync, decideRefundSync, disputeAmountProblem, isOurPayment } from "./stripe-sync-rules";
 import {
   createStripeCheckoutSession,
   feeOf,
@@ -30,7 +30,6 @@ import {
   summarizeRefunds,
   stripeRuntime,
   validateStripeSession,
-  type StripeRefundSummary,
   type StripeRuntime,
 } from "./stripe-checkout";
 
@@ -309,26 +308,6 @@ export type StripeRefundOutcome = "refund_pending" | "refunded" | "partial" | "r
 
 const idOfRef = (v: unknown): string | null => (typeof v === "string" ? v : v && typeof v === "object" && typeof (v as { id?: unknown }).id === "string" ? (v as { id: string }).id : null);
 
-/**
- * Stripe の Charge が、記録した決済（取引）と一致するか（返金・異議申し立ての反映の前に確かめる）。
- * 決済ID（Charge・PaymentIntent）、モード（livemode）、金額、通貨、店舗（PaymentIntent の metadata）がすべて一致すること。
- * 一致しない項目名を返す（空なら一致）。値そのものは返さない（決済要確認には項目名だけを記録する）。
- */
-function chargeMismatches(t: DocumentData, charge: Stripe.Charge, pi: Stripe.PaymentIntent): string[] {
-  const out: string[] = [];
-  if (t.paymentProvider !== STRIPE_PROVIDER) out.push("provider");
-  if (t.stripeChargeId !== charge.id) out.push("charge_id");
-  if (t.livemode !== charge.livemode || pi.livemode !== charge.livemode) out.push("livemode");
-  if (idOfRef(charge.payment_intent) !== pi.id) out.push("payment_intent");
-  if (charge.currency !== "jpy") out.push("currency");
-  if (Number(t.amount) !== charge.amount || pi.amount !== charge.amount) out.push("amount");
-  if (pi.metadata?.storeId !== String(t.storeId)) out.push("store");
-  return out;
-}
-
-/** このアプリの注文の決済か（PaymentIntent の metadata に注文ID・店舗IDを入れている） */
-const isOurPayment = (pi: Stripe.PaymentIntent) => typeof pi.metadata?.checkoutId === "string" && pi.metadata.checkoutId !== "" && typeof pi.metadata?.storeId === "string";
-
 type TxOutcome<T extends string> = { outcome: T; review?: PaymentReviewInput };
 
 /**
@@ -358,36 +337,22 @@ export async function syncStripeRefunds(chargeId: string, rt?: StripeRuntime, ev
     // 金額・店舗などが記録と一致しない返金は反映しない（売上・精算を動かさない）
     const mism = chargeMismatches(t.data()!, charge, pi);
     if (mism.length) return { outcome: "rejected", review: { kind: "charge_mismatch", objectType: "charge", objectId: charge.id, transactionId: t.id, storeId: String(t.get("storeId")), mismatches: mism, ...base } };
-    const refundKey = refundKeyOf(summary);
-    if (t.get("refundKey") === refundKey) return { outcome: "unchanged" }; // 同じ状態はもう反映済み（再送・重複）
+    const d = decideRefundSync({ paymentStatus: t.get("paymentStatus"), refundKey: t.get("refundKey") }, summary, new Date());
+    if (d.kind === "unchanged") return { outcome: "unchanged" }; // 同じ状態はもう反映済み（再送・重複）
     const st = await tx.get(settlementRefForTx(t.data()!));
-    const refunded = summary.state === "succeeded";
-    const needsReview = summary.state === "partial" || summary.state === "failed";
-    const paymentStatus = refunded ? "REFUNDED" : "SUCCEEDED"; // 成功した返金が後で失敗に変わったら SUCCEEDED に戻す
     const paidAt = mustDate(t.get("paidAt"));
-    // 異議申し立てで敗訴（全額）した決済は CHARGEBACK のまま（返金の状態だけ記録する）
-    const nextStatus = t.get("paymentStatus") === "CHARGEBACK" ? "CHARGEBACK" : paymentStatus;
     const patch: Record<string, unknown> = {
-      refundStatus: summary.state,
-      refundKey,
-      amountRefunded: summary.succeededAmount,
-      refundPendingAmount: summary.pendingAmount,
-      refundFailedAmount: summary.failedAmount,
-      stripeRefundIds: summary.refundIds,
-      refundNeedsReview: needsReview,
-      refundUpdatedAt: new Date(),
-      ...(t.get("paymentStatus") !== nextStatus
-        ? { paymentStatus: nextStatus, refundedAt: refunded ? new Date() : null, ...salesKeys(String(t.get("storeId")), STRIPE_PROVIDER, nextStatus, paidAt, t.get("livemode")) }
-        : {}),
+      ...d.fields,
+      ...(d.statusChange ? { ...d.statusChange, ...salesKeys(String(t.get("storeId")), STRIPE_PROVIDER, d.statusChange.paymentStatus, paidAt, t.get("livemode")) } : {}),
     };
     // 振込済み（確定済み）の月の取引なら、取り分の差額を調整として記録する（成功した返金の額だけ。処理中・失敗では減らさない）
     const adj = reconcileTransactionInTx(tx, txRef, t.data()!, patch, "refund", summary.refundIds.join(","), { id: st.id, data: st.data() });
     tx.update(txRef, { ...patch, ...adj.fields, updatedAt: FieldValue.serverTimestamp() });
     // 返金の処理中・成功：未使用の権利を止める（使用済みの権利はそのまま）
-    if ((refunded || summary.state === "pending") && fs.exists && fs.get("status") === "PAID") {
+    if (d.suspendEntitlement && fs.exists && fs.get("status") === "PAID") {
       tx.update(sessionRef, { status: "EXPIRED", suspendedByRefund: true, suspendedAt: new Date() });
     }
-    const outcome = refunded ? "refunded" : summary.state === "pending" ? "refund_pending" : summary.state === "partial" ? "partial" : "refund_failed";
+    const outcome = d.outcome;
     return { outcome, review: adj.review ? { ...adj.review, eventType: eventType ?? null } : undefined };
   });
   if (res.review) await recordPaymentReview(res.review);
@@ -422,61 +387,55 @@ export async function syncStripeDispute(disputeId: string, rt?: StripeRuntime, e
   if (!piId) return "ignored";
   const pi = await retrieveStripePaymentIntent(piId, r0);
   const base = { chargeId: charge.id, paymentIntentId: piId, eventType: eventType ?? null, livemode: charge.livemode };
-  if (dp.currency !== "jpy" || !Number.isSafeInteger(dp.amount) || dp.amount <= 0 || dp.amount > charge.amount) {
+  const amountProblem = disputeAmountProblem(dp, charge.amount);
+  if (amountProblem) {
     console.error("[stripe] dispute amount does not match the charge (not applied)", { disputeId: dp.id });
-    if (isOurPayment(pi)) await recordPaymentReview({ kind: "dispute_amount_invalid", objectType: "dispute", objectId: dp.id, storeId: pi.metadata.storeId, amount: Number.isSafeInteger(dp.amount) ? dp.amount : null, mismatches: [dp.currency !== "jpy" ? "currency" : "amount"], ...base });
+    if (isOurPayment(pi)) await recordPaymentReview({ kind: "dispute_amount_invalid", objectType: "dispute", objectId: dp.id, storeId: pi.metadata.storeId, amount: Number.isSafeInteger(dp.amount) ? dp.amount : null, mismatches: [amountProblem], ...base });
     return "rejected";
   }
-  const state = disputeStateOf(String(dp.status));
   const txRef = fsdb().collection(C.transactions).doc(stripeTransactionId(piId));
   const sessionRef = fsdb().collection(C.fortuneSessions).doc(txRef.id);
-  const res = await fsdb().runTransaction(async (tx): Promise<TxOutcome<StripeDisputeOutcome>> => {
+  const res = await fsdb().runTransaction(async (tx): Promise<TxOutcome<StripeDisputeOutcome> & { state?: DisputeState }> => {
     const [t, fs] = await Promise.all([tx.get(txRef), tx.get(sessionRef)]);
     if (!t.exists) return { outcome: "ignored", review: isOurPayment(pi) ? { kind: "transaction_not_found", objectType: "dispute", objectId: dp.id, storeId: pi.metadata.storeId, ...base } : undefined };
     const mism = chargeMismatches(t.data()!, charge, pi);
     if (mism.length) return { outcome: "rejected", review: { kind: "charge_mismatch", objectType: "dispute", objectId: dp.id, transactionId: t.id, storeId: String(t.get("storeId")), mismatches: mism, ...base } };
-    const prevId = t.get("disputeId");
-    const prevState = t.get("disputeStatus");
+    const d = decideDisputeSync(
+      {
+        disputeId: t.get("disputeId"),
+        disputeStatus: t.get("disputeStatus"),
+        disputeKey: t.get("disputeKey"),
+        paymentStatus: t.get("paymentStatus"),
+        amount: t.get("amount"),
+        amountRefunded: t.get("amountRefunded"),
+        refundStatus: t.get("refundStatus"),
+      },
+      dp,
+      new Date(),
+    );
     // 同じ決済に別の異議申し立て（通常は起きない）：自動では反映しない
-    if (typeof prevId === "string" && prevId && prevId !== dp.id) return { outcome: "rejected", review: { kind: "multiple_disputes", objectType: "dispute", objectId: dp.id, transactionId: t.id, storeId: String(t.get("storeId")), ...base } };
+    if (d.kind === "multiple_disputes") return { outcome: "rejected", review: { kind: "multiple_disputes", objectType: "dispute", objectId: dp.id, transactionId: t.id, storeId: String(t.get("storeId")), ...base } };
     // 結果が出た申し立てを対応中に戻さない（古い状態の取り直し・順番の入れ替わり）
-    if ((prevState === "won" || prevState === "lost") && state === "open") return { outcome: "unchanged", review: { kind: "dispute_state_regressed", objectType: "dispute", objectId: dp.id, transactionId: t.id, storeId: String(t.get("storeId")), ...base } };
-    const key = `${dp.id}:${dp.status}:${dp.amount}`;
-    if (t.get("disputeKey") === key) return { outcome: "unchanged" };
+    if (d.kind === "regressed") return { outcome: "unchanged", review: { kind: "dispute_state_regressed", objectType: "dispute", objectId: dp.id, transactionId: t.id, storeId: String(t.get("storeId")), ...base } };
+    if (d.kind === "unchanged") return { outcome: "unchanged" };
     const st = await tx.get(settlementRefForTx(t.data()!));
-    const cur = String(t.get("paymentStatus"));
-    const facts = { amount: Number(t.get("amount")), amountRefunded: Number(t.get("amountRefunded") ?? 0), disputeStatus: state, disputeAmount: dp.amount };
-    const full = chargebackCoversRemainder(facts);
-    const refundedAll = t.get("refundStatus") === "succeeded";
-    const nextStatus = state === "lost" && full ? "CHARGEBACK" : cur === "CHARGEBACK" ? (refundedAll ? "REFUNDED" : "SUCCEEDED") : cur;
     const patch: Record<string, unknown> = {
-      disputeId: dp.id,
-      disputeStatus: state,
-      disputeStripeStatus: String(dp.status),
-      disputeAmount: dp.amount,
-      disputeReason: String(dp.reason ?? ""),
-      disputeKey: key,
-      disputeNeedsReview: state !== "won",
-      disputeUpdatedAt: new Date(),
-      ...(nextStatus !== cur
-        ? { paymentStatus: nextStatus, chargebackAt: nextStatus === "CHARGEBACK" ? new Date() : null, ...salesKeys(String(t.get("storeId")), STRIPE_PROVIDER, nextStatus, mustDate(t.get("paidAt")), t.get("livemode")) }
-        : {}),
+      ...d.fields,
+      ...(d.statusChange ? { ...d.statusChange, ...salesKeys(String(t.get("storeId")), STRIPE_PROVIDER, d.statusChange.paymentStatus, mustDate(t.get("paidAt")), t.get("livemode")) } : {}),
     };
     const adj = reconcileTransactionInTx(tx, txRef, t.data()!, patch, "dispute", dp.id, { id: st.id, data: st.data() });
     tx.update(txRef, { ...patch, ...adj.fields, updatedAt: FieldValue.serverTimestamp() });
     // 敗訴：未使用の権利を止める（使用済みはそのまま）
-    if (state === "lost" && fs.exists && fs.get("status") === "PAID") tx.update(sessionRef, { status: "EXPIRED", suspendedByDispute: true, suspendedAt: new Date() });
-    const outcome = state === "lost" ? "dispute_lost" : state === "won" ? "dispute_won" : "dispute_open";
-    return { outcome, review: adj.review ? { ...adj.review, eventType: eventType ?? null } : undefined };
+    if (d.suspendEntitlement && fs.exists && fs.get("status") === "PAID") tx.update(sessionRef, { status: "EXPIRED", suspendedByDispute: true, suspendedAt: new Date() });
+    const outcome = d.outcome;
+    return { outcome, review: adj.review ? { ...adj.review, eventType: eventType ?? null } : undefined, state: d.state };
   });
   if (res.review) await recordPaymentReview(res.review);
   const result = res.outcome;
   if (result === "rejected") console.error("[stripe] dispute does not match the recorded payment (not applied)", { disputeId: dp.id });
-  if (result === "dispute_open" || result === "dispute_lost") console.warn("[stripe] dispute recorded (admin review required)", { disputeId: dp.id, state });
+  if (result === "dispute_open" || result === "dispute_lost") console.warn("[stripe] dispute recorded (admin review required)", { disputeId: dp.id, state: res.state });
   return result;
 }
-
-const refundKeyOf = (s: StripeRefundSummary) => `${s.state}:${s.succeededAmount}:${s.pendingAmount}:${s.failedAmount}:${s.refundIds.join(",")}`;
 
 export type StripeRefundReview = {
   transactionId: string;
