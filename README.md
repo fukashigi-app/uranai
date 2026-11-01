@@ -92,7 +92,8 @@ npm run e2e         # 起動中のアプリ（疑似決済）に対し QR→100�
 
 Stripe の E2E は、Firestore Emulator の `demo-` プロジェクトと、スクリプトが起動する localhost の模擬 Stripe API だけを使います（本物の Stripe・本番の Firebase には接続しません）。
 `npm run e2e:stripe`（運営の Sandbox テスト）・`e2e:stripe-public`（一般のお客さん）・`e2e:stripe-live`（本番モードの照合）・
-`e2e:stripe-settlement`（返金・異議申し立て・精算の調整）・`e2e:stripe-settlement-safety`（以前の精算・決済要確認・確定の順番など）。
+`e2e:stripe-settlement`（返金・異議申し立て・精算の調整）・`e2e:stripe-settlement-safety`（以前の精算・決済要確認・確定の順番など）・
+`e2e:payment-monitor`（決済監視）・`e2e:stripe-ordering`（通知の順序・同時実行・不変条件）・`e2e:admin-restore-browser`（運営画面の占い権利の復旧をブラウザで操作。Playwright が必要）。
 
 ## 決済（Stripe Checkout）
 
@@ -108,6 +109,7 @@ Stripe の E2E は、Firestore Emulator の `demo-` プロジェクトと、ス�
 - Vercel の Preview・Stripe の Sandbox での検証の手順は [docs/preview-verification.md](docs/preview-verification.md) を参照
 - 返金・異議申し立て（チャージバック）は Stripe API で状態を取り直して反映し、振込済みの月の取引は「精算の調整」として次回の精算で差し引きます
 - 記録と照合できない通知（店舗・金額の食い違いなど）は反映せず、運営画面の「決済要確認」に記録します
+- 決済の状態と占い権利・Webhook の流れ・手数料・運営の手順・本番移行の前の確認は [docs/stripe-payments.md](docs/stripe-payments.md) を参照
 
 ## デプロイ（例: Vercel + Supabase / Neon）
 
@@ -128,7 +130,7 @@ Stripe の E2E は、Firestore Emulator の `demo-` プロジェクトと、ス�
 3. **月次精算**: 翌月に 運営画面 > 月次精算 で対象月を選び「集計して精算を作成」。振込は原則3か月ごとにまとめて行う
    → 同じ店舗は古い月から「処理中」「支払済」にして確定（未反映の調整を合わせて振込額が決まる。確定後は未払いに戻せない）
    → 振込用CSV（振込額・調整・繰越）で振込（店舗画面の「振込状況」に反映）
-4. **決済要確認**: 運営画面 > 決済要確認 で、照合できなかった Stripe の通知・以前に確定した精算の変化を確認し「確認済みにする」
+4. **決済要確認**: 運営画面 > 決済要確認 で、照合できなかった Stripe の通知・以前に確定した精算の変化を確認し「確認済みにする」（返金・異議申し立て・占い権利の復旧の手順は [docs/stripe-payments.md §4](docs/stripe-payments.md#4-運営の操作の手順)）
 5. **QR再発行**: 紛失・悪用時は店舗詳細から再発行（旧QRは即無効）
 6. **店舗停止**: 店舗詳細から停止すると新規決済を受け付けません（既存の売上・権利はそのまま）
 
@@ -137,7 +139,8 @@ Stripe の E2E は、Firestore Emulator の `demo-` プロジェクトと、ス�
 - サービス名・キャッチコピー・運営者情報: `NEXT_PUBLIC_*` 環境変数 または `src/config/site.ts`
 - テーマカラー: `src/app/globals.css` の `:root` の CSS 変数
 - ロゴ / ファビコン / OGP: `public/logo.svg`・`src/app/icon.svg`・`public/og.png`
-- 占い文章: `src/lib/fortune/templates.ts`（配列は末尾に追加すると既存の結果が変わりません）
+- 占い文章: `src/lib/fortune/content/`（`zodiac.ts`・`blood.ts`・`birthday.ts`・共通のラッキー系 `common.ts`・レア度の文章 `rarity.ts`）。
+  文章は条件に合う候補の数で選ぶため、追加・削除すると同じ日・同じ入力でも結果が変わることがあります
 
 ## セキュリティ要点
 
