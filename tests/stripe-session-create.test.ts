@@ -60,6 +60,16 @@ describe("Checkout Session の作成で送る内容", () => {
     expect(r.expiresAt.getTime()).toBe(Number(params.expires_at) * 1000);
   });
 
+  it("Session と PaymentIntent の metadata に、この環境を表す値（Firestore のプロジェクトから決まる）を入れる。プロジェクト ID そのものは送らない", async () => {
+    await create();
+    const m = await import("@/lib/payments/stripe-checkout");
+    const { params } = sdk.calls[0];
+    const tag = m.stripeEnvTag("demo-stripe-unit");
+    expect(params.metadata).toEqual({ checkoutId: CO, storeId: "store-1", fortuneType: "ZODIAC", uranaiEnv: tag });
+    expect((params.payment_intent_data as Record<string, unknown>).metadata).toEqual(params.metadata);
+    expect(JSON.stringify(params)).not.toContain("demo-stripe-unit");
+  });
+
   it("期限が作成から30分未満なら Stripe に送らない", async () => {
     await expect(create(new Date(Date.now() + 29 * 60_000))).rejects.toThrow(/too early/);
     expect(sdk.calls).toHaveLength(0);

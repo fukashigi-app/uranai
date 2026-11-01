@@ -410,13 +410,18 @@ export async function finishWebhookEvent(provider: ProviderId | "stripe", eventI
  *  already_processed … ほかの処理が先に完了した（何も書かない）
  *  lease_lost       … ほかの処理が処理権を取り直した（何も書かない。新しい処理の状態を上書きしない）
  */
-export async function finishWebhookEventWithLease(provider: ProviderId | "stripe", eventId: string, token: string): Promise<"finished" | "already_processed" | "lease_lost"> {
+export async function finishWebhookEventWithLease(
+  provider: ProviderId | "stripe",
+  eventId: string,
+  token: string,
+  state: "PROCESSED" | "IGNORED_OTHER_ENV" = "PROCESSED",
+): Promise<"finished" | "already_processed" | "lease_lost"> {
   const ref = fsdb().collection(C.webhookEvents).doc(safeId(provider, eventId));
   return fsdb().runTransaction(async (tx) => {
     const cur = await tx.get(ref);
     if (cur.exists && cur.get("processedAt")) return "already_processed";
     if (!cur.exists || cur.get("leaseOwner") !== token) return "lease_lost";
-    tx.update(ref, { processedAt: FieldValue.serverTimestamp(), state: "PROCESSED", leaseOwner: null, leaseExpiresAt: null });
+    tx.update(ref, { processedAt: FieldValue.serverTimestamp(), state, leaseOwner: null, leaseExpiresAt: null });
     return "finished";
   });
 }

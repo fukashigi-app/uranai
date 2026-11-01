@@ -39,6 +39,7 @@ import { alertModeOf } from "./monitor-rules";
 import {
   createStripeCheckoutSession,
   feeOf,
+  isOtherStripeEnv,
   isStripeSessionId,
   listStripeRefunds,
   readStripeChargeAdjustments,
@@ -47,6 +48,7 @@ import {
   retrieveStripeDispute,
   retrieveStripePaymentIntent,
   retrieveStripeSession,
+  STRIPE_ENV_METADATA_KEY,
   STRIPE_SESSION_TTL_MS,
   stripeSessionExpiry,
   stripeSessionState,
@@ -219,6 +221,14 @@ export async function startStripeCheckout(token: string | null, origin: string, 
  * 作成の後に、もう一度 Stripe の状態を読み、読んだ後から作成までの間に起きた返金・異議申し立てを反映する
  * （syncStripeRefunds・syncStripeDispute。Stripe から取り直した最新の状態と、記録済みのキーで判断するので古い情報で上書きしない）。
  */
+/** 決済の環境を表す値がこの環境と違うのに、この環境に注文・決済記録がある（どちらの環境の決済か判断できないので処理しない） */
+export class StripeEnvironmentMismatchError extends Error {
+  constructor() {
+    super("stripe payment belongs to another environment but a record exists here");
+    this.name = "StripeEnvironmentMismatchError";
+  }
+}
+
 export async function confirmStripeCheckout(sessionId: string, rt?: StripeRuntime): Promise<StripeConfirmOutcome> {
   const r0 = rt ?? stripeRuntime();
   if (!isStripeSessionId(sessionId, r0.mode)) return { status: "rejected", reason: "invalid_session_id" };
@@ -239,11 +249,19 @@ export async function confirmStripeCheckout(sessionId: string, rt?: StripeRuntim
   let outcome: StripeConfirmOutcome;
   let createdHere = false; // この呼び出しで決済記録を作成したか（トランザクションのやり直しのたびに初期化）
   let recheckPending = false; // 確定済みの決済記録の再確認が未完了か（同上）
+  // 別の環境（同じ Sandbox を使う別の Firestore）で作った Session か（metadata の環境を表す値が確かに違うときだけ。値が無ければ今までどおり）
+  const otherEnv = isOtherStripeEnv(f.envTag, r0);
   try {
     outcome = await fsdb().runTransaction(async (tx): Promise<StripeConfirmOutcome> => {
       createdHere = false;
       recheckPending = false;
       const [coSnap, existing] = await Promise.all([tx.get(checkoutRef(f.checkoutId)), tx.get(txRef)]);
+      if (otherEnv) {
+        // この環境に注文・決済記録が無ければ、別の環境の決済（何も書かない。売上・権利に関わらない）。
+        // あれば食い違い（設定の誤りなど）：判断せずに例外（Webhook は処理済みにせず 500。運営が決済監視で気付く）
+        if (coSnap.exists || existing.exists) throw new StripeEnvironmentMismatchError();
+        return { status: "rejected", reason: "other_environment" } as const;
+      }
       if (existing.exists) {
         // 確定済み（Webhook の再送・戻り先の再読み込みなど）。作成の後の再確認が未完了なら、この後で再確認する
         recheckPending = recheckStateOf(existing.get("recheckState")) === RECHECK_PENDING;
@@ -446,7 +464,7 @@ export async function closeStripeCheckout(sessionId: string, opts: { asyncFailed
   return closed ? (next.status === "EXPIRED" ? "expired" : "failed") : false;
 }
 
-export type StripeRefundOutcome = "refund_pending" | "refunded" | "partial" | "refund_failed" | "unchanged" | "ignored" | "rejected";
+export type StripeRefundOutcome = "refund_pending" | "refunded" | "partial" | "refund_failed" | "unchanged" | "ignored" | "ignored_other_env" | "rejected";
 
 const idOfRef = (v: unknown): string | null => (typeof v === "string" ? v : v && typeof v === "object" && typeof (v as { id?: unknown }).id === "string" ? (v as { id: string }).id : null);
 
@@ -492,8 +510,14 @@ export async function syncStripeRefunds(chargeId: string, rt?: StripeRuntime, ev
   const txRef = fsdb().collection(C.transactions).doc(stripeTransactionId(piId));
   const sessionRef = fsdb().collection(C.fortuneSessions).doc(txRef.id);
   const base = { chargeId: charge.id, paymentIntentId: piId, eventType: eventType ?? null, livemode: charge.livemode };
+  const otherEnv = isOtherStripeEnv(pi.metadata?.[STRIPE_ENV_METADATA_KEY], r0);
   const res = await fsdb().runTransaction(async (tx): Promise<TxOutcome<StripeRefundOutcome>> => {
     const [t, fs] = await Promise.all([tx.get(txRef), tx.get(sessionRef)]);
+    if (otherEnv) {
+      // 別の環境の決済：この環境に決済記録が無ければ何もしない（決済要確認にも記録しない）。あれば食い違いなので処理しない（例外）
+      if (t.exists) throw new StripeEnvironmentMismatchError();
+      return { outcome: "ignored_other_env" };
+    }
     if (!t.exists) return { outcome: "ignored", review: isOurPayment(pi) ? { kind: "transaction_not_found", objectType: "charge", objectId: charge.id, storeId: pi.metadata.storeId, ...base } : undefined };
     // 金額・店舗などが記録と一致しない返金は反映しない（売上・精算を動かさない）
     const mism = chargeMismatches(t.data()!, charge, pi);
@@ -562,7 +586,7 @@ function reviewWithinSync(tx: Transaction, pre: DocumentSnapshot, review: Paymen
   return undefined;
 }
 
-export type StripeDisputeOutcome = "dispute_open" | "dispute_won" | "dispute_lost" | "unchanged" | "ignored" | "rejected";
+export type StripeDisputeOutcome = "dispute_open" | "dispute_won" | "dispute_lost" | "unchanged" | "ignored" | "ignored_other_env" | "rejected";
 
 /**
  * 異議申し立て（チャージバック）の状態を Stripe API から取り直して、決済記録に反映する（charge.dispute.* の通知から呼ばれる）。
@@ -586,9 +610,12 @@ export async function syncStripeDispute(disputeId: string, rt?: StripeRuntime, e
   if (!piId) return "ignored";
   const pi = await retrieveStripePaymentIntent(piId, r0);
   const base = { chargeId: charge.id, paymentIntentId: piId, eventType: eventType ?? null, livemode: charge.livemode };
+  const otherEnv = isOtherStripeEnv(pi.metadata?.[STRIPE_ENV_METADATA_KEY], r0);
   const amountProblem = disputeAmountProblem(dp, charge.amount);
   if (amountProblem) {
     console.error("[stripe] dispute amount does not match the charge (not applied)", { disputeId: dp.id });
+    // 別の環境の決済は、この環境の決済要確認に記録しない（反映もしない）
+    if (otherEnv) return "ignored_other_env";
     if (isOurPayment(pi)) await recordSyncReview({ kind: "dispute_amount_invalid", objectType: "dispute", objectId: dp.id, storeId: pi.metadata.storeId, amount: Number.isSafeInteger(dp.amount) ? dp.amount : null, mismatches: [amountProblem], ...base }, r0, eventId);
     return "rejected";
   }
@@ -596,6 +623,10 @@ export async function syncStripeDispute(disputeId: string, rt?: StripeRuntime, e
   const sessionRef = fsdb().collection(C.fortuneSessions).doc(txRef.id);
   const res = await fsdb().runTransaction(async (tx): Promise<TxOutcome<StripeDisputeOutcome> & { state?: DisputeState }> => {
     const [t, fs] = await Promise.all([tx.get(txRef), tx.get(sessionRef)]);
+    if (otherEnv) {
+      if (t.exists) throw new StripeEnvironmentMismatchError();
+      return { outcome: "ignored_other_env" };
+    }
     if (!t.exists) return { outcome: "ignored", review: isOurPayment(pi) ? { kind: "transaction_not_found", objectType: "dispute", objectId: dp.id, storeId: pi.metadata.storeId, ...base } : undefined };
     const mism = chargeMismatches(t.data()!, charge, pi);
     if (mism.length) return { outcome: "rejected", review: { kind: "charge_mismatch", objectType: "dispute", objectId: dp.id, transactionId: t.id, storeId: String(t.get("storeId")), mismatches: mism, ...base } };

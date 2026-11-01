@@ -1,4 +1,5 @@
 import "server-only";
+import { createHash } from "node:crypto";
 import Stripe from "stripe";
 import { CURRENCY, PRICE_JPY } from "@/config/pricing";
 import { isLocalEmulatorTarget, stripeTestConfig, STRIPE_TEST_DENY_MESSAGE } from "./stripe-guard";
@@ -31,6 +32,8 @@ export type StripeRuntime = {
   readonly webhookSecret: string;
   /** 戻り先に http を許すか（ローカルの自動テストだけ） */
   readonly allowHttpOrigin: boolean;
+  /** この環境（Firestore のプロジェクト）を表す値（stripeEnvTag）。Session の metadata に入れ、別の環境の決済を見分ける */
+  readonly envTag: string;
   /** 自動テスト専用（createSimulatedStripeRuntime だけが設定する）：処理の途中の停止を再現する */
   readonly testHooks?: StripeTestHooks;
 };
@@ -64,6 +67,33 @@ function newClient(secretKey: string, apiBase: ApiBase | null): Stripe {
   });
 }
 
+/** 環境を表す値を入れる metadata の項目（Session と PaymentIntent の両方に入れる） */
+export const STRIPE_ENV_METADATA_KEY = "uranaiEnv";
+
+/**
+ * 環境を表す値（Firestore のプロジェクト ID から決まる。プロジェクト ID そのものは Stripe に送らない）。
+ * 同じ Stripe のアカウント（Sandbox）を複数の環境（Preview・ローカルなど）で使うと、どの環境の送信先にもすべての決済の通知が届く。
+ * 決済を作った環境と、通知を受けた環境の Firestore が同じかどうかを、この値で見分ける（通知の ID だけでは見分けられない）。
+ * 値は環境の設定（サーバーの環境変数）から決まり、ブラウザから送られた値は使わない。
+ */
+export function stripeEnvTag(firebaseProjectId: string): string {
+  return `fp_${createHash("sha256").update(firebaseProjectId, "utf8").digest("hex").slice(0, 16)}`;
+}
+
+/**
+ * metadata の環境を表す値（metadata[STRIPE_ENV_METADATA_KEY]）が、この環境と違うことが確かか。値が無い（以前の決済・この仕組みの前に作った Session）・形が違うときは
+ * false（別の環境とは判断しない。今までどおりに処理する）
+ */
+export function isOtherStripeEnv(tag: unknown, rt: Pick<StripeRuntime, "envTag">): boolean {
+  return typeof tag === "string" && /^fp_[0-9a-f]{16}$/.test(tag) && tag !== rt.envTag;
+}
+
+function envTagOrThrow(e: Record<string, string | undefined>): string {
+  const project = (e.FIREBASE_PROJECT_ID ?? "").trim();
+  if (!project) throw new StripeUnavailableError("FIREBASE_PROJECT_ID is required to identify the environment");
+  return stripeEnvTag(project);
+}
+
 let cached: { key: string; runtime: StripeRuntime } | null = null;
 
 /**
@@ -73,9 +103,10 @@ let cached: { key: string; runtime: StripeRuntime } | null = null;
 export function stripeRuntime(): StripeRuntime {
   const cfg = stripeTestConfig();
   if (!cfg.ok) throw new StripeUnavailableError(STRIPE_TEST_DENY_MESSAGE[cfg.reason]);
-  const key = `test|${cfg.secretKey}|${cfg.webhookSecret}|${cfg.apiBase ? `${cfg.apiBase.protocol}://${cfg.apiBase.host}:${cfg.apiBase.port}` : ""}`;
+  const envTag = envTagOrThrow(process.env);
+  const key = `test|${cfg.secretKey}|${cfg.webhookSecret}|${cfg.apiBase ? `${cfg.apiBase.protocol}://${cfg.apiBase.host}:${cfg.apiBase.port}` : ""}|${envTag}`;
   if (cached?.key === key) return cached.runtime;
-  const runtime: StripeRuntime = { mode: "test", client: newClient(cfg.secretKey, cfg.apiBase), webhookSecret: cfg.webhookSecret, allowHttpOrigin: cfg.mode === "local" };
+  const runtime: StripeRuntime = { mode: "test", client: newClient(cfg.secretKey, cfg.apiBase), webhookSecret: cfg.webhookSecret, allowHttpOrigin: cfg.mode === "local", envTag };
   cached = { key, runtime };
   return runtime;
 }
@@ -92,7 +123,7 @@ const LOOPBACK = new Set(["localhost", "127.0.0.1"]);
  */
 export function createSimulatedStripeRuntime(
   mode: StripeMode,
-  opts: { apiBase: string; secretKey: string; webhookSecret: string; testHooks?: StripeTestHooks },
+  opts: { apiBase: string; secretKey: string; webhookSecret: string; testHooks?: StripeTestHooks; envTag?: string },
   e: Record<string, string | undefined> = process.env,
 ): StripeRuntime {
   if (e.VERCEL_ENV) throw new StripeUnavailableError("simulated runtime is for local automated tests only");
@@ -102,7 +133,9 @@ export function createSimulatedStripeRuntime(
   if (!opts.secretKey.startsWith(`sk_${mode}_`) || !opts.webhookSecret.startsWith("whsec_")) throw new StripeUnavailableError("simulated runtime key does not match the mode");
   const protocol = u.protocol === "https:" ? "https" : "http";
   const apiBase = { host: u.hostname, port: Number(u.port || (protocol === "https" ? 443 : 80)), protocol } as const;
-  return { mode, client: newClient(opts.secretKey, apiBase), webhookSecret: opts.webhookSecret, allowHttpOrigin: true, ...(opts.testHooks ? { testHooks: opts.testHooks } : {}) };
+  // envTag の指定は、別の環境（同じ Sandbox を使う別の Firestore）を再現する自動テストだけ
+  const envTag = opts.envTag ?? envTagOrThrow(e);
+  return { mode, client: newClient(opts.secretKey, apiBase), webhookSecret: opts.webhookSecret, allowHttpOrigin: true, envTag, ...(opts.testHooks ? { testHooks: opts.testHooks } : {}) };
 }
 
 /** Stripe の Checkout Session の有効期限（Stripe の下限は作成から30分）。注文の有効期限もこれに合わせる */
@@ -148,7 +181,7 @@ export type StripeSessionInput = {
 export async function createStripeCheckoutSession(input: StripeSessionInput, rt: StripeRuntime = stripeRuntime()): Promise<{ id: string; url: string; expiresAt: Date }> {
   const origin = new URL(input.origin);
   if (origin.protocol !== "https:" && !(rt.allowHttpOrigin && origin.protocol === "http:")) throw new Error("checkout origin must be https");
-  const metadata = { checkoutId: input.checkoutId, storeId: input.storeId, fortuneType: input.fortuneType };
+  const metadata = { checkoutId: input.checkoutId, storeId: input.storeId, fortuneType: input.fortuneType, [STRIPE_ENV_METADATA_KEY]: rt.envTag };
   const expiresAt = Math.floor(input.expiresAt.getTime() / 1000);
   if (expiresAt * 1000 < Date.now() + 30 * 60 * 1000) throw new Error("checkout session expiry is too early");
   const session = await rt.client.checkout.sessions.create(
@@ -273,6 +306,8 @@ export type StripePaymentFacts = {
   paymentMethod: StripePaymentMethod;
   /** Stripe の値（モードと一致することを確認済み）。本番の決済だけ true（売上・精算の対象） */
   livemode: boolean;
+  /** Session の metadata の環境を表す値（以前の Session には無いので null） */
+  envTag: string | null;
 };
 
 export type StripeValidation = { ok: true; facts: StripePaymentFacts } | { ok: false; status: "not_paid" | "rejected"; reason: string };
@@ -310,7 +345,7 @@ export function validateStripeSession(session: Stripe.Checkout.Session, mode: St
   if (pi.status !== "succeeded") return { ok: false, status: "not_paid", reason: `payment_intent_${pi.status}` };
   if (pi.currency !== CURRENCY || pi.amount !== PRICE_JPY || pi.amount_received !== PRICE_JPY) return { ok: false, status: "rejected", reason: "amount_mismatch" };
   const pmd = pi.metadata ?? {};
-  if (pmd.checkoutId !== checkoutId || pmd.storeId !== storeId || pmd.fortuneType !== fortuneType) return { ok: false, status: "rejected", reason: "payment_intent_metadata_mismatch" };
+  if (pmd.checkoutId !== checkoutId || pmd.storeId !== storeId || pmd.fortuneType !== fortuneType || pmd[STRIPE_ENV_METADATA_KEY] !== md[STRIPE_ENV_METADATA_KEY]) return { ok: false, status: "rejected", reason: "payment_intent_metadata_mismatch" };
 
   const charge = pi.latest_charge;
   if (!charge || typeof charge === "string") return { ok: false, status: "rejected", reason: "charge_not_expanded" };
@@ -338,6 +373,7 @@ export function validateStripeSession(session: Stripe.Checkout.Session, mode: St
       refunded: charge.refunded || charge.amount_refunded > 0,
       paymentMethod,
       livemode: live,
+      envTag: typeof md[STRIPE_ENV_METADATA_KEY] === "string" ? md[STRIPE_ENV_METADATA_KEY] : null,
     },
   };
 }

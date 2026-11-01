@@ -180,7 +180,7 @@ describe("返金の状態（処理中・成功・一部・失敗）", () => {
 });
 
 // ---- Webhook（署名・重複・振り分け）。Firestore と確定処理は模擬 ----
-const hooks = vi.hoisted(() => ({ begin: true, lease: "acquired" as "acquired" | "busy" | "processed" | "error", finish: "finished" as "finished" | "already_processed" | "lease_lost", calls: [] as string[], fail: false }));
+const hooks = vi.hoisted(() => ({ begin: true, lease: "acquired" as "acquired" | "busy" | "processed" | "error", finish: "finished" as "finished" | "already_processed" | "lease_lost", calls: [] as string[], fail: false, confirm: null as null | Record<string, unknown>, refund: "refunded" }));
 vi.mock("@/lib/firestore/payments", () => ({
   // begin=false は処理済み（以前のテストの書き方）。lease で処理中（busy）も再現する
   acquireWebhookEventLease: async (_p: string, id: string) => {
@@ -190,17 +190,17 @@ vi.mock("@/lib/firestore/payments", () => ({
     if (hooks.lease === "error") throw Object.assign(new Error("unavailable"), { name: "FirebaseError" });
     return { status: "acquired", token: "lease_test", attempts: 1 };
   },
-  finishWebhookEventWithLease: async (_p: string, id: string, token: string) => (hooks.calls.push(token === "lease_test" ? `finish:${id}` : `finish-wrong-token:${id}`), hooks.finish),
+  finishWebhookEventWithLease: async (_p: string, id: string, token: string, state?: string) => (hooks.calls.push(`${token === "lease_test" ? "finish" : "finish-wrong-token"}:${id}${state && state !== "PROCESSED" ? `:${state}` : ""}`), hooks.finish),
   recordWebhookEventFailure: async (_p: string, id: string, errorName: string, token?: string) => (hooks.calls.push(`fail:${id}:${errorName}:${token}`), true),
 }));
 vi.mock("@/lib/payments/stripe-confirm", () => ({
   confirmStripeCheckout: async (id: string) => {
     hooks.calls.push(`confirm:${id}`);
     if (hooks.fail) throw new Error("boom");
-    return { status: "confirmed", transactionId: "stripe_pi" };
+    return hooks.confirm ?? { status: "confirmed", transactionId: "stripe_pi" };
   },
   closeStripeCheckout: async (id: string, opts?: { asyncFailed?: boolean }) => (hooks.calls.push(`close:${id}${opts?.asyncFailed ? ":async_failed" : ""}`), "expired"),
-  syncStripeRefunds: async (id: string) => (hooks.calls.push(`refund:${id}`), "refunded"),
+  syncStripeRefunds: async (id: string) => (hooks.calls.push(`refund:${id}`), hooks.refund),
   refreshStripeFee: async (id: string) => (hooks.calls.push(`fee:${id}`), true),
 }));
 
@@ -221,6 +221,8 @@ describe("Stripe の Webhook", () => {
     hooks.finish = "finished";
     hooks.calls = [];
     hooks.fail = false;
+    hooks.confirm = null;
+    hooks.refund = "refunded";
     vi.resetModules();
   });
   afterEach(() => vi.unstubAllEnvs());
@@ -277,6 +279,22 @@ describe("Stripe の Webhook", () => {
     expect((await post(ev("checkout.session.completed", { id: "cs_test_abc" }))).status).toBe(500);
     expect(hooks.calls).not.toContain("finish:evt_test_checkout.session.completed");
     expect(hooks.calls.some((c) => c.startsWith("fail:evt_test_checkout.session.completed:") && c.endsWith(":lease_test"))).toBe(true); // 処理権の値で RETRYABLE に
+  });
+
+  it("別の環境の決済（環境を表す値が違い、この環境に記録が無い）は IGNORED_OTHER_ENV で処理済みにする。それ以外の拒否は今までどおり PROCESSED", async () => {
+    hooks.confirm = { status: "rejected", reason: "other_environment" };
+    const r = await post(ev("checkout.session.completed", { id: "cs_test_abc" }));
+    expect(r.status).toBe(200);
+    expect(await r.json()).toMatchObject({ outcome: "ignored_other_env" });
+    hooks.refund = "ignored_other_env";
+    expect((await post(ev("charge.refunded", { id: "ch_test_1" }))).status).toBe(200);
+    hooks.confirm = { status: "rejected", reason: "unknown_checkout" };
+    await post(ev("checkout.session.completed", { id: "cs_test_x" }, { id: "evt_test_unknown" }));
+    expect(hooks.calls.filter((c) => c.startsWith("finish"))).toEqual([
+      "finish:evt_test_checkout.session.completed:IGNORED_OTHER_ENV",
+      "finish:evt_test_charge.refunded:IGNORED_OTHER_ENV",
+      "finish:evt_test_unknown",
+    ]);
   });
 
   it("期限切れ・失敗・返金・手数料の確定・関係ない通知の振り分け", async () => {

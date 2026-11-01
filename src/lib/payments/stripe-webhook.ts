@@ -19,6 +19,10 @@ import { alertKindForWebhookEvent, alertModeOf, hourBucket, newThrottleState, th
  *     409 を返す（処理済みにしない。Stripe が後で再送し、その時には処理済みなら 200、処理が止まっていれば期限切れの後に処理し直す）。
  *     完了・失敗の記録は処理権を持つ処理だけが書く（期限切れの後に古い処理が終わっても、新しい処理の状態を上書きしない）
  *  4) 通知の中身は信用せず、Stripe API から取り直して処理する（stripe-confirm.ts。こちらもモードを照合する）
+ *  5) 同じ Sandbox を使う別の環境（別の Firestore）の決済の通知は、Stripe から取り直した metadata の環境を表す値で見分ける
+ *     （stripeEnvTag。通知の ID・livemode だけでは見分けられない）。この環境に記録が無ければ何も書かず、IGNORED_OTHER_ENV
+ *     として処理済みにする（決済要確認の「決済記録が無い」を出さない）。値が無い以前の決済は今までどおり。値が違うのに
+ *     この環境に記録があるときは判断せずに例外（処理済みにしない）
  * 処理に失敗したら 500 を返して Stripe に再送させる。関係ない通知は 200 で受け流す。
  */
 const signatureThrottle = newThrottleState();
@@ -61,7 +65,7 @@ export async function handleStripeWebhook(rawBody: string, signature: string | n
   try {
     const outcome = await handle(event, rt);
     await rt.testHooks?.beforeFinishWebhookEvent?.(event.id);
-    const finished = await finishWebhookEventWithLease("stripe", event.id, lease.token);
+    const finished = await finishWebhookEventWithLease("stripe", event.id, lease.token, outcome === OTHER_ENV ? "IGNORED_OTHER_ENV" : "PROCESSED");
     // 処理権を失っていた（期限切れの後に別の処理が取り直した）：処理済みにせず 500（新しい処理か Stripe の再送で処理済みにする。反映は冪等）
     if (finished === "lease_lost") throw Object.assign(new Error("webhook event lease was taken over by another delivery"), { name: "WebhookLeaseLost" });
     return { status: 200, body: { received: true, outcome } };
@@ -76,14 +80,18 @@ export async function handleStripeWebhook(rawBody: string, signature: string | n
   }
 }
 
+/** 別の環境の決済の通知として扱った結果（handle の戻り値） */
+const OTHER_ENV = "ignored_other_env";
+
 async function handle(event: Stripe.Event, rt: StripeRuntime): Promise<string> {
   switch (event.type) {
     case "checkout.session.completed":
     case "checkout.session.async_payment_succeeded": {
       const r = await confirmStripeCheckout((event.data.object as Stripe.Checkout.Session).id, rt);
-      if (r.status === "rejected") console.error("[stripe-webhook] payment rejected", { eventId: event.id, reason: r.reason });
+      if (r.status === "rejected" && r.reason !== "other_environment") console.error("[stripe-webhook] payment rejected", { eventId: event.id, reason: r.reason });
       // 決済確定の後の再確認が失敗した（決済記録は PENDING のまま）：処理済みにせず 500 を返し、Stripe の再送で再確認する
       if (r.recheck === "pending") throw Object.assign(new Error("recheck after confirmation is pending"), { name: "StripeRecheckPendingError" });
+      if (r.status === "rejected" && r.reason === "other_environment") return OTHER_ENV;
       return r.status;
     }
     case "checkout.session.expired":

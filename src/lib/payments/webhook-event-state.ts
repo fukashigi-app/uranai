@@ -2,10 +2,11 @@
  * Webhook の通知の処理状態（webhookEvents/{決済会社_イベントID} の state）。判定の規則だけ（Firestore・Stripe には接続しない）。
  *
  *  RECEIVED          … 受信して処理を始めた（処理中、または処理の途中で止まった。lastAttemptAt が古ければ止まったもの）
- *  PROCESSED         … 処理が完了した（processedAt と同時に記録する。processedAt がある記録は常に PROCESSED として扱う）
+ *  PROCESSED         … 処理が完了した（processedAt と同時に記録する。processedAt がある記録は PROCESSED か IGNORED_OTHER_ENV）
  *  RETRYABLE         … 処理が失敗した（500 を返した）。Stripe の再送・将来の手動の再実行で処理し直す
  *  FAILED_PERMANENT  … 再試行しても解消しないと判断できる異常（今は安全に判定できる場合が無いので使っていない）
- *  IGNORED_OTHER_ENV … 別の環境の通知として無視した（環境の識別は未実装のため、今は使っていない）
+ *  IGNORED_OTHER_ENV … 別の環境（同じ Sandbox を使う別の Firestore）の決済の通知として、何も書かずに処理を終えた
+ *                      （processedAt と同時に記録する。再送は処理済みとして扱う。stripe-webhook.ts）
  *
  * 処理済みかどうかの判定（重複の排除・90日の削除）は、今までどおり processedAt だけで行う。state は状態の記録で、
  * 処理済みかどうかの判定には使わない（state だけを見て処理済みにしたり、処理をやめたりしない）。
@@ -14,12 +15,14 @@ export const WEBHOOK_EVENT_STATES = ["RECEIVED", "PROCESSED", "RETRYABLE", "FAIL
 export type WebhookEventState = (typeof WEBHOOK_EVENT_STATES)[number];
 
 /**
- * 記録の状態。processedAt があれば PROCESSED（以前の記録には state が無い）。processedAt が無ければ記録の state、
+ * 記録の状態。processedAt があれば PROCESSED（以前の記録には state が無い。別の環境の通知として終えた記録は IGNORED_OTHER_ENV）。processedAt が無ければ記録の state、
  * 不明な値・項目が無い以前の記録は RECEIVED（処理が終わっていない）として扱う。
  */
 export function webhookEventStateOf(d: { state?: unknown; processedAt?: unknown }): WebhookEventState {
-  if (d.processedAt) return "PROCESSED";
-  if (d.state === "RETRYABLE" || d.state === "FAILED_PERMANENT" || d.state === "IGNORED_OTHER_ENV") return d.state;
+  // 処理済み。別の環境の通知として終えた記録だけ IGNORED_OTHER_ENV（それ以外の state は、processedAt があれば PROCESSED）
+  if (d.processedAt) return d.state === "IGNORED_OTHER_ENV" ? "IGNORED_OTHER_ENV" : "PROCESSED";
+  // processedAt が無い IGNORED_OTHER_ENV は書かない（書いたら処理済みではない＝処理し直す。RECEIVED として扱う）
+  if (d.state === "RETRYABLE" || d.state === "FAILED_PERMANENT") return d.state;
   return "RECEIVED";
 }
 

@@ -19,6 +19,7 @@ import { createOperator, createStore, setStoreStatus } from "@/lib/services/stor
 import { monthTotals } from "@/lib/services/reports";
 import { randomToken, sha256Hex } from "@/lib/security/crypto";
 import { jstYearMonth } from "@/lib/time";
+import { stripeEnvTag } from "@/lib/payments/stripe-checkout";
 
 const PORT = Number(process.env.E2E_PUBLIC_PORT ?? 3210);
 const BASE = `http://localhost:${PORT}`;
@@ -200,7 +201,10 @@ async function main() {
   assert.deepEqual([co.provider, co.amount, co.storeId, co.status, co.providerPaymentId], ["stripe", 100, storeA.id, "PROCESSING", p1.sessionId]);
   const s1 = fake.sessions.get(p1.sessionId)!;
   assert.equal(s1.amount_total, 100);
-  assert.deepEqual(s1.metadata, { checkoutId: p1.checkoutId, storeId: storeA.id, fortuneType: "ZODIAC" });
+  // 環境を表す値（アプリと同じ FIREBASE_PROJECT_ID から決まる）。Session と PaymentIntent の両方に入れる
+  const envMd = { uranaiEnv: stripeEnvTag(process.env.FIREBASE_PROJECT_ID!) };
+  assert.deepEqual(s1.metadata, { checkoutId: p1.checkoutId, storeId: storeA.id, fortuneType: "ZODIAC", ...envMd });
+  assert.equal((s1 as unknown as { pi_metadata: Record<string, string> }).pi_metadata.uranaiEnv, envMd.uranaiEnv);
   assert.equal(s1.client_reference_id, p1.checkoutId);
   assert.deepEqual(s1.allowed_payment_method_types, ["card", "paypay"]);
   assert.equal(s1.success_url, `${BASE}/payment/return?session_id={CHECKOUT_SESSION_ID}`);

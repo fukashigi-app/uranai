@@ -14,6 +14,11 @@ describe("webhookEventStateOf：記録の状態（以前の記録との互換）
     expect(webhookEventStateOf({ processedAt: null, state: "PROCESSED" })).toBe("RECEIVED"); // processedAt が無いのに PROCESSED とは扱わない
     expect(webhookEventStateOf({ processedAt: null, state: "broken" })).toBe("RECEIVED");
   });
+  it("別の環境の通知として終えた記録（processedAt あり）は IGNORED_OTHER_ENV。processedAt が無ければ処理済みとは扱わない（RECEIVED）", () => {
+    expect(webhookEventStateOf({ processedAt: new Date(), state: "IGNORED_OTHER_ENV" })).toBe("IGNORED_OTHER_ENV");
+    expect(webhookEventStateOf({ processedAt: null, state: "IGNORED_OTHER_ENV" })).toBe("RECEIVED");
+    expect(isStaleUnfinished({ processedAt: new Date(), state: "IGNORED_OTHER_ENV", lastAttemptAt: new Date(0) }, new Date(), 1)).toBe(false);
+  });
 });
 
 describe("isStaleUnfinished：途中で止まった・失敗した通知の検出", () => {
