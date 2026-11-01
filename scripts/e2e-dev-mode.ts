@@ -273,7 +273,8 @@ async function main() {
   assert.deepEqual(await counts(), before.counts, "決済・売上・精算・店舗のデータが変わりました");
   assert.deepEqual(await monthTotals(ym), before.month);
   assert.deepEqual(await monthTotals(ym, store.id), before.storeMonth);
-  assert.deepEqual(before.storeMonth, { count: 1, gross: 100, storeShare: 30, operatorShare: 70, fee: 3 }); // 既存の本番決済1件だけ
+  // 既存の本番決済1件だけ（以前の PAY.JP の決済なので、手数料3円は推定値として feeEstimated にも入る）
+  assert.deepEqual(before.storeMonth, { count: 1, gross: 100, storeShare: 30, operatorShare: 70, fee: 3, feeEstimated: 3 });
   assert.deepEqual((await txRef.get()).data(), before.tx);
   assert.deepEqual((await fsdb().collection(C.stores).doc(store.id).get()).data(), before.storeDoc);
   // 実店舗の無料テスト利用件数は、占った店舗だけ1回増える（他の店舗・休止中の店舗は変わらない）
