@@ -4,6 +4,7 @@ import { PublicShell, Notice } from "@/components/public/public-shell";
 import { getAccessToken } from "@/lib/cookies";
 import { stripeTestConfig } from "@/lib/payments/stripe-guard";
 import { confirmStripeReturn } from "@/lib/payments/stripe-confirm";
+import { refundedNotice, type CheckoutRefundReason } from "@/lib/payments/refunded-notice";
 import { StripeReturnStatus } from "@/components/public/stripe-return-status";
 import { recordPaymentMonitorAlert } from "@/lib/services/payment-monitor";
 
@@ -27,14 +28,28 @@ export default async function StripeReturnPage(props: PageProps<"/payment/return
     );
   }
   let status: string;
+  let refundReason: CheckoutRefundReason | null = null;
   try {
-    status = (await confirmStripeReturn(await getAccessToken(), sessionId)).status;
+    const r = await confirmStripeReturn(await getAccessToken(), sessionId);
+    status = r.status;
+    if (r.status === "refunded") refundReason = r.refundReason;
   } catch (e) {
     console.error("[payment/return] confirm failed", (e as Error).name);
     await recordPaymentMonitorAlert({ kind: "checkout_confirm_failed", objectType: "checkout", objectId: /^cs_(test|live)_[A-Za-z0-9_]{1,200}$/.test(sessionId) ? sessionId : "unknown_session", mode: sessionId.startsWith("cs_live_") ? "live" : sessionId.startsWith("cs_test_") ? "test" : "unknown", errorName: (e as Error)?.name ?? null });
     status = "error";
   }
   if (status === "confirmed" || status === "duplicate") redirect("/fortune/input");
+  if (status === "refunded") {
+    // 返金済み・チャージバック：占いの入力へ進めない（「請求は発生していません」とは案内しない）
+    const n = refundedNotice(refundReason);
+    return (
+      <PublicShell>
+        <Notice title={n.title} action={<Link href="/fortune" className="btn-ghost inline-block rounded-2xl px-6 py-3 text-sm">占いの選択へ</Link>}>
+          {n.body}
+        </Notice>
+      </PublicShell>
+    );
+  }
   if (status === "not_paid" || status === "error") {
     // Stripe 側で確定待ち（PayPay など）・一時的なエラー：状態をくり返し確認し、確定したら占いの入力へ進む
     return (

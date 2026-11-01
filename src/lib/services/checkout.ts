@@ -14,6 +14,7 @@ import { randomToken, sha256Hex } from "@/lib/security/crypto";
 
 export { CheckoutError } from "@/lib/errors";
 import { CheckoutError, providerOrThrow, PAID_FLOW_BLOCKED_STORE_CODES } from "@/lib/errors";
+import type { CheckoutRefundReason } from "@/lib/payments/refunded-notice";
 
 export async function findActiveStoreByCode(storeCode: string) {
   if (isFirestore()) return fsStores.findStoreByCode(storeCode);
@@ -175,13 +176,15 @@ const RECONCILE_AFTER_MS = 5_000;
 /** Charge ID が分からないまま処理中になっている決済を失敗扱いにするまでの時間 */
 export const STALE_UNKNOWN_CHARGE_MS = 15 * 60 * 1000;
 
-export type CheckoutStatus = "created" | "processing" | "succeeded" | "failed" | "expired";
+/** refunded … 返金済み・チャージバック（Stripe の決済だけ。占いを開始できない。refundReason で理由を区別する） */
+export type CheckoutStatus = "created" | "processing" | "succeeded" | "failed" | "expired" | "refunded";
+export type CheckoutStatusResult = { status: CheckoutStatus; failureCode?: string | null; refundReason?: CheckoutRefundReason | null };
 
 /**
  * 決済状態を返す。Webhook 遅延時は決済代行APIから Charge を取得して照合する
  * （クライアントの申告は使わない。confirmCharge は冪等）。
  */
-export async function getCheckoutStatus(token: string | null): Promise<{ status: CheckoutStatus; failureCode?: string | null }> {
+export async function getCheckoutStatus(token: string | null): Promise<CheckoutStatusResult> {
   if (isFirestore()) return fsPay.getCheckoutStatus(token);
   const found = await getCheckoutByToken(token);
   if (!found) return { status: "expired" };
@@ -193,6 +196,9 @@ export async function getCheckoutStatus(token: string | null): Promise<{ status:
       return { status: "failed", failureCode: checkout.failureCode };
     case "EXPIRED":
       return { status: "expired" };
+    case "REFUNDED":
+      // 返金済み・チャージバック（Stripe の注文だけ。ここに来るのは Stripe 以外の注文なので、通常は起きない）
+      return { status: "refunded", refundReason: checkout.refundReason };
     case "CREATED":
       return { status: checkout.expiresAt > new Date() ? "created" : "expired" };
     case "PROCESSING": {

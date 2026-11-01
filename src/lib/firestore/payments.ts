@@ -8,7 +8,8 @@ import { calcFee, splitRevenue } from "@/lib/money";
 import { getProvider, isProviderId } from "@/lib/payments";
 import type { ProviderId } from "@/lib/payments/types";
 import type { ConfirmOutcome } from "@/lib/payments/confirm";
-import type { CheckoutStatus, PayResult } from "@/lib/services/checkout";
+import type { CheckoutStatusResult, PayResult } from "@/lib/services/checkout";
+import { isCheckoutRefundReason, type CheckoutRefundReason } from "@/lib/payments/refunded-notice";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
 import { randomToken, sha256Hex } from "@/lib/security/crypto";
 import { CheckoutError, PAID_FLOW_BLOCKED_STORE_CODES, providerOrThrow } from "@/lib/errors";
@@ -28,7 +29,12 @@ import { findStoreByCode } from "./stores";
  *  webhookEvents/{決済会社_イベントID}     … Webhook の処理済み記録
  */
 
-type Checkout = typeof checkouts.$inferSelect;
+type PgCheckout = typeof checkouts.$inferSelect;
+/**
+ * Firestore の注文。PostgreSQL の状態に加えて REFUNDED がある（Stripe の決済だけ。返金・チャージバックで占い権利を付与しない注文。
+ * refundReason で返金か異議申し立ての敗訴かを区別する）。REFUNDED の注文は期限切れの処理・削除の対象にしない
+ */
+export type Checkout = Omit<PgCheckout, "status"> & { status: PgCheckout["status"] | "REFUNDED"; refundReason: CheckoutRefundReason | null };
 
 const checkoutRef = (id: string) => fsdb().collection(C.checkouts).doc(id);
 export const transactionDocId = (provider: string, paymentId: string) => safeId(provider, paymentId);
@@ -46,6 +52,7 @@ function toCheckout(id: string, d: DocumentData): Checkout {
     accessTokenHash: String(d.accessTokenHash),
     attemptCount: Number(d.attemptCount ?? 0),
     failureCode: d.failureCode ?? null,
+    refundReason: isCheckoutRefundReason(d.refundReason) ? d.refundReason : null,
     expiresAt: mustDate(d.expiresAt),
     processingStartedAt: toDate(d.processingStartedAt),
     createdAt: mustDate(d.createdAt),
@@ -167,7 +174,7 @@ export async function payCheckout(token: string | null, cardToken: string): Prom
 const RECONCILE_AFTER_MS = 5_000;
 const STALE_UNKNOWN_CHARGE_MS = 15 * 60 * 1000;
 
-export async function getCheckoutStatus(token: string | null): Promise<{ status: CheckoutStatus; failureCode?: string | null }> {
+export async function getCheckoutStatus(token: string | null): Promise<CheckoutStatusResult> {
   const found = await getCheckoutByToken(token);
   if (!found) return { status: "expired" };
   const { checkout } = found;
@@ -182,6 +189,9 @@ export async function getCheckoutStatus(token: string | null): Promise<{ status:
       return { status: "failed", failureCode: checkout.failureCode };
     case "EXPIRED":
       return { status: "expired" };
+    case "REFUNDED":
+      // 返金済み・チャージバック（Stripe の注文だけ。ここに来るのは Stripe 以外の注文なので、通常は起きない）
+      return { status: "refunded", refundReason: checkout.refundReason };
     case "CREATED":
       return { status: checkout.expiresAt > new Date() ? "created" : "expired" };
     case "PROCESSING": {

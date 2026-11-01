@@ -6,7 +6,8 @@ import { C, fsdb, mustDate, safeId, toDate } from "@/lib/firestore/admin";
 import { isSalesPayment } from "@/lib/payments/kind";
 import { isAlreadyExists, salesKeys } from "@/lib/firestore/shared";
 import { sha256Hex } from "@/lib/security/crypto";
-import type { CheckoutStatus } from "@/lib/services/checkout";
+import type { CheckoutStatusResult } from "@/lib/services/checkout";
+import { isCheckoutRefundReason, refundedNotice, type CheckoutRefundReason } from "./refunded-notice";
 import { CheckoutError } from "@/lib/errors";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
 import { siteConfig } from "@/config/site";
@@ -65,7 +66,7 @@ export type StripeConfirmOutcome =
 
 const checkoutRef = (id: string) => fsdb().collection(C.checkouts).doc(id);
 
-type CheckoutLike = { id: string; provider: string; status: string; providerPaymentId: string | null; expiresAt: Date; storeId: string; fortuneType: string };
+type CheckoutLike = { id: string; provider: string; status: string; providerPaymentId: string | null; expiresAt: Date; storeId: string; fortuneType: string; refundReason?: unknown };
 
 /** 注文を見つける（ブラウザの Cookie の値から）。Stripe の注文でなければ null */
 async function stripeCheckoutByToken(token: string | null): Promise<{ id: string; data: DocumentData } | null> {
@@ -85,6 +86,9 @@ async function stripeCheckoutByToken(token: string | null): Promise<{ id: string
  */
 const EXPIRED_ERROR = () => new CheckoutError("expired", "お支払いの有効期限が切れました。お手数ですが占いの選択からやり直してください。", 410);
 const FAILED_ERROR = () => new CheckoutError("payment_failed", "お支払いが完了しませんでした（請求は発生していません）。お手数ですが占いの選択からやり直してください。", 410);
+/** 返金済み・チャージバックの注文（REFUNDED）：占いも新しい決済も始めない（「請求は発生していません」とは案内しない） */
+const REFUNDED_ERROR = (reason: unknown) => new CheckoutError("refunded", refundedNotice(isCheckoutRefundReason(reason) ? reason : null).body, 410);
+const refundReasonOf = (v: unknown): CheckoutRefundReason | null => (isCheckoutRefundReason(v) ? v : null);
 
 export type StripeStartResult = { status: "redirect"; url: string } | { status: "succeeded" } | { status: "pending"; returnUrl: string };
 
@@ -97,6 +101,8 @@ export async function startStripeCheckout(token: string | null, origin: string, 
   if (typeof d.stripeLivemode === "boolean" && d.stripeLivemode !== (r0.mode === "live")) {
     throw new CheckoutError("checkout_conflict", "お支払い情報を確認できませんでした。占いの選択からやり直してください。", 409);
   }
+  // 返金済み・チャージバックの注文：決済記録があっても占いへ進めない（確定の照合より先に判断する）
+  if (d.status === "REFUNDED") throw REFUNDED_ERROR(d.refundReason);
   if (d.status === "SUCCEEDED") return { status: "succeeded" };
   // すでに Session に移動済みなら、期限より先に支払い状況を照合する（期限の後に PayPay の支払いが確定することもあるため）
   if (typeof d.providerPaymentId === "string" && d.providerPaymentId) {
@@ -206,6 +212,7 @@ export async function confirmStripeCheckout(sessionId: string, rt?: StripeRuntim
       // 注文に記録したモードと、決済のモードが一致すること（記録が無い古い注文は、Session の ID の形で確認済み）
       if (typeof co.stripeLivemode === "boolean" && co.stripeLivemode !== f.livemode) return { status: "rejected", reason: "mode_mismatch" } as const;
       if (co.status === "SUCCEEDED") return { status: "rejected", reason: "checkout_already_succeeded" } as const; // 1注文につき1決済
+      if (co.status === "REFUNDED") return { status: "rejected", reason: "checkout_refunded" } as const; // 返金済み・チャージバックの注文に別の決済を記録しない
       // 注文を閉じた後に Stripe 側で支払いが確定した場合も、支払われた以上は権利を付与する（ログで知らせる）
       if (co.status !== "PROCESSING" && co.status !== "CREATED") console.warn("[stripe] payment confirmed after the order was closed", { checkoutId: f.checkoutId, status: co.status });
       if (String(co.storeId) !== f.storeId) return { status: "rejected", reason: "store_mismatch" } as const;
@@ -597,20 +604,28 @@ export async function refreshStripeFee(chargeId: string, rt?: StripeRuntime): Pr
 }
 
 /** 戻り先（/payment/return）：ブラウザの注文と Session が紐付いていることを確かめてから確定する */
-export async function confirmStripeReturn(token: string | null, sessionId: string, rt?: StripeRuntime): Promise<StripeConfirmOutcome | { status: "not_linked" }> {
+export async function confirmStripeReturn(
+  token: string | null,
+  sessionId: string,
+  rt?: StripeRuntime,
+): Promise<StripeConfirmOutcome | { status: "not_linked" } | { status: "refunded"; refundReason: CheckoutRefundReason | null }> {
   const r0 = rt ?? stripeRuntime();
   const found = await stripeCheckoutByToken(token);
   if (!found || !isStripeSessionId(sessionId, r0.mode) || found.data.providerPaymentId !== sessionId) return { status: "not_linked" };
+  // 返金済み・チャージバックの注文：決済記録があっても占いの入力へ進めない
+  if (found.data.status === "REFUNDED") return { status: "refunded", refundReason: refundReasonOf(found.data.refundReason) };
   return confirmStripeCheckout(sessionId, r0);
 }
 
 const RECONCILE_AFTER_MS = 3_000;
 
 /** 状態の確認（/api/checkout/status）。Webhook が遅れても、Stripe API で照合して進める */
-export async function stripeCheckoutStatus(checkout: CheckoutLike, rt?: StripeRuntime): Promise<{ status: CheckoutStatus; failureCode?: string | null }> {
+export async function stripeCheckoutStatus(checkout: CheckoutLike, rt?: StripeRuntime): Promise<CheckoutStatusResult> {
   switch (checkout.status) {
     case "SUCCEEDED":
       return { status: "succeeded" };
+    case "REFUNDED":
+      return { status: "refunded", refundReason: refundReasonOf(checkout.refundReason) };
     case "FAILED":
       return { status: "failed", failureCode: "stripe_failed" };
     case "EXPIRED":

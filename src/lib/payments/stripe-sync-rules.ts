@@ -8,6 +8,7 @@
  */
 import type Stripe from "stripe";
 import { chargebackCoversRemainder, disputeStateOf, type DisputeState } from "./settlement-rules";
+import type { CheckoutRefundReason } from "./refunded-notice";
 import type { StripeRefundState, StripeRefundSummary } from "./stripe-checkout";
 
 const STRIPE_PROVIDER = "stripe";
@@ -201,7 +202,7 @@ export type InitialEntitlement = {
   /** 注文の状態（権利を付与しないときは REFUNDED） */
   checkoutStatus: "SUCCEEDED" | "REFUNDED";
   /** REFUNDED の理由（返金か、異議申し立ての敗訴か）。付与するときは null */
-  refundReason: "refund" | "chargeback" | null;
+  refundReason: CheckoutRefundReason | null;
   suspendedByRefund: boolean;
   suspendedByDispute: boolean;
 };

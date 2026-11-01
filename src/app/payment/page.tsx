@@ -10,6 +10,7 @@ import { getCheckoutByToken } from "@/lib/services/checkout";
 import { activeProvider, PaymentUnavailableError } from "@/lib/payments";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
 import { stripeCheckoutAccess } from "@/lib/payments/stripe-access";
+import { refundedNotice } from "@/lib/payments/refunded-notice";
 import { StripeCheckoutButton } from "@/components/public/stripe-checkout-button";
 import { PAY_BUTTON_LABEL, STRIPE_TEST_PAY_BUTTON_LABEL } from "@/lib/legal/labels";
 
@@ -33,6 +34,17 @@ export default async function PaymentPage(props: PageProps<"/payment">) {
   if (!found) redirect("/fortune");
   const { checkout, storeName } = found;
   if (checkout.status === "SUCCEEDED") redirect("/fortune/input");
+  if (checkout.status === "REFUNDED") {
+    // 返金済み・チャージバック：決済画面も占いも開かない（期限切れの「お支払いは行われていません」より先に判断する）
+    const n = refundedNotice(checkout.refundReason);
+    return (
+      <PublicShell storeName={storeName}>
+        <Notice title={n.title} action={<Link href="/fortune" className="btn-gold inline-block rounded-2xl px-6 py-3 font-bold">占いの選択へ</Link>}>
+          {n.body}
+        </Notice>
+      </PublicShell>
+    );
+  }
 
   const expired = checkout.status === "EXPIRED" || (checkout.status !== "PROCESSING" && checkout.expiresAt <= new Date());
   if (expired) {

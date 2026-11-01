@@ -44,7 +44,7 @@ export async function runMaintenance() {
     b.update(db.collection(C.transactions).doc(String(d.get("transactionId"))), { fortuneStatus: "EXPIRED" });
   });
 
-  // 期限切れの注文
+  // 期限切れの注文（未払いの CREATED・FAILED だけ。返金済み・チャージバックの REFUNDED は決済記録があるので上書きしない）
   const expiredCheckouts = (await db.collection(C.checkouts).where("expiresAt", "<", ts(now)).get()).docs.filter((d) => ["CREATED", "FAILED"].includes(d.get("status")));
   await inBatches(expiredCheckouts, (b, d) => b.update(d.ref, { status: "EXPIRED", updatedAt: FieldValue.serverTimestamp() }));
 

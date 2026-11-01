@@ -23,6 +23,7 @@ import { defaultFeeRateBps } from "@/config/pricing";
 import { randomToken, sha256Hex } from "@/lib/security/crypto";
 import { jstYearMonth, shiftYearMonth } from "@/lib/time";
 import { restoreStripeEntitlement } from "@/lib/payments/stripe-confirm";
+import { runMaintenance } from "@/lib/services/maintenance";
 
 const BASE = process.env.E2E_BASE_URL ?? "http://localhost:3000";
 const STRIPE_PORT = 12111;
@@ -584,6 +585,55 @@ async function main() {
   const st = await listSettlements({ yearMonth: prev, storeId: storeA.id });
   assert.ok(st.every((x) => x.s.storeShare === 0 && x.s.transactionCount === 0), "テスト決済が精算に含まれました");
   step("テスト決済は売上（今月・店舗別）に含めず、月次精算（先月分）にも含めない");
+
+  // ---- 12. 返金済み・チャージバックの注文（REFUNDED）：占い・新しい決済を始めない。期限切れの処理で上書きしない ----
+  // 決済確定の時点の返金の取り込み（第2段階の手順2-3）はまだ無いので、Emulator のテストデータで REFUNDED の注文を作る
+  const opZ = await loggedIn(opId);
+  const p8 = await startPurchase(opZ, storeA.storeCode, "ZODIAC");
+  await ctl(`pay/${p8.sessionId}`);
+  r = await webhook("checkout.session.completed", { id: p8.sessionId, object: "checkout.session" });
+  assert.equal(((await r.json()) as { outcome: string }).outcome, "confirmed");
+  const t8 = (await txOf(p8.checkoutId))[0];
+  await fsdb().collection(C.checkouts).doc(p8.checkoutId).update({ status: "REFUNDED", refundReason: "refund", expiresAt: new Date(Date.now() - 3600_000) });
+  await fsdb().collection(C.fortuneSessions).doc(t8.id).update({ status: "EXPIRED", suspendedByRefund: true });
+  r = await opZ.req("/api/checkout/status");
+  assert.deepEqual(await r.json(), { status: "refunded", refundReason: "refund" });
+  r = await opZ.req("/api/checkout/stripe-session", { method: "POST", json: {} });
+  assert.equal(r.status, 410);
+  const startErr = (await r.json()) as { error: { code: string; message: string } };
+  assert.equal(startErr.error.code, "refunded");
+  assert.doesNotMatch(startErr.error.message, /請求は発生していません/);
+  r = await opZ.req(`/payment/return?session_id=${p8.sessionId}`);
+  assert.equal(r.status, 200, "返金済みの注文で戻り先が占いの入力へ移動しました");
+  let html = await r.text();
+  assert.match(html, /このご注文は返金済みです/);
+  assert.doesNotMatch(html, /請求は発生していません/);
+  r = await opZ.req("/payment");
+  assert.equal(r.status, 200);
+  html = await r.text();
+  assert.match(html, /このご注文は返金済みです/);
+  assert.doesNotMatch(html, /お支払いは行われていません|Stripe のテスト決済です/, "返金済みの注文に決済画面・未払いの案内を出しました");
+  r = await opZ.req("/api/fortune", { method: "POST", json: { type: "ZODIAC", sign: "leo" } });
+  assert.equal(r.status, 410, "返金済みの注文で占えました");
+  assert.equal((await fsdb().collection(C.fortuneSessions).doc(t8.id).get()).get("status"), "EXPIRED");
+  // 同じ決済の確定の通知が届き直しても、注文・権利は戻らない
+  r = await webhook("checkout.session.completed", { id: p8.sessionId, object: "checkout.session" });
+  assert.equal(((await r.json()) as { outcome: string }).outcome, "duplicate");
+  // 毎日のメンテナンス：期限を過ぎた REFUNDED の注文を EXPIRED にしない・削除しない
+  await runMaintenance();
+  let co8 = (await fsdb().collection(C.checkouts).doc(p8.checkoutId).get()).data()!;
+  assert.deepEqual([co8.status, co8.refundReason], ["REFUNDED", "refund"]);
+  assert.equal((await fsdb().collection(C.fortuneSessions).doc(t8.id).get()).get("status"), "EXPIRED");
+  // チャージバックの理由
+  await fsdb().collection(C.checkouts).doc(p8.checkoutId).update({ refundReason: "chargeback" });
+  r = await opZ.req("/api/checkout/status");
+  assert.deepEqual(await r.json(), { status: "refunded", refundReason: "chargeback" });
+  html = await (await opZ.req(`/payment/return?session_id=${p8.sessionId}`)).text();
+  assert.match(html, /チャージバック/);
+  assert.doesNotMatch(html, /請求は発生していません/);
+  co8 = (await fsdb().collection(C.checkouts).doc(p8.checkoutId).get()).data()!;
+  assert.equal(co8.status, "REFUNDED");
+  step("返金済み・チャージバックの注文（REFUNDED）：状態の確認は refunded と理由、決済画面へは 410、戻り先・決済画面は返金の案内（「請求は発生していません」と出さない）、占いは 410。確定の通知の再送・期限切れのメンテナンスでも REFUNDED のまま");
 
   console.log("\nSTRIPE E2E PASSED");
 }

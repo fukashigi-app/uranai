@@ -4,8 +4,9 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Spinner } from "@/components/ui/spinner";
+import { isCheckoutRefundReason, refundedNotice, type CheckoutRefundReason } from "@/lib/payments/refunded-notice";
 
-type Phase = "checking" | "slow" | "failed" | "expired";
+type Phase = "checking" | "slow" | "failed" | "expired" | "refunded";
 
 const INTERVAL_MS = [2_000, 2_000, 3_000, 3_000, 5_000];
 const SLOW_AFTER_MS = 60_000;
@@ -29,6 +30,7 @@ function Notice({ title, children, action }: { title: string; children: React.Re
 export function StripeReturnStatus() {
   const router = useRouter();
   const [phase, setPhase] = useState<Phase>("checking");
+  const [refundReason, setRefundReason] = useState<CheckoutRefundReason | null>(null);
 
   useEffect(() => {
     let stopped = false;
@@ -38,11 +40,16 @@ export function StripeReturnStatus() {
     async function tick() {
       try {
         const res = await fetch("/api/checkout/status", { cache: "no-store" });
-        const json = (await res.json().catch(() => null)) as { status?: string } | null;
+        const json = (await res.json().catch(() => null)) as { status?: string; refundReason?: unknown } | null;
         if (stopped) return;
         if (json?.status === "succeeded") {
           router.replace("/fortune/input");
           return;
+        }
+        if (json?.status === "refunded") {
+          // 返金済み・チャージバック：占いの入力へ進めない（「請求は発生していません」とは表示しない）
+          setRefundReason(isCheckoutRefundReason(json.refundReason) ? json.refundReason : null);
+          return setPhase("refunded");
         }
         if (json?.status === "failed") return setPhase("failed");
         if (json?.status === "expired") return setPhase("expired");
@@ -62,6 +69,14 @@ export function StripeReturnStatus() {
     };
   }, [router]);
 
+  if (phase === "refunded") {
+    const n = refundedNotice(refundReason);
+    return (
+      <Notice title={n.title} action={<Link href="/fortune" className="btn-ghost inline-block rounded-2xl px-6 py-3 font-bold">占いの選択へ</Link>}>
+        {n.body}
+      </Notice>
+    );
+  }
   if (phase === "failed" || phase === "expired") {
     return (
       <Notice title="お支払いが完了しませんでした" action={<Link href="/fortune" className="btn-gold inline-block rounded-2xl px-6 py-3 font-bold">占いを選び直す</Link>}>
