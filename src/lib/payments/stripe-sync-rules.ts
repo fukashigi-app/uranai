@@ -364,9 +364,12 @@ export function decideCheckoutAfterSync(
 /** 復旧の操作の結果（decideEntitlementRestore の理由に、Stripe・決済の照合の結果を加えたもの） */
 export type RestoreOutcomeCode = "restored" | RestoreDenyReason | "not_eligible" | "payment_mismatch" | "stripe_unavailable" | "stripe_unverified" | "state_changed";
 
+/** 復旧に成功したときの通知（決済履歴の画面の上部に表示する。決済ID・理由などは含めない） */
+export const RESTORE_SUCCESS_NOTICE = "占い権利を復旧しました（有効期限は復旧時から24時間）";
+
 /** 運営画面に出す説明（お客さんには表示しない。理由の入力の内容は含めない） */
 export const RESTORE_OUTCOME_MESSAGE: Record<RestoreOutcomeCode, string> = {
-  restored: "占い権利を戻しました（有効期限は今から24時間）。注文も占いを始められる状態に戻しました。",
+  restored: RESTORE_SUCCESS_NOTICE,
   payment_not_succeeded: "全額の返金済み・チャージバックの決済のため、戻せません。",
   refund_pending: "返金の処理中のため、戻せません（Stripe で返金の結果が出るまでお待ちください）。",
   refund_not_restorable: "返金がすべて失敗・一部の返金のときだけ戻せます。",

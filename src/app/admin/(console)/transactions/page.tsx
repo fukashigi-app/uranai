@@ -12,6 +12,7 @@ import { listTransactions, monthTotals } from "@/lib/services/reports";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
 import { formatDateTimeJa, isValidYearMonth, jstYearMonth } from "@/lib/time";
 import { formatYen } from "@/lib/money";
+import { ADMIN_TX_NOTICES, adminTxNoticeOf } from "@/lib/admin/transaction-notices";
 
 export const metadata = { title: "決済履歴" };
 
@@ -23,6 +24,8 @@ export default async function AdminTransactionsPage(props: PageProps<"/admin/tra
   const storeIdP = one(sp.storeId);
   const storeId = storeIdP && /^[0-9a-f-]{36}$/.test(storeIdP) ? storeIdP : undefined;
   const page = parsePage(sp.page);
+  // 操作の成功の通知（表示だけ。固定の文言から選ぶ。知らない値・クエリの値そのものは表示しない）
+  const notice = adminTxNoticeOf(one(sp.notice));
   const perPage = 50;
   const [data, totals, storeRow] = await Promise.all([
     listTransactions({ storeId, yearMonth: ym, page, perPage, audience: "operator" }),
@@ -53,6 +56,11 @@ export default async function AdminTransactionsPage(props: PageProps<"/admin/tra
         }
         actions={<MonthPicker value={ym} makeHref={(v) => q({ ym: v, page: 1 })} />}
       />
+      {notice ? (
+        <p role="status" data-notice={notice} className="mb-4 rounded-xl border border-success/40 bg-success/10 px-4 py-3 text-[13px] text-success">
+          {ADMIN_TX_NOTICES[notice]}
+        </p>
+      ) : null}
       <div className="mb-4 grid grid-cols-2 gap-2 text-[13px] sm:grid-cols-5">
         {[
           ["件数", `${totals.count.toLocaleString("ja-JP")}件`],

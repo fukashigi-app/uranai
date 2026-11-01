@@ -8,6 +8,7 @@ import { formatDateTimeJa } from "@/lib/time";
 import { formatYen } from "@/lib/money";
 import { ALERT_MODE_LABEL, API_5XX_ALERT_THRESHOLD, monitorHealth, PAYMENT_ALERT_LABEL, STUCK_PROCESSING_MINUTES, type AlertMode } from "@/lib/payments/monitor-rules";
 import { resolvePaymentAlertAction, runPaymentMonitorAction } from "../../actions";
+import { ALERT_RESOLVED_NOTICE, LIST_NOTICE } from "@/lib/admin/list-notices";
 
 export const metadata = { title: "決済監視" };
 export const dynamic = "force-dynamic";
@@ -35,6 +36,9 @@ export default async function PaymentMonitorPage(props: PageProps<"/admin/paymen
   const status = one(sp.status) === "RESOLVED" ? "RESOLVED" : one(sp.status) === "all" ? undefined : "OPEN";
   const modeParam = one(sp.mode);
   const mode: AlertMode | undefined = modeParam === "live" || modeParam === "test" || modeParam === "unknown" ? modeParam : undefined;
+  // 確認済みにした後の通知（表示だけ。固定の文言）と、操作の後に戻る絞り込み（移動先の URL だけに使う）
+  const notice = one(sp.notice) === LIST_NOTICE.alert;
+  const filter = { status: one(sp.status) ?? null, mode: mode ?? null };
   if (!isFirestore()) {
     return (
       <>
@@ -56,6 +60,11 @@ export default async function PaymentMonitorPage(props: PageProps<"/admin/paymen
         title="決済監視"
         description="決済・Webhook・返金・異議申し立て・精算の処理の失敗と、点検（読み取りのみ）で見つかった食い違いです。同じ種類・対象の異常は1件にまとめ、回数を数えます。自動で返金・再決済はしません。Stripe のダッシュボードと照らし合わせて確認してください。"
       />
+      {notice ? (
+        <p role="status" data-notice="alert_resolved" className="mb-4 rounded-xl border border-success/40 bg-success/10 px-4 py-3 text-[13px] text-success">
+          {ALERT_RESOLVED_NOTICE}
+        </p>
+      ) : null}
       <Card title="監視の状態">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="space-y-1 text-[13px]">
@@ -159,7 +168,7 @@ export default async function PaymentMonitorPage(props: PageProps<"/admin/paymen
                 {r.status === "OPEN" ? "未確認" : "確認済み"}
                 {r.status === "RESOLVED" && r.resolvedAt ? <span className="block text-[11px] text-ink-faint">{formatDateTimeJa(r.resolvedAt)}</span> : null}
               </td>
-              <td>{r.status === "OPEN" ? <ActionButton action={resolvePaymentAlertAction.bind(null, r.id)} label="確認済みにする" confirmMessage="確認済みにしますか？（同じ異常がまた起きたら未確認に戻ります）" /> : "—"}</td>
+              <td>{r.status === "OPEN" ? <ActionButton action={resolvePaymentAlertAction.bind(null, r.id, filter)} label="確認済みにする" confirmMessage="確認済みにしますか？（同じ異常がまた起きたら未確認に戻ります）" /> : "—"}</td>
             </tr>
           ))}
         </Table>

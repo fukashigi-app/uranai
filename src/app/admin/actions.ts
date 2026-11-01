@@ -27,6 +27,8 @@ import { writeAudit } from "@/lib/services/audit";
 import { randomToken } from "@/lib/security/crypto";
 import { formatDateTimeJa } from "@/lib/time";
 import type { FormState } from "@/components/console/form";
+import { adminTxNoticeUrl } from "@/lib/admin/transaction-notices";
+import { paymentMonitorUrl, paymentReviewsUrl } from "@/lib/admin/list-notices";
 
 const uuid = z.uuid();
 const PROFILE_FIELDS = ["name", "contactName", "postalCode", "address", "phone", "email"];
@@ -230,27 +232,35 @@ export async function restoreStripeEntitlementAction(transactionId: string, _pre
     return { message: "占い権利を戻せませんでした。少し時間をおいてから、もう一度お試しください。" };
   }
   revalidatePath("/admin/transactions");
-  return r === "restored" ? { ok: true, message: RESTORE_OUTCOME_MESSAGE.restored } : { message: RESTORE_OUTCOME_MESSAGE[r] };
+  // 拒否：遷移せず、フォームの中に理由を表示する
+  if (r !== "restored") return { message: RESTORE_OUTCOME_MESSAGE[r] };
+  // 成功：戻した決済は一覧から消える（行の中のフォームも消える）ので、決済履歴の画面に移動して上部に通知を出す。
+  // クエリは通知の表示だけに使う（権限・成功の判定・データの更新には使わない）。再読み込み・戻る操作では復旧の処理は動かない（GET の表示だけ）
+  redirect(adminTxNoticeUrl("entitlement_restored"));
 }
 
 /** 決済要確認を確認済みにする（監査ログに記録） */
-export async function resolvePaymentReviewAction(id: string, _prev: FormState): Promise<FormState> {
+export async function resolvePaymentReviewAction(id: string, filter: unknown, _prev: FormState): Promise<FormState> {
   const { actor } = await operator();
   if (!/^[A-Za-z0-9_]{1,120}$/.test(id)) throw new Error("invalid id");
   const { resolvePaymentReview } = await import("@/lib/firestore/payment-reviews");
   const done = await resolvePaymentReview(id, actor);
   revalidatePath("/admin/payment-reviews");
-  return done ? { ok: true, message: "確認済みにしました。" } : { message: "すでに確認済みです。" };
+  if (!done) return { message: "すでに確認済みです。" };
+  // 完了：未確認の一覧から消えるので、元の画面（絞り込みはそのまま）に移動して上部に通知を出す。filter は移動先の URL だけに使う
+  redirect(paymentReviewsUrl(filter, true));
 }
 
 /** 決済監視の異常を確認済みにする（監査ログに記録。同じ異常がまた起きたら未確認に戻る） */
-export async function resolvePaymentAlertAction(id: string, _prev: FormState): Promise<FormState> {
+export async function resolvePaymentAlertAction(id: string, filter: unknown, _prev: FormState): Promise<FormState> {
   const { actor } = await operator();
   if (!/^[A-Za-z0-9_]{1,120}$/.test(id)) throw new Error("invalid id");
   const { resolvePaymentAlert } = await import("@/lib/firestore/payment-alerts");
   const done = await resolvePaymentAlert(id, actor);
   revalidatePath("/admin/payment-monitor");
-  return done ? { ok: true, message: "確認済みにしました。" } : { message: "すでに確認済みです。" };
+  if (!done) return { message: "すでに確認済みです。" };
+  // 完了：未確認の一覧から消えるので、元の画面（絞り込みはそのまま）に移動して上部に通知を出す。filter は移動先の URL だけに使う
+  redirect(paymentMonitorUrl(filter, true));
 }
 
 /** 決済監視の点検を今すぐ実行する（読み取り専用。決済の確定・返金・再決済はしない。監査ログに記録） */
@@ -286,9 +296,11 @@ export async function dismissStripeDisputeReviewAction(transactionId: string, _p
   const { dismissStripeDisputeReview } = await import("@/lib/payments/stripe-confirm");
   const r = await dismissStripeDisputeReview(transactionId, actor);
   revalidatePath("/admin/transactions");
-  if (r === "dismissed") return { ok: true, message: "確認済みにしました。" };
+  // 確認を完了できない（対応中・確認済み）：移動せず、行の中に理由を表示する
   if (r === "still_open") return { message: "まだ対応中です。Stripe で結果が出るまで、精算の保留は続きます。" };
-  return { message: "すでに確認済みです。" };
+  if (r !== "dismissed") return { message: "すでに確認済みです。" };
+  // 完了：対象は一覧から消えるので、決済履歴の画面に移動して上部に通知を出す（クエリは通知の表示だけ）
+  redirect(adminTxNoticeUrl("dispute_reviewed"));
 }
 
 /** Stripe のテスト決済：返金の確認を終える（権利は戻さない。監査ログに記録） */
@@ -298,5 +310,7 @@ export async function dismissStripeRefundReviewAction(transactionId: string, _pr
   const { dismissStripeRefundReview } = await import("@/lib/payments/stripe-confirm");
   const done = await dismissStripeRefundReview(transactionId, actor);
   revalidatePath("/admin/transactions");
-  return done ? { ok: true, message: "確認済みにしました。" } : { message: "すでに確認済みです。" };
+  if (!done) return { message: "すでに確認済みです。" };
+  // 完了：対象は一覧から消えるので、決済履歴の画面に移動して上部に通知を出す（クエリは通知の表示だけ）
+  redirect(adminTxNoticeUrl("refund_reviewed"));
 }

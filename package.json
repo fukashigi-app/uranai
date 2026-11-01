@@ -33,6 +33,8 @@
     "e2e:stripe-settlement": "tsx --conditions=react-server scripts/e2e-stripe-settlement.ts",
     "e2e:stripe-settlement-safety": "tsx --conditions=react-server scripts/e2e-stripe-settlement-safety.ts",
     "e2e:payment-monitor": "tsx --conditions=react-server scripts/e2e-payment-monitor.ts",
+    "e2e:stripe-ordering": "tsx --conditions=react-server scripts/e2e-stripe-ordering.ts",
+    "e2e:admin-restore-browser": "tsx --conditions=react-server scripts/e2e-admin-restore-browser.ts",
     "monitor:payments": "tsx --conditions=react-server scripts/payment-monitor.ts"
   },
   "dependencies": {
