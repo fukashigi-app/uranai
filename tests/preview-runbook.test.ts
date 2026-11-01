@@ -128,3 +128,20 @@ describe("手順書 §9・§11：点検の時間の上限と、関数の実行�
     expect(s * 1000).toBeGreaterThanOrEqual(MONITOR_LIMITS.deadlineMs + 10_000);
   });
 });
+
+describe("手順書 §11：Webhook の関数の実行時間の上限と処理権の期限", () => {
+  it("Webhook は maxDuration=300（Hobby・Fluid Compute の上限）。処理権の期限は360秒で、上限より60秒以上長い", async () => {
+    const src = readFileSync(path.join(process.cwd(), "src/app/api/webhooks/stripe/route.ts"), "utf8");
+    const m = /export const maxDuration\s*=\s*(\d+)/.exec(src);
+    expect(m && Number(m[1])).toBe(300);
+    const { WEBHOOK_LEASE_TTL_MS } = await import("@/lib/payments/webhook-event-state");
+    expect(WEBHOOK_LEASE_TTL_MS).toBe(360_000);
+    expect(WEBHOOK_LEASE_TTL_MS).toBeGreaterThanOrEqual(Number(m![1]) * 1000 + 60_000);
+  });
+
+  it("Webhook 以外の処理には、まだ maxDuration を設定していない", () => {
+    for (const f of ["src/app/payment/return/page.tsx", "src/app/api/checkout/stripe-session/route.ts", "src/app/admin/(console)/payment-monitor/page.tsx"]) {
+      expect(readFileSync(path.join(process.cwd(), f), "utf8"), f).not.toMatch(/export const maxDuration/);
+    }
+  });
+});

@@ -74,7 +74,7 @@ export const PAYMENT_REVIEW_TIMEOUT_MS = 3000;
  * 記録が必須の決済要確認（recordRequiredPaymentReview）を待つ上限。
  * 同じ記録に複数の通知が同時に届くと、Firestore の SDK がトランザクションをやり直す（最大5回。2回目以降の待ち時間は
  * 0秒・約1秒・約1.5秒・約2.25秒、それぞれ ±50%）。3秒では3回目以降のやり直しが収まらず、不要な 500 になっていた。
- * 6秒なら4回目までがおおむね収まる。長くしすぎると、関数の実行時間の上限（maxDuration は未設定。Vercel の設定は未確認）の中で、
+ * 6秒なら4回目までがおおむね収まる。長くしすぎると、関数の実行時間の上限（Webhook の maxDuration＝300秒）の中で、
  * Stripe API の呼び出しと合わせて上限を超えるおそれがあるため、10秒にはしない（docs/preview-verification.md §11）。
  */
 export const REQUIRED_PAYMENT_REVIEW_TIMEOUT_MS = 6000;

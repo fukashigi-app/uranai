@@ -3,6 +3,12 @@ import { stripeRuntime } from "@/lib/payments/stripe-checkout";
 import { handleStripeWebhook } from "@/lib/payments/stripe-webhook";
 
 export const dynamic = "force-dynamic";
+/**
+ * 関数の実行時間の上限（秒）。Hobby プラン・Fluid Compute 有効（Vercel の管理画面で確認）で使える上限の300秒。
+ * 上限は「ここで打ち切られる」時間で、処理が終わる保証ではない。打ち切られた通知は processedAt を書かないので、
+ * 処理権の期限（WEBHOOK_LEASE_TTL_MS＝360秒。この値より60秒長い）の後の Stripe の再送で処理し直す（docs/preview-verification.md §11）
+ */
+export const maxDuration = 300;
 
 const MAX_BODY = 256 * 1024;
 

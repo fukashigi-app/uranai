@@ -93,7 +93,8 @@ export function decodeWebhookEventCursor(s: unknown): WebhookEventCursor | null 
 /**
  * Webhook の通知の処理権（lease）。同じ通知が同時に届いても、原則として1つの処理だけが進むようにする。
  * 処理権は webhookEvents の leaseOwner（処理ごとのランダムな値）と leaseExpiresAt（期限）で表し、Firestore のトランザクションで取る。
- *  - 期限は WEBHOOK_LEASE_TTL_MS。関数の実行時間の上限（maxDuration は未設定。Fluid Compute の既定は300秒、未確認）より長くする。
+ *  - 期限は WEBHOOK_LEASE_TTL_MS。Webhook の関数の実行時間の上限（route の maxDuration＝300秒）より60秒長くする
+ *    （上限で打ち切られた古い処理が、期限の後まで動き続けないように）。
  *    期限を過ぎても古い処理が動いている可能性はあるが、反映の処理はすべて冪等なので、重なってもデータは二重にならない
  *  - 処理済み（processedAt）の判定は今までどおり。処理権はその前の、処理を始めてよいかの判定だけに使う
  *  - replayLeaseUntil（将来の復旧用に予約した項目）は使わない（null のまま）
