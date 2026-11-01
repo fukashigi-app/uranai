@@ -3,7 +3,8 @@
   "git": {
     "deploymentEnabled": {
       "backup-tools": false,
-      "dev-mode": false
+      "dev-mode": false,
+      "recovery/uranai-20261031": false
     }
   }
 }
