@@ -211,9 +211,11 @@ async function main() {
   assert.deepEqual([forged.status, forged2.status], [400, 400]);
   assert.equal((await fsdb().collection(C.paymentReviews).count().get()).data().count, before, "署名が不正な通知を要確認に記録しました");
   // 秘密情報・カード情報を保存していない（保存する項目は ID・金額・項目名だけ）
-  const allowed = new Set(["kind", "objectType", "objectId", "eventType", "transactionId", "storeId", "chargeId", "paymentIntentId", "settlementId", "yearMonth", "mismatches", "amount", "livemode", "causeKey", "status", "occurrences", "firstSeenAt", "lastSeenAt", "resolvedAt", "resolvedBy"]);
+  const allowed = new Set(["kind", "objectType", "objectId", "eventType", "transactionId", "storeId", "chargeId", "paymentIntentId", "settlementId", "yearMonth", "mismatches", "amount", "livemode", "causeKey", "status", "occurrences", "firstSeenAt", "lastSeenAt", "resolvedAt", "resolvedBy", "recentOccurrenceKeys"]);
   for (const d of (await fsdb().collection(C.paymentReviews).get()).docs) {
     for (const k of Object.keys(d.data())) assert.ok(allowed.has(k), `決済要確認に想定外の項目 ${k}`);
+    // 同じ通知を1回だけ数えるためのキーは、通知の ID だけ（本文・秘密情報は入れない）
+    for (const key of (d.get("recentOccurrenceKeys") as unknown[] | undefined) ?? []) assert.match(String(key), /^event:evt_[A-Za-z0-9_]+$/, "決済要確認の通知のキーが通知の ID ではありません");
     assert.doesNotMatch(JSON.stringify(d.data()), /whsec_|sk_(live|test)_|card|"last4"/i, "決済要確認に秘密情報・カード情報が含まれています");
   }
   const openList = await listPaymentReviews({ status: "OPEN" });

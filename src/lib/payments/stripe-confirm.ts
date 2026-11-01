@@ -13,7 +13,7 @@ import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
 import { siteConfig } from "@/config/site";
 import { writeAudit } from "@/lib/firestore/audit";
 import { reconcileTransactionInTx, settlementRefForTx } from "@/lib/firestore/settlement-adjustments";
-import { paymentReviewRef, recordPaymentReview, recordPaymentReviewInTx, type PaymentReviewInput } from "@/lib/firestore/payment-reviews";
+import { paymentReviewRef, recordPaymentReviewInTx, recordRequiredPaymentReview, type PaymentReviewInput } from "@/lib/firestore/payment-reviews";
 import type { DisputeState } from "./settlement-rules";
 import {
   chargeMismatches,
@@ -480,7 +480,7 @@ function updateCheckoutAfterSync(tx: Transaction, co: DocumentSnapshot | null, a
  *  - 一部・失敗 … refundNeedsReview=true（管理者が確認する。権利の復旧は restoreStripeEntitlement）
  * 記録と照合できないとき（店舗・金額の食い違い、記録が無い）は反映せず「決済要確認」に記録する。
  */
-export async function syncStripeRefunds(chargeId: string, rt?: StripeRuntime, eventType?: string): Promise<StripeRefundOutcome> {
+export async function syncStripeRefunds(chargeId: string, rt?: StripeRuntime, eventType?: string, eventId?: string): Promise<StripeRefundOutcome> {
   const r0 = rt ?? stripeRuntime();
   const charge = await retrieveStripeCharge(chargeId, r0);
   if (charge.livemode !== (r0.mode === "live")) return "ignored"; // 別のモードの決済は扱わない
@@ -523,13 +523,24 @@ export async function syncStripeRefunds(chargeId: string, rt?: StripeRuntime, ev
     return { outcome: d.outcome, review };
   });
   await r0.testHooks?.afterSyncCommit?.("refund", txRef.id);
-  // 反映を伴わない決済要確認の記録（決済記録が無い・照合できない）は、今までどおりトランザクションの後で記録する
-  if (res.review) await recordPaymentReview(res.review);
+  // 反映を伴わない決済要確認の記録（決済記録が無い・照合できない）はトランザクションの後で記録する。記録が必須なので、失敗したら例外
+  await recordSyncReview(res.review, r0, eventId);
   const result = res.outcome;
   if (result === "rejected") console.error("[stripe] refund does not match the recorded payment (not applied)", { chargeId: charge.id });
   if (result === "refund_failed") console.error("[stripe] refund failed (admin review required)", { chargeId: charge.id });
   if (result === "partial") console.warn("[stripe] partial refund recorded (admin review required)", { chargeId: charge.id });
   return result;
+}
+
+/**
+ * 返金・異議申し立ての反映で、記録だけで異常を知らせる決済要確認（決済記録が無い・照合できない・複数の申し立て・状態の後戻り・
+ * 申し立ての額の不正）を記録する。記録できなければ例外（Webhook は処理済みにせず 500 を返し、Stripe の再送で記録し直す）。
+ * 通知の ID を渡すと、記録の後に処理が失敗して同じ通知が再送されても、回数を増やさない。
+ */
+async function recordSyncReview(review: PaymentReviewInput | undefined, r0: StripeRuntime, eventId: string | undefined): Promise<void> {
+  if (!review) return;
+  r0.testHooks?.beforeReviewRecord?.(review.kind);
+  await recordRequiredPaymentReview(review, eventId ? { occurrenceKey: `event:${eventId}` } : {});
 }
 
 /**
@@ -562,7 +573,7 @@ export type StripeDisputeOutcome = "dispute_open" | "dispute_won" | "dispute_los
  * 同じ状態はもう反映済みとして何もしない（通知の再送・重複でも二重にならない）。結果が出た（勝訴・敗訴）申し立ては
  * 対応中に戻さない（Stripe API が古い状態を返しても巻き戻らない。決済要確認に記録する）。
  */
-export async function syncStripeDispute(disputeId: string, rt?: StripeRuntime, eventType?: string): Promise<StripeDisputeOutcome> {
+export async function syncStripeDispute(disputeId: string, rt?: StripeRuntime, eventType?: string, eventId?: string): Promise<StripeDisputeOutcome> {
   const r0 = rt ?? stripeRuntime();
   const dp = await retrieveStripeDispute(disputeId, r0);
   if (dp.livemode !== (r0.mode === "live")) return "ignored";
@@ -577,7 +588,7 @@ export async function syncStripeDispute(disputeId: string, rt?: StripeRuntime, e
   const amountProblem = disputeAmountProblem(dp, charge.amount);
   if (amountProblem) {
     console.error("[stripe] dispute amount does not match the charge (not applied)", { disputeId: dp.id });
-    if (isOurPayment(pi)) await recordPaymentReview({ kind: "dispute_amount_invalid", objectType: "dispute", objectId: dp.id, storeId: pi.metadata.storeId, amount: Number.isSafeInteger(dp.amount) ? dp.amount : null, mismatches: [amountProblem], ...base });
+    if (isOurPayment(pi)) await recordSyncReview({ kind: "dispute_amount_invalid", objectType: "dispute", objectId: dp.id, storeId: pi.metadata.storeId, amount: Number.isSafeInteger(dp.amount) ? dp.amount : null, mismatches: [amountProblem], ...base }, r0, eventId);
     return "rejected";
   }
   const txRef = fsdb().collection(C.transactions).doc(stripeTransactionId(piId));
@@ -624,8 +635,9 @@ export async function syncStripeDispute(disputeId: string, rt?: StripeRuntime, e
     return { outcome: d.outcome, review, state: d.state };
   });
   await r0.testHooks?.afterSyncCommit?.("dispute", txRef.id);
-  // 反映を伴わない決済要確認の記録（決済記録が無い・照合できない・複数の申し立て・状態の後戻り）は、今までどおりトランザクションの後で記録する
-  if (res.review) await recordPaymentReview(res.review);
+  // 反映を伴わない決済要確認の記録（決済記録が無い・照合できない・複数の申し立て・状態の後戻り）はトランザクションの後で記録する。
+  // 記録が必須なので、失敗したら例外
+  await recordSyncReview(res.review, r0, eventId);
   const result = res.outcome;
   if (result === "rejected") console.error("[stripe] dispute does not match the recorded payment (not applied)", { disputeId: dp.id });
   if (result === "dispute_open" || result === "dispute_lost") console.warn("[stripe] dispute recorded (admin review required)", { disputeId: dp.id, state: res.state });

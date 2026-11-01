@@ -42,6 +42,8 @@ export type StripeTestHooks = {
   inSyncTransaction?: (kind: "refund" | "dispute", transactionId: string) => void;
   /** 返金・異議申し立ての反映のトランザクションが成功した直後に呼ばれる（例外を投げると、その時点で処理が止まったのと同じになる） */
   afterSyncCommit?: (kind: "refund" | "dispute", transactionId: string) => void | Promise<void>;
+  /** 返金・異議申し立ての反映で、記録が必須の決済要確認を記録する直前に呼ばれる（例外を投げると、記録の失敗と同じになる） */
+  beforeReviewRecord?: (kind: string) => void;
 };
 
 type ApiBase = { host: string; port: number; protocol: "http" | "https" };

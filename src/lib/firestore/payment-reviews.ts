@@ -90,6 +90,27 @@ export async function recordPaymentReview(input: PaymentReviewInput): Promise<vo
   }
 }
 
+/**
+ * 記録が必須の異常で使う（決済記録が無い・照合できないなど、記録だけが運営に異常を知らせる手段のとき）。
+ * 記録できなかった・時間切れのときは例外（名前は PaymentReviewRecordError）。呼び出し側（Webhook）は処理済みにせず 500 を返し、
+ * Stripe の再送で記録し直す。異常の内容の検証の失敗（Stripe API の失敗など）は、この関数を呼ぶ前の別の例外になる。
+ * occurrenceKey（通知の ID など）を渡すと、記録の後に処理が失敗して同じ通知が再送されても回数を増やさない。
+ * ID・重複のまとめ方・確認済みの扱い・内容が変わったときに未確認へ戻す規則は recordPaymentReview と同じ。
+ */
+export async function recordRequiredPaymentReview(input: PaymentReviewInput, opts: { occurrenceKey?: string } = {}): Promise<void> {
+  let r: { ok: true } | { ok: false; error: string };
+  try {
+    const { ref, fields, causeKey } = reviewWrite(input);
+    r = await upsertDedupedRecord(ref, fields, { causeKey, reopen: "on_change", timeoutMs: PAYMENT_REVIEW_TIMEOUT_MS, ...(opts.occurrenceKey ? { occurrenceKey: opts.occurrenceKey } : {}) });
+  } catch (e) {
+    r = { ok: false, error: (e as Error)?.name ?? "Error" };
+  }
+  if (!r.ok) {
+    console.error("[payment-review] required record failed", { kind: input.kind, objectType: input.objectType, error: r.error });
+    throw Object.assign(new Error("payment review could not be recorded"), { name: "PaymentReviewRecordError", cause: r.error });
+  }
+}
+
 /** 記録の参照（種類と対象から決まる。トランザクションの中で、書き込みの前に読むために使う） */
 export const paymentReviewRef = (kind: PaymentReviewKind, objectId: string) => col().doc(paymentReviewId(kind, clean(objectId) ?? "invalid"));
 

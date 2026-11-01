@@ -35,7 +35,7 @@ vi.mock("@/lib/firestore/admin", async (orig) => {
 });
 
 const { recordPaymentAlert, notePaymentApiError, paymentAlertId } = await import("@/lib/firestore/payment-alerts");
-const { recordPaymentReview } = await import("@/lib/firestore/payment-reviews");
+const { paymentReviewId, recordPaymentReview, recordRequiredPaymentReview } = await import("@/lib/firestore/payment-reviews");
 const { upsertDedupedRecord } = await import("@/lib/firestore/deduped-record");
 const { handleStripeWebhook } = await import("@/lib/payments/stripe-webhook");
 
@@ -223,5 +223,48 @@ describe("署名を確認できない通知の大量発生：書き込みを間�
       vi.useRealTimers();
       vi.restoreAllMocks();
     }
+  });
+});
+
+describe("記録が必須の決済要確認（recordRequiredPaymentReview）", () => {
+  beforeEach(() => {
+    store.docs.clear();
+    store.mode = "ok";
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+  });
+  afterEach(() => vi.restoreAllMocks());
+  const reviewPath = (objectId: string) => `paymentReviews/${paymentReviewId("transaction_not_found", objectId)}`;
+  const input = (objectId: string, amount?: number) => ({ kind: "transaction_not_found" as const, objectType: "charge" as const, objectId, livemode: true, ...(amount === undefined ? {} : { amount }) });
+
+  it("保存できたら例外にしない（未確認・回数1）", async () => {
+    await expect(recordRequiredPaymentReview(input("ch_req_1"), { occurrenceKey: "event:evt_1" })).resolves.toBeUndefined();
+    expect(store.docs.get(reviewPath("ch_req_1"))).toMatchObject({ status: "OPEN", occurrences: 1, recentOccurrenceKeys: ["event:evt_1"] });
+  });
+
+  it("保存の失敗・時間切れは例外（PaymentReviewRecordError）。記録は残らない", async () => {
+    store.mode = "fail";
+    await expect(recordRequiredPaymentReview(input("ch_req_2"))).rejects.toMatchObject({ name: "PaymentReviewRecordError" });
+    expect(store.docs.has(reviewPath("ch_req_2"))).toBe(false);
+  });
+
+  it("同じ通知（occurrenceKey）の再送では回数を増やさない。別の通知では増やす", async () => {
+    await recordRequiredPaymentReview(input("ch_req_3"), { occurrenceKey: "event:evt_a" });
+    await recordRequiredPaymentReview(input("ch_req_3"), { occurrenceKey: "event:evt_a" });
+    expect(store.docs.get(reviewPath("ch_req_3"))?.occurrences).toBe(1);
+    await recordRequiredPaymentReview(input("ch_req_3"), { occurrenceKey: "event:evt_b" });
+    expect(store.docs.get(reviewPath("ch_req_3"))).toMatchObject({ occurrences: 2, recentOccurrenceKeys: ["event:evt_a", "event:evt_b"] });
+    await recordRequiredPaymentReview(input("ch_req_3"), { occurrenceKey: "event:evt_a" }); // 別の通知の後に届いた、前の通知の再送
+    expect(store.docs.get(reviewPath("ch_req_3"))?.occurrences).toBe(2);
+    await recordRequiredPaymentReview(input("ch_req_3")); // キーなし（決済確定の後の再確認など）は数える
+    expect(store.docs.get(reviewPath("ch_req_3"))?.occurrences).toBe(3);
+  });
+
+  it("確認済みの記録：同じ内容なら確認済みのまま、内容が変わったら未確認に戻す（今までの規則のまま）", async () => {
+    await recordRequiredPaymentReview(input("ch_req_4", 100), { occurrenceKey: "event:e1" });
+    store.docs.set(reviewPath("ch_req_4"), { ...store.docs.get(reviewPath("ch_req_4")), status: "RESOLVED", resolvedBy: "op" });
+    await recordRequiredPaymentReview(input("ch_req_4", 100), { occurrenceKey: "event:e2" });
+    expect(store.docs.get(reviewPath("ch_req_4"))).toMatchObject({ status: "RESOLVED", occurrences: 2 });
+    await recordRequiredPaymentReview(input("ch_req_4", 30), { occurrenceKey: "event:e3" });
+    expect(store.docs.get(reviewPath("ch_req_4"))).toMatchObject({ status: "OPEN", occurrences: 3, resolvedBy: null, amount: 30 });
   });
 });

@@ -9,19 +9,38 @@ import { fsdb } from "./admin";
  * 記録を待つのは timeoutMs まで（Firestore に接続できないときに、決済・Webhook の応答を止めない）。
  * 失敗・時間切れは例外にせず false を返す（呼び出し側がサーバーのログに残す）。
  */
-type DedupeOpts = { causeKey: string; reopen: "on_change" | "always"; now?: Date; /** 回数のほかに加算するフィールド（例：間引いた記録の、実際に観測した件数） */ add?: Record<string, number> };
+type DedupeOpts = {
+  causeKey: string;
+  reopen: "on_change" | "always";
+  now?: Date;
+  /** 回数のほかに加算するフィールド（例：間引いた記録の、実際に観測した件数） */
+  add?: Record<string, number>;
+  /**
+   * 同じ観測（例：同じ Stripe の通知の ID）を1回だけ数えるためのキー。最近記録したキー（OCCURRENCE_KEYS_KEPT 件）に
+   * 含まれていれば何も書かない（記録の後に処理が失敗して同じ通知が再送されても、別の通知と入れ替わりに届いても、回数を増やさない）。
+   * 省略すると、呼ばれるたびに数える
+   */
+  occurrenceKey?: string;
+};
 
 /**
  * 今の記録（cur）から、書き込む内容を決める（upsertDedupedRecord・upsertDedupedRecordInTx で共通）。
  * 無ければ未確認で作成。あれば回数・最後の日時を更新し、確認済みなら reopen の規則で未確認に戻すかを決める。
  */
-function dedupedWrite(cur: DocumentSnapshot, fields: Record<string, unknown>, opts: DedupeOpts): { create: Record<string, unknown> } | { update: Record<string, unknown> } {
+/** 同じ観測を見分けるために残すキーの数（同じ記録に、それより多くの通知が並んで届くことは想定しない） */
+export const OCCURRENCE_KEYS_KEPT = 20;
+
+function dedupedWrite(cur: DocumentSnapshot, fields: Record<string, unknown>, opts: DedupeOpts): { create: Record<string, unknown> } | { update: Record<string, unknown> } | null {
   const now = opts.now ?? new Date();
   const add = opts.add ?? {};
-  if (!cur.exists) return { create: { ...fields, ...add, causeKey: opts.causeKey, status: "OPEN", occurrences: 1, firstSeenAt: now, lastSeenAt: now, resolvedAt: null, resolvedBy: null } };
+  const seen: unknown = cur.exists ? cur.get("recentOccurrenceKeys") : undefined;
+  const recent = Array.isArray(seen) ? seen.filter((k): k is string => typeof k === "string") : [];
+  if (opts.occurrenceKey && recent.includes(opts.occurrenceKey)) return null; // 同じ観測は記録済み
+  const key = opts.occurrenceKey ? { recentOccurrenceKeys: [...recent, opts.occurrenceKey].slice(-OCCURRENCE_KEYS_KEPT) } : {};
+  if (!cur.exists) return { create: { ...fields, ...add, ...key, causeKey: opts.causeKey, status: "OPEN", occurrences: 1, firstSeenAt: now, lastSeenAt: now, resolvedAt: null, resolvedBy: null } };
   const reopen = cur.get("status") === "RESOLVED" && (opts.reopen === "always" || cur.get("causeKey") !== opts.causeKey);
   const inc = Object.fromEntries(Object.entries(add).map(([k, v]) => [k, FieldValue.increment(v)]));
-  return { update: { ...fields, ...inc, causeKey: opts.causeKey, occurrences: FieldValue.increment(1), lastSeenAt: now, ...(reopen ? { status: "OPEN", resolvedAt: null, resolvedBy: null } : {}) } };
+  return { update: { ...fields, ...inc, ...key, causeKey: opts.causeKey, occurrences: FieldValue.increment(1), lastSeenAt: now, ...(reopen ? { status: "OPEN", resolvedAt: null, resolvedBy: null } : {}) } };
 }
 
 /**
@@ -36,6 +55,7 @@ export function upsertDedupedRecordInTx(tx: Transaction, ref: DocumentReference,
 
 function writeDeduped(tx: Transaction, ref: DocumentReference, cur: DocumentSnapshot, fields: Record<string, unknown>, opts: DedupeOpts): void {
   const w = dedupedWrite(cur, fields, opts);
+  if (!w) return;
   if ("create" in w) tx.create(ref, w.create);
   else tx.update(ref, w.update);
 }

@@ -76,7 +76,7 @@ async function handle(event: Stripe.Event, rt: StripeRuntime): Promise<string> {
       // 非同期の支払い（PayPay など）の失敗。Session を取り直して「手続き済み・未払い」のときだけ注文を失敗にする
       return (await closeStripeCheckout((event.data.object as Stripe.Checkout.Session).id, { asyncFailed: true }, rt)) || "unchanged";
     case "charge.refunded":
-      return syncStripeRefunds((event.data.object as Stripe.Charge).id, rt, event.type);
+      return syncStripeRefunds((event.data.object as Stripe.Charge).id, rt, event.type, event.id);
     case "refund.created":
     case "refund.updated":
     case "refund.failed":
@@ -84,7 +84,7 @@ async function handle(event: Stripe.Event, rt: StripeRuntime): Promise<string> {
       // 返金の処理中・成功・失敗。返金の一覧を Stripe API から取り直して反映する
       const charge = (event.data.object as Stripe.Refund).charge;
       const chargeId = typeof charge === "string" ? charge : charge?.id;
-      return chargeId ? syncStripeRefunds(chargeId, rt, event.type) : "ignored";
+      return chargeId ? syncStripeRefunds(chargeId, rt, event.type, event.id) : "ignored";
     }
     case "charge.dispute.created":
     case "charge.dispute.updated":
@@ -92,7 +92,7 @@ async function handle(event: Stripe.Event, rt: StripeRuntime): Promise<string> {
     case "charge.dispute.funds_withdrawn":
     case "charge.dispute.funds_reinstated":
       // 異議申し立て（チャージバック）。状態・金額は Stripe API から取り直して反映する
-      return syncStripeDispute((event.data.object as Stripe.Dispute).id, rt, event.type);
+      return syncStripeDispute((event.data.object as Stripe.Dispute).id, rt, event.type, event.id);
     case "charge.updated":
     case "charge.succeeded":
       // 手数料の確定（推定値で記録した決済だけ更新する）
