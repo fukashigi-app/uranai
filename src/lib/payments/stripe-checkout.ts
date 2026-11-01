@@ -38,6 +38,10 @@ export type StripeRuntime = {
 export type StripeTestHooks = {
   /** 決済確定のトランザクションが成功した直後、再確認の前に呼ばれる（例外を投げると、その時点で処理が止まったのと同じになる） */
   afterConfirmCommit?: (transactionId: string) => void | Promise<void>;
+  /** 返金・異議申し立ての反映のトランザクションの中、すべての書き込みの後に呼ばれる（例外を投げると、トランザクションは何も保存せずに失敗する） */
+  inSyncTransaction?: (kind: "refund" | "dispute", transactionId: string) => void;
+  /** 返金・異議申し立ての反映のトランザクションが成功した直後に呼ばれる（例外を投げると、その時点で処理が止まったのと同じになる） */
+  afterSyncCommit?: (kind: "refund" | "dispute", transactionId: string) => void | Promise<void>;
 };
 
 type ApiBase = { host: string; port: number; protocol: "http" | "https" };

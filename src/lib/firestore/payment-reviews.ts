@@ -1,9 +1,9 @@
 import "server-only";
-import type { DocumentData } from "firebase-admin/firestore";
+import type { DocumentData, DocumentSnapshot, Transaction } from "firebase-admin/firestore";
 import { createHash } from "node:crypto";
 import { C, fsdb, safeId, toDate } from "./admin";
 import { writeAudit } from "./audit";
-import { upsertDedupedRecord } from "./deduped-record";
+import { upsertDedupedRecord, upsertDedupedRecordInTx } from "./deduped-record";
 import { recordPaymentAlert } from "./payment-alerts";
 import { alertModeOf } from "@/lib/payments/monitor-rules";
 
@@ -76,6 +76,37 @@ export const PAYMENT_REVIEW_TIMEOUT_MS = 3000;
  */
 export async function recordPaymentReview(input: PaymentReviewInput): Promise<void> {
   const objectId = clean(input.objectId) ?? "invalid";
+  let r: { ok: true } | { ok: false; error: string };
+  try {
+    const { ref, fields, causeKey } = reviewWrite(input); // Firestore に接続できない設定でも例外にしない（参照の作成も含める）
+    r = await upsertDedupedRecord(ref, fields, { causeKey, reopen: "on_change", timeoutMs: PAYMENT_REVIEW_TIMEOUT_MS });
+  } catch (e) {
+    r = { ok: false, error: (e as Error)?.name ?? "Error" };
+  }
+  if (!r.ok) {
+    console.error("[payment-review] record failed", { kind: input.kind, objectType: input.objectType, error: r.error });
+    // 決済監視にも残す（こちらも失敗したらサーバーのログだけ）
+    await recordPaymentAlert({ kind: "payment_review_record_failed", objectType: "review", objectId: `${input.kind}:${objectId}`, mode: alertModeOf(input.livemode), transactionId: input.transactionId ?? null, storeId: input.storeId ?? null, errorName: r.error });
+  }
+}
+
+/** 記録の参照（種類と対象から決まる。トランザクションの中で、書き込みの前に読むために使う） */
+export const paymentReviewRef = (kind: PaymentReviewKind, objectId: string) => col().doc(paymentReviewId(kind, clean(objectId) ?? "invalid"));
+
+/**
+ * 呼び出し側のトランザクションの中で記録する（決済記録・精算の更新と不可分にする）。
+ * cur は同じトランザクションで、書き込みの前に読んだ記録（tx.get(paymentReviewRef(...))）。
+ * ID・重複のまとめ方・確認済みの扱い・内容が変わったときに未確認へ戻す規則は recordPaymentReview と同じ。
+ * 書き込みはトランザクションの確定と一緒にだけ反映される（やり直しで回数は増えない。失敗はトランザクション全体の失敗）。
+ */
+export function recordPaymentReviewInTx(tx: Transaction, cur: DocumentSnapshot, input: PaymentReviewInput): void {
+  const { ref, fields, causeKey } = reviewWrite(input);
+  upsertDedupedRecordInTx(tx, ref, cur, fields, { causeKey, reopen: "on_change" });
+}
+
+/** 記録の内容（ID・保存する項目・内容の判定のキー） */
+function reviewWrite(input: PaymentReviewInput) {
+  const objectId = clean(input.objectId) ?? "invalid";
   const fields = {
     kind: input.kind,
     objectType: input.objectType,
@@ -93,17 +124,7 @@ export async function recordPaymentReview(input: PaymentReviewInput): Promise<vo
   };
   // 内容が変わったか（食い違った項目・金額）。通知の種類や回数の違いでは変わらない
   const causeKey = JSON.stringify([fields.kind, fields.mismatches, fields.amount]);
-  let r: { ok: true } | { ok: false; error: string };
-  try {
-    r = await upsertDedupedRecord(col().doc(paymentReviewId(input.kind, objectId)), fields, { causeKey, reopen: "on_change", timeoutMs: PAYMENT_REVIEW_TIMEOUT_MS });
-  } catch (e) {
-    r = { ok: false, error: (e as Error)?.name ?? "Error" };
-  }
-  if (!r.ok) {
-    console.error("[payment-review] record failed", { kind: input.kind, objectType: input.objectType, error: r.error });
-    // 決済監視にも残す（こちらも失敗したらサーバーのログだけ）
-    await recordPaymentAlert({ kind: "payment_review_record_failed", objectType: "review", objectId: `${input.kind}:${objectId}`, mode: alertModeOf(input.livemode), transactionId: input.transactionId ?? null, storeId: input.storeId ?? null, errorName: r.error });
-  }
+  return { ref: col().doc(paymentReviewId(input.kind, objectId)), fields, causeKey };
 }
 
 function toReview(id: string, d: DocumentData): PaymentReview {

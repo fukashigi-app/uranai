@@ -13,7 +13,7 @@ import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
 import { siteConfig } from "@/config/site";
 import { writeAudit } from "@/lib/firestore/audit";
 import { reconcileTransactionInTx, settlementRefForTx } from "@/lib/firestore/settlement-adjustments";
-import { recordPaymentReview, type PaymentReviewInput } from "@/lib/firestore/payment-reviews";
+import { paymentReviewRef, recordPaymentReview, recordPaymentReviewInTx, type PaymentReviewInput } from "@/lib/firestore/payment-reviews";
 import type { DisputeState } from "./settlement-rules";
 import {
   chargeMismatches,
@@ -500,7 +500,9 @@ export async function syncStripeRefunds(chargeId: string, rt?: StripeRuntime, ev
     if (mism.length) return { outcome: "rejected", review: { kind: "charge_mismatch", objectType: "charge", objectId: charge.id, transactionId: t.id, storeId: String(t.get("storeId")), mismatches: mism, ...base } };
     const d = decideRefundSync({ paymentStatus: t.get("paymentStatus"), refundKey: t.get("refundKey") }, summary, new Date());
     if (d.kind === "unchanged") return { outcome: "unchanged" }; // 同じ状態はもう反映済み（再送・重複）
-    const st = await tx.get(settlementRefForTx(t.data()!));
+    // 書き込みの前にすべて読む（反映と不可分の決済要確認の記録も、同じトランザクションで記録するため）
+    const legacyReview = legacySettlementReviewRef(txRef.id);
+    const [st, legacyReviewSnap] = await Promise.all([tx.get(settlementRefForTx(t.data()!)), tx.get(legacyReview)]);
     const co = await linkedCheckoutInTx(tx, t);
     const paidAt = mustDate(t.get("paidAt"));
     const patch: Record<string, unknown> = {
@@ -516,15 +518,36 @@ export async function syncStripeRefunds(chargeId: string, rt?: StripeRuntime, ev
     }
     // 注文も同じトランザクションで REFUNDED にする（返金の処理中・成功・一部。返金の失敗では戻さない）
     updateCheckoutAfterSync(tx, co, { refundStatus: summary.state, disputeStatus: t.get("disputeStatus"), entitlementActive: fs.exists && fs.get("status") === "PAID" && !d.suspendEntitlement });
-    const outcome = d.outcome;
-    return { outcome, review: adj.review ? { ...adj.review, eventType: eventType ?? null } : undefined };
+    const review = reviewWithinSync(tx, legacyReviewSnap, adj.review ? { ...adj.review, eventType: eventType ?? null } : undefined);
+    r0.testHooks?.inSyncTransaction?.("refund", txRef.id);
+    return { outcome: d.outcome, review };
   });
+  await r0.testHooks?.afterSyncCommit?.("refund", txRef.id);
+  // 反映を伴わない決済要確認の記録（決済記録が無い・照合できない）は、今までどおりトランザクションの後で記録する
   if (res.review) await recordPaymentReview(res.review);
   const result = res.outcome;
   if (result === "rejected") console.error("[stripe] refund does not match the recorded payment (not applied)", { chargeId: charge.id });
   if (result === "refund_failed") console.error("[stripe] refund failed (admin review required)", { chargeId: charge.id });
   if (result === "partial") console.warn("[stripe] partial refund recorded (admin review required)", { chargeId: charge.id });
   return result;
+}
+
+/**
+ * 返金・異議申し立ての反映で、反映と不可分の決済要確認の記録（以前の仕組みで確定した精算の月の取引の変化）の参照。
+ * 種類と対象（決済記録の ID）で決まるので、トランザクションの中で書き込みの前に読める。
+ */
+const legacySettlementReviewRef = (transactionId: string) => paymentReviewRef("legacy_settlement_change", transactionId);
+
+/**
+ * 反映の結果の決済要確認の記録を、反映と同じトランザクションで記録する（先に読んだ記録 pre と同じ記録のときだけ）。
+ * 決済記録の更新（legacySettlementReview の印など）と記録が、両方とも保存されるか、両方とも保存されないかのどちらかになる。
+ * 先に読んでいない記録（想定外）は、今までどおりトランザクションの後で記録するために返す。
+ */
+function reviewWithinSync(tx: Transaction, pre: DocumentSnapshot, review: PaymentReviewInput | undefined): PaymentReviewInput | undefined {
+  if (!review) return undefined;
+  if (paymentReviewRef(review.kind, review.objectId).path !== pre.ref.path) return review;
+  recordPaymentReviewInTx(tx, pre, review);
+  return undefined;
 }
 
 export type StripeDisputeOutcome = "dispute_open" | "dispute_won" | "dispute_lost" | "unchanged" | "ignored" | "rejected";
@@ -582,7 +605,9 @@ export async function syncStripeDispute(disputeId: string, rt?: StripeRuntime, e
     // 結果が出た申し立てを対応中に戻さない（古い状態の取り直し・順番の入れ替わり）
     if (d.kind === "regressed") return { outcome: "unchanged", review: { kind: "dispute_state_regressed", objectType: "dispute", objectId: dp.id, transactionId: t.id, storeId: String(t.get("storeId")), ...base } };
     if (d.kind === "unchanged") return { outcome: "unchanged" };
-    const st = await tx.get(settlementRefForTx(t.data()!));
+    // 書き込みの前にすべて読む（反映と不可分の決済要確認の記録も、同じトランザクションで記録するため）
+    const legacyReview = legacySettlementReviewRef(txRef.id);
+    const [st, legacyReviewSnap] = await Promise.all([tx.get(settlementRefForTx(t.data()!)), tx.get(legacyReview)]);
     const co = await linkedCheckoutInTx(tx, t);
     const patch: Record<string, unknown> = {
       ...d.fields,
@@ -594,9 +619,12 @@ export async function syncStripeDispute(disputeId: string, rt?: StripeRuntime, e
     if (d.suspendEntitlement && fs.exists && fs.get("status") === "PAID") tx.update(sessionRef, { status: "EXPIRED", suspendedByDispute: true, suspendedAt: new Date() });
     // 注文も同じトランザクションで REFUNDED（chargeback）にする（勝訴では戻さない）
     updateCheckoutAfterSync(tx, co, { refundStatus: t.get("refundStatus"), disputeStatus: d.state, entitlementActive: fs.exists && fs.get("status") === "PAID" && !d.suspendEntitlement });
-    const outcome = d.outcome;
-    return { outcome, review: adj.review ? { ...adj.review, eventType: eventType ?? null } : undefined, state: d.state };
+    const review = reviewWithinSync(tx, legacyReviewSnap, adj.review ? { ...adj.review, eventType: eventType ?? null } : undefined);
+    r0.testHooks?.inSyncTransaction?.("dispute", txRef.id);
+    return { outcome: d.outcome, review, state: d.state };
   });
+  await r0.testHooks?.afterSyncCommit?.("dispute", txRef.id);
+  // 反映を伴わない決済要確認の記録（決済記録が無い・照合できない・複数の申し立て・状態の後戻り）は、今までどおりトランザクションの後で記録する
   if (res.review) await recordPaymentReview(res.review);
   const result = res.outcome;
   if (result === "rejected") console.error("[stripe] dispute does not match the recorded payment (not applied)", { disputeId: dp.id });

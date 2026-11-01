@@ -35,6 +35,7 @@
     "e2e:payment-monitor": "tsx --conditions=react-server scripts/e2e-payment-monitor.ts",
     "e2e:stripe-ordering": "tsx --conditions=react-server scripts/e2e-stripe-ordering.ts",
     "e2e:stripe-recheck": "tsx --conditions=react-server scripts/e2e-stripe-recheck.ts",
+    "e2e:stripe-review-atomic": "tsx --conditions=react-server scripts/e2e-stripe-review-atomic.ts",
     "e2e:admin-restore-browser": "tsx --conditions=react-server scripts/e2e-admin-restore-browser.ts",
     "monitor:payments": "tsx --conditions=react-server scripts/payment-monitor.ts"
   },

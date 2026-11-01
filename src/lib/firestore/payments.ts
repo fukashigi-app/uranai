@@ -16,7 +16,7 @@ import { CheckoutError, PAID_FLOW_BLOCKED_STORE_CODES, providerOrThrow } from "@
 import { C, fsdb, mustDate, safeId, toDate } from "./admin";
 import { feeKeys, isAlreadyExists, salesKeys } from "./shared";
 import { reconcileTransactionInTx, settlementRefForTx } from "./settlement-adjustments";
-import { recordPaymentReview, type PaymentReviewInput } from "./payment-reviews";
+import { paymentReviewRef, recordPaymentReview, recordPaymentReviewInTx, type PaymentReviewInput } from "./payment-reviews";
 import { isSalesPayment } from "@/lib/payments/kind";
 import { findStoreByCode } from "./stores";
 
@@ -320,7 +320,9 @@ export async function markRefunded(providerId: ProviderId, chargeId: string): Pr
     review = null;
     const [t, s] = await Promise.all([tx.get(txRef), tx.get(sessionRef)]);
     if (!t.exists || t.get("paymentStatus") !== "SUCCEEDED") return false;
-    const st = await tx.get(settlementRefForTx(t.data()!));
+    // 書き込みの前にすべて読む（以前の仕組みで確定した精算の月の決済要確認の記録も、返金の反映と同じトランザクションで記録する）
+    const legacyRef = paymentReviewRef("legacy_settlement_change", txRef.id);
+    const [st, legacySnap] = await Promise.all([tx.get(settlementRefForTx(t.data()!)), tx.get(legacyRef)]);
     const patch = {
       paymentStatus: "REFUNDED",
       refundedAt: new Date(),
@@ -329,7 +331,8 @@ export async function markRefunded(providerId: ProviderId, chargeId: string): Pr
     // 振込済み（確定済み）の月の取引なら、取り分の差額を調整として記録する
     const adj = reconcileTransactionInTx(tx, txRef, t.data()!, patch, "refund", chargeId, { id: st.id, data: st.data() });
     tx.update(txRef, { ...patch, ...adj.fields, updatedAt: FieldValue.serverTimestamp() });
-    review = adj.review ?? null;
+    if (adj.review && paymentReviewRef(adj.review.kind, adj.review.objectId).path === legacyRef.path) recordPaymentReviewInTx(tx, legacySnap, adj.review);
+    else review = adj.review ?? null; // 想定外の記録だけ、今までどおりトランザクションの後で記録する
     if (s.exists && s.get("status") === "PAID") tx.update(sessionRef, { status: "EXPIRED" });
     return true;
   });
