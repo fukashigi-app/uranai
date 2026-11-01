@@ -535,13 +535,13 @@ export async function syncStripeRefunds(chargeId: string, rt?: StripeRuntime, ev
 /**
  * 返金・異議申し立ての反映で、記録だけで異常を知らせる決済要確認（決済記録が無い・照合できない・複数の申し立て・状態の後戻り・
  * 申し立ての額の不正）を記録する。記録できなければ例外（Webhook は処理済みにせず 500 を返し、Stripe の再送で記録し直す）。
- * 通知の ID を渡すと、記録の後に処理が失敗して同じ通知が再送されても、回数を増やさない。
+ * 通知の ID を渡すと、同じ通知では1回だけ数える（webhookEvents の recordedReviewIds。記録と同じトランザクション）。
  */
 async function recordSyncReview(review: PaymentReviewInput | undefined, r0: StripeRuntime, eventId: string | undefined): Promise<void> {
   if (!review) return;
   r0.testHooks?.beforeReviewRecord?.(review.kind);
   const timeoutMs = r0.testHooks?.reviewRecordTimeoutMs;
-  await recordRequiredPaymentReview(review, { ...(eventId ? { occurrenceKey: `event:${eventId}` } : {}), ...(timeoutMs ? { timeoutMs } : {}) });
+  await recordRequiredPaymentReview(review, { ...(eventId ? { webhookEvent: { provider: "stripe", eventId } } : {}), ...(timeoutMs ? { timeoutMs } : {}) });
 }
 
 /**

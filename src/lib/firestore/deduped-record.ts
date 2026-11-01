@@ -15,32 +15,29 @@ type DedupeOpts = {
   now?: Date;
   /** 回数のほかに加算するフィールド（例：間引いた記録の、実際に観測した件数） */
   add?: Record<string, number>;
-  /**
-   * 同じ観測（例：同じ Stripe の通知の ID）を1回だけ数えるためのキー。最近記録したキー（OCCURRENCE_KEYS_KEPT 件）に
-   * 含まれていれば何も書かない（記録の後に処理が失敗して同じ通知が再送されても、別の通知と入れ替わりに届いても、回数を増やさない）。
-   * 省略すると、呼ばれるたびに数える
-   */
-  occurrenceKey?: string;
 };
+
+/**
+ * 同じ観測（例：同じ Stripe の通知）を1回だけ数えるための印。記録とは別の文書（例：webhookEvents/{決済会社_通知ID}）の
+ * 一覧の項目（field）に、記録の ID（id）を残す。記録の更新と印の追加は同じトランザクションで行う（両方か、どちらも無しか）。
+ *  - 印の一覧に id がある → 記録済み。何も書かない（回数・確認済みの状態を変えない）
+ *  - legacyKey が記録の recentOccurrenceKeys（以前の方式。新しくは追記しない）にある → 記録済みとして扱う（同上）
+ *  - 印の文書が無い → 例外（OccurrenceMarkerMissing）。回数を増やさず、新しい観測とも決めつけない（呼び出し側が再試行する）
+ * 一覧は古いものを消さない（件数で切り捨てない）。
+ */
+export type OccurrenceMarker = { ref: DocumentReference; field: string; id: string; legacyKey?: string };
 
 /**
  * 今の記録（cur）から、書き込む内容を決める（upsertDedupedRecord・upsertDedupedRecordInTx で共通）。
  * 無ければ未確認で作成。あれば回数・最後の日時を更新し、確認済みなら reopen の規則で未確認に戻すかを決める。
  */
-/** 同じ観測を見分けるために残すキーの数（同じ記録に、それより多くの通知が並んで届くことは想定しない） */
-export const OCCURRENCE_KEYS_KEPT = 20;
-
 function dedupedWrite(cur: DocumentSnapshot, fields: Record<string, unknown>, opts: DedupeOpts): { create: Record<string, unknown> } | { update: Record<string, unknown> } | null {
   const now = opts.now ?? new Date();
   const add = opts.add ?? {};
-  const seen: unknown = cur.exists ? cur.get("recentOccurrenceKeys") : undefined;
-  const recent = Array.isArray(seen) ? seen.filter((k): k is string => typeof k === "string") : [];
-  if (opts.occurrenceKey && recent.includes(opts.occurrenceKey)) return null; // 同じ観測は記録済み
-  const key = opts.occurrenceKey ? { recentOccurrenceKeys: [...recent, opts.occurrenceKey].slice(-OCCURRENCE_KEYS_KEPT) } : {};
-  if (!cur.exists) return { create: { ...fields, ...add, ...key, causeKey: opts.causeKey, status: "OPEN", occurrences: 1, firstSeenAt: now, lastSeenAt: now, resolvedAt: null, resolvedBy: null } };
+  if (!cur.exists) return { create: { ...fields, ...add, causeKey: opts.causeKey, status: "OPEN", occurrences: 1, firstSeenAt: now, lastSeenAt: now, resolvedAt: null, resolvedBy: null } };
   const reopen = cur.get("status") === "RESOLVED" && (opts.reopen === "always" || cur.get("causeKey") !== opts.causeKey);
   const inc = Object.fromEntries(Object.entries(add).map(([k, v]) => [k, FieldValue.increment(v)]));
-  return { update: { ...fields, ...inc, ...key, causeKey: opts.causeKey, occurrences: FieldValue.increment(1), lastSeenAt: now, ...(reopen ? { status: "OPEN", resolvedAt: null, resolvedBy: null } : {}) } };
+  return { update: { ...fields, ...inc, causeKey: opts.causeKey, occurrences: FieldValue.increment(1), lastSeenAt: now, ...(reopen ? { status: "OPEN", resolvedAt: null, resolvedBy: null } : {}) } };
 }
 
 /**
@@ -52,6 +49,8 @@ export function upsertDedupedRecordInTx(tx: Transaction, ref: DocumentReference,
   if (cur.ref.path !== ref.path) throw new Error("deduped record snapshot does not match the reference");
   writeDeduped(tx, ref, cur, fields, opts);
 }
+
+const stringsOf = (v: unknown): string[] => (Array.isArray(v) ? v.filter((k): k is string => typeof k === "string") : []);
 
 function writeDeduped(tx: Transaction, ref: DocumentReference, cur: DocumentSnapshot, fields: Record<string, unknown>, opts: DedupeOpts): void {
   const w = dedupedWrite(cur, fields, opts);
@@ -67,13 +66,24 @@ export async function upsertDedupedRecord(
     timeoutMs: number;
     /** 待つのをやめた後に、書き込みの結果が分かったときに呼ばれる（committed＝保存された、failed＝保存されなかった） */
     onSettledAfterTimeout?: (result: "committed" | "failed") => void;
+    /** 同じ観測を1回だけ数えるための印（OccurrenceMarker）。省略すると、呼ばれるたびに数える */
+    occurrenceMarker?: OccurrenceMarker;
   },
 ): Promise<DedupedRecordResult> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;
   try {
+    const m = opts.occurrenceMarker;
     const work = fsdb().runTransaction(async (tx) => {
-      writeDeduped(tx, ref, await tx.get(ref), fields, opts);
+      // 書き込みの前にすべて読む（記録と、同じ観測の印の文書）
+      const [cur, mark] = await Promise.all([tx.get(ref), m ? tx.get(m.ref) : Promise.resolve(null)]);
+      if (!m || !mark) return writeDeduped(tx, ref, cur, fields, opts);
+      if (!mark.exists) throw Object.assign(new Error("occurrence marker document is missing"), { name: "OccurrenceMarkerMissing" });
+      const marked = stringsOf(mark.get(m.field));
+      if (marked.includes(m.id)) return; // この観測は記録済み
+      if (m.legacyKey && stringsOf(cur.exists ? cur.get("recentOccurrenceKeys") : undefined).includes(m.legacyKey)) return; // 以前の方式で記録済み
+      writeDeduped(tx, ref, cur, fields, opts);
+      tx.update(m.ref, { [m.field]: [...marked, m.id] });
     });
     // 時間切れの後も書き込みは止まらない（Firestore のトランザクションは中止できない）。結果だけを知らせ、未処理の例外にしない
     work.then(

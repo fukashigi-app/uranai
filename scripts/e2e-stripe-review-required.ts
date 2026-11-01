@@ -95,7 +95,8 @@ async function main() {
     assert.equal(r.status, 200);
     assert.equal(outcomeOf(r), "ignored");
     const rv = await reviewOf("transaction_not_found", p.charge);
-    assert.deepEqual([rv?.status, rv?.occurrences, rv?.objectType, rv?.chargeId, rv?.paymentIntentId, rv?.eventType, rv?.recentOccurrenceKeys], ["OPEN", 1, "charge", p.charge, p.pi, "charge.refunded", [`event:${e.id}`]]);
+    assert.deepEqual([rv?.status, rv?.occurrences, rv?.objectType, rv?.chargeId, rv?.paymentIntentId, rv?.eventType, rv?.recentOccurrenceKeys], ["OPEN", 1, "charge", p.charge, p.pi, "charge.refunded", undefined]);
+    assert.deepEqual((await eventDoc(e.id))?.recordedReviewIds, [paymentReviewId("transaction_not_found", p.charge)], "通知の文書に記録した決済要確認の ID がありません");
     assert.ok((await eventDoc(e.id))?.processedAt, "記録できたのに処理済みになっていません");
     // 後から決済確定：Stripe の今の状態（返金済み）を読むので、権利を付与せず REFUNDED
     assert.equal(outcomeOf(await deliver(rt, completedEv(p))), "refunded");

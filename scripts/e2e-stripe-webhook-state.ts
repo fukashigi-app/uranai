@@ -73,7 +73,7 @@ async function allUnfinished(staleMs: number) {
   }
 }
 
-const ALLOWED = new Set(["provider", "eventId", "type", "processedAt", "createdAt", "state", "attempts", "lastAttemptAt", "lastError", "replayLeaseUntil", "objectId", "chargeId", "livemode", "eventCreatedAt"]);
+const ALLOWED = new Set(["provider", "eventId", "type", "processedAt", "createdAt", "state", "attempts", "lastAttemptAt", "lastError", "replayLeaseUntil", "objectId", "chargeId", "livemode", "eventCreatedAt", "recordedReviewIds"]);
 function assertNoBody(d: Record<string, unknown>, at: string) {
   for (const k of Object.keys(d)) assert.ok(ALLOWED.has(k), `${at}: webhookEvents に想定外の項目 ${k}`);
   assert.doesNotMatch(JSON.stringify(d), /buyer@example\.com|購入者|whsec_|sk_(live|test)_|"card"|last4/i, `${at}: 通知の本文・個人情報・秘密情報が保存されています`);

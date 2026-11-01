@@ -104,12 +104,19 @@ export async function recordPaymentReview(input: PaymentReviewInput): Promise<vo
  * 記録できなかったときは例外。呼び出し側（Webhook）は処理済みにせず 500 を返し、Stripe の再送で記録し直す。
  *  - PaymentReviewRecordError        … 書き込みが失敗した（保存されていない）
  *  - PaymentReviewRecordUnknownError … 待つのをやめた（REQUIRED_PAYMENT_REVIEW_TIMEOUT_MS）。保存されたかは不明で、
- *                                      裏で書き込みが続き後で保存されることがある（再送では occurrenceKey で二重に数えない）
+ *                                      裏で書き込みが続き後で保存されることがある（再送では通知の印で二重に数えない）
  * 異常の内容の検証の失敗（Stripe API の失敗など）は、この関数を呼ぶ前の別の例外になる。
- * occurrenceKey（通知の ID など）を渡すと、記録の後に処理が失敗して同じ通知が再送されても回数を増やさない。
+ * webhookEvent（Webhook の通知）を渡すと、同じ通知では1回だけ数える：記録の更新と同じトランザクションで、
+ * webhookEvents/{決済会社_通知ID}.recordedReviewIds に記録の ID を加え、すでにあれば何も書かない（回数・確認済みの状態を変えない）。
+ * 以前の方式（記録の recentOccurrenceKeys に "event:<通知ID>"）で記録済みのものも、二重に数えない（新しくは追記しない）。
+ * 通知の文書が無い（通常は beginWebhookEvent が処理の前に作るので無い）ときは、回数を増やさず PaymentReviewRecordError
+ * （Webhook は 500。Stripe の再送で beginWebhookEvent が文書を作り直すので、次の処理で記録される）。
  * ID・重複のまとめ方・確認済みの扱い・内容が変わったときに未確認へ戻す規則は recordPaymentReview と同じ。
  */
-export async function recordRequiredPaymentReview(input: PaymentReviewInput, opts: { occurrenceKey?: string; /** 自動テスト用（既定は REQUIRED_PAYMENT_REVIEW_TIMEOUT_MS） */ timeoutMs?: number } = {}): Promise<void> {
+export async function recordRequiredPaymentReview(
+  input: PaymentReviewInput,
+  opts: { webhookEvent?: { provider: string; eventId: string }; /** 自動テスト用（既定は REQUIRED_PAYMENT_REVIEW_TIMEOUT_MS） */ timeoutMs?: number } = {},
+): Promise<void> {
   let r: { ok: true } | { ok: false; error: string; unknown: boolean };
   try {
     const { ref, fields, causeKey } = reviewWrite(input);
@@ -117,7 +124,9 @@ export async function recordRequiredPaymentReview(input: PaymentReviewInput, opt
       causeKey,
       reopen: "on_change",
       timeoutMs: opts.timeoutMs ?? REQUIRED_PAYMENT_REVIEW_TIMEOUT_MS,
-      ...(opts.occurrenceKey ? { occurrenceKey: opts.occurrenceKey } : {}),
+      ...(opts.webhookEvent
+        ? { occurrenceMarker: { ref: fsdb().collection(C.webhookEvents).doc(safeId(opts.webhookEvent.provider, opts.webhookEvent.eventId)), field: "recordedReviewIds", id: ref.id, legacyKey: `event:${opts.webhookEvent.eventId}` } }
+        : {}),
       onSettledAfterTimeout: (result) => console.warn("[payment-review] required record settled after the wait ended", { kind: input.kind, objectType: input.objectType, result }),
     });
   } catch (e) {

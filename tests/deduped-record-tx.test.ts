@@ -1,6 +1,6 @@
 import { FieldValue, type DocumentReference, type DocumentSnapshot, type Transaction } from "firebase-admin/firestore";
 import { describe, expect, it } from "vitest";
-import { OCCURRENCE_KEYS_KEPT, upsertDedupedRecordInTx } from "@/lib/firestore/deduped-record";
+import { upsertDedupedRecordInTx } from "@/lib/firestore/deduped-record";
 
 // 決済要確認・決済監視の「種類・対象ごとに1件」の記録を、呼び出し側のトランザクションの中で書く規則（Firestore には接続しない）
 const NOW = new Date("2026-10-29T03:00:00Z");
@@ -61,28 +61,14 @@ describe("upsertDedupedRecordInTx（トランザクションの中の記録）",
   });
 });
 
-describe("upsertDedupedRecordInTx：同じ観測（occurrenceKey）は1回だけ数える", () => {
-  it("最近記録したキーに含まれていれば何も書かない（別の通知と入れ替わりに届いても）", () => {
-    const a = fakeTx();
-    upsertDedupedRecordInTx(a.tx, ref, snap({ status: "OPEN", causeKey: "k1", recentOccurrenceKeys: ["event:e1", "event:e2"] }), fields, { causeKey: "k1", reopen: "on_change", occurrenceKey: "event:e1" });
-    expect(a.calls).toHaveLength(0);
-  });
-  it("新しいキーなら回数を増やし、キーを最近の一覧の末尾に加える（古いものから最大件数まで）", () => {
-    const b = fakeTx();
-    upsertDedupedRecordInTx(b.tx, ref, snap({ status: "OPEN", causeKey: "k1", recentOccurrenceKeys: ["event:e1"] }), fields, { causeKey: "k1", reopen: "on_change", occurrenceKey: "event:e2" });
-    expect(b.calls[0].data).toMatchObject({ recentOccurrenceKeys: ["event:e1", "event:e2"] });
-    expect(b.calls[0].data.occurrences).toEqual(FieldValue.increment(1));
-    const many = Array.from({ length: OCCURRENCE_KEYS_KEPT }, (_, i) => `event:old${i}`);
-    const c = fakeTx();
-    upsertDedupedRecordInTx(c.tx, ref, snap({ status: "OPEN", causeKey: "k1", recentOccurrenceKeys: many }), fields, { causeKey: "k1", reopen: "on_change", occurrenceKey: "event:new" });
-    const kept = c.calls[0].data.recentOccurrenceKeys as string[];
-    expect(kept).toHaveLength(OCCURRENCE_KEYS_KEPT);
-    expect(kept[0]).toBe("event:old1");
-    expect(kept.at(-1)).toBe("event:new");
-  });
-  it("キーを渡さない記録（以前からの呼び出し）にはキーの一覧を書かない", () => {
+describe("以前の方式の項目（recentOccurrenceKeys）", () => {
+  it("新しくは書かない（既存の値はそのまま。回数は今までどおり数える）", () => {
     const d = fakeTx();
-    upsertDedupedRecordInTx(d.tx, ref, snap(null), fields, { causeKey: "k1", reopen: "on_change" });
+    upsertDedupedRecordInTx(d.tx, ref, snap({ status: "OPEN", causeKey: "k1", recentOccurrenceKeys: ["event:e1"] }), fields, { causeKey: "k1", reopen: "on_change" });
     expect(d.calls[0].data).not.toHaveProperty("recentOccurrenceKeys");
+    expect(d.calls[0].data.occurrences).toEqual(FieldValue.increment(1));
+    const e = fakeTx();
+    upsertDedupedRecordInTx(e.tx, ref, snap(null), fields, { causeKey: "k1", reopen: "on_change" });
+    expect(e.calls[0].data).not.toHaveProperty("recentOccurrenceKeys");
   });
 });
