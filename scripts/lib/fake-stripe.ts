@@ -31,6 +31,10 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
     failPaths: [] as RegExp[],
     /** 作成時の expires_at（ID ごと）と作成時刻 */
     created: new Map<string, number>(),
+    /** Charge ごとに1回だけ：返金の一覧を返した直後に実行する（決済確定の途中で Stripe の状態が変わるのを再現する） */
+    afterRefundListOnce: new Map<string, () => void>(),
+    /** Charge ごとに1回だけ：異議申し立ての一覧を返した直後に実行する */
+    afterDisputeListOnce: new Map<string, () => void>(),
   };
   const stripeError = (res: ServerResponse, status: number, type: string, message: string, param?: string, code?: string) =>
     send(res, status, { error: { type, message, ...(param ? { param } : {}), ...(code ? { code } : {}) } });
@@ -58,6 +62,33 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
   function send(res: ServerResponse, status: number, body: unknown) {
     res.writeHead(status, { "content-type": "application/json", "request-id": `req_${fake.n}` });
     res.end(JSON.stringify(body));
+  }
+
+  const syncCharge = (chId: string) => {
+    const ch = fake.charges.get(chId)!;
+    const sum = [...fake.refunds.values()].filter((x) => x.charge === chId && (x.status === "succeeded" || x.status === "pending")).reduce((a, x) => a + Number(x.amount), 0);
+    Object.assign(ch, { amount_refunded: sum, refunded: sum >= Number(ch.amount) });
+  };
+  /** 返金の発生（status：succeeded（既定）・pending など。amount：一部の返金） */
+  function addRefund(chId: string, o: { amount?: number; status?: string } = {}) {
+    const ch = fake.charges.get(chId)!;
+    const reId = id("re");
+    fake.refunds.set(reId, { id: reId, object: "refund", charge: chId, payment_intent: ch.payment_intent, currency: "jpy", amount: o.amount ?? ch.amount, status: o.status ?? "succeeded" });
+    syncCharge(chId);
+    return reId;
+  }
+  function setRefundStatus(reId: string, status: string) {
+    const re = fake.refunds.get(reId)!;
+    re.status = status;
+    syncCharge(String(re.charge));
+  }
+  /** 異議申し立て（チャージバック）の発生。status: needs_response（既定）・under_review・won・lost など */
+  function addDispute(chId: string, o: { amount?: number; status?: string; currency?: string } = {}) {
+    const ch = fake.charges.get(chId)!;
+    const dpId = id("dp");
+    fake.disputes.set(dpId, { id: dpId, object: "dispute", livemode: LIVE, charge: chId, payment_intent: ch.payment_intent, currency: o.currency ?? "jpy", amount: o.amount ?? ch.amount, status: o.status ?? "needs_response", reason: "fraudulent" });
+    Object.assign(ch, { disputed: true });
+    return dpId;
   }
 
   const server = createServer(async (req, res) => {
@@ -135,7 +166,23 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
     }
     if (req.method === "GET" && url.pathname === "/v1/refunds") {
       const charge = url.searchParams.get("charge");
-      return send(res, 200, { object: "list", url: "/v1/refunds", has_more: false, data: [...fake.refunds.values()].filter((x) => x.charge === charge) });
+      send(res, 200, { object: "list", url: "/v1/refunds", has_more: false, data: [...fake.refunds.values()].filter((x) => x.charge === charge) });
+      const hook = charge ? fake.afterRefundListOnce.get(charge) : undefined;
+      if (hook) {
+        fake.afterRefundListOnce.delete(charge!);
+        hook();
+      }
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/v1/disputes") {
+      const charge = url.searchParams.get("charge");
+      send(res, 200, { object: "list", url: "/v1/disputes", has_more: false, data: [...fake.disputes.values()].filter((x) => !charge || x.charge === charge) });
+      const hook = charge ? fake.afterDisputeListOnce.get(charge) : undefined;
+      if (hook) {
+        fake.afterDisputeListOnce.delete(charge!);
+        hook();
+      }
+      return;
     }
     // ---- テスト用の操作（決済画面での支払い・返金・期限切れ・手数料の確定を再現） ----
     const ctl = JSON.parse(body || "{}") as { fee?: number | null; amount?: number; created?: number; metadataStoreId?: string; method?: string; async?: boolean; status?: string; currency?: string };
@@ -179,35 +226,15 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
       }
       return send(res, 200, {});
     }
-    const syncCharge = (chId: string) => {
-      const ch = fake.charges.get(chId)!;
-      const sum = [...fake.refunds.values()].filter((x) => x.charge === chId && (x.status === "succeeded" || x.status === "pending")).reduce((a, x) => a + Number(x.amount), 0);
-      Object.assign(ch, { amount_refunded: sum, refunded: sum >= Number(ch.amount) });
-    };
     r = m(/^\/__test\/refund\/([^/]+)$/);
-    if (r) {
-      const ch = fake.charges.get(r[1])!;
-      const reId = id("re");
-      fake.refunds.set(reId, { id: reId, object: "refund", charge: r[1], payment_intent: ch.payment_intent, currency: "jpy", amount: ctl.amount ?? ch.amount, status: ctl.status ?? "succeeded" });
-      syncCharge(r[1]);
-      return send(res, 200, { refund: reId });
-    }
+    if (r) return send(res, 200, { refund: addRefund(r[1], ctl) });
     r = m(/^\/__test\/refund-status\/([^/]+)$/);
     if (r) {
-      const re = fake.refunds.get(r[1])!;
-      re.status = ctl.status;
-      syncCharge(String(re.charge));
+      setRefundStatus(r[1], String(ctl.status));
       return send(res, 200, {});
     }
     r = m(/^\/__test\/dispute\/([^/]+)$/);
-    if (r) {
-      // 異議申し立て（チャージバック）の発生。status: needs_response（既定）・under_review・won・lost など
-      const ch = fake.charges.get(r[1])!;
-      const dpId = id("dp");
-      fake.disputes.set(dpId, { id: dpId, object: "dispute", livemode: LIVE, charge: r[1], payment_intent: ch.payment_intent, currency: ctl.currency ?? "jpy", amount: ctl.amount ?? ch.amount, status: ctl.status ?? "needs_response", reason: "fraudulent" });
-      Object.assign(ch, { disputed: true });
-      return send(res, 200, { dispute: dpId });
-    }
+    if (r) return send(res, 200, { dispute: addDispute(r[1], ctl) });
     r = m(/^\/__test\/dispute-status\/([^/]+)$/);
     if (r) {
       Object.assign(fake.disputes.get(r[1])!, { status: ctl.status });
@@ -243,6 +270,9 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
     server,
     ctl,
     sessionView,
+    addRefund,
+    setRefundStatus,
+    addDispute,
     start: () => new Promise<void>((ok) => server.listen(port, "127.0.0.1", ok)),
     stop: () => new Promise<void>((ok) => server.close(() => ok())),
   };

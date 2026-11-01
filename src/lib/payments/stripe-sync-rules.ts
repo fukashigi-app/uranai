@@ -280,3 +280,77 @@ export function decideEntitlementRestore(f: RestoreFacts, reasonInput: unknown):
   if ([...reason].length > RESTORE_REASON_MAX) return { ok: false, deny: "reason_too_long" };
   return { ok: true, refundState: f.refundStatus, reason };
 }
+
+// ---------- 決済確定の時点の決済記録の状態 ----------
+
+export type ConfirmState = {
+  /** 決済記録の状態（売上集計のキーは呼び出し側でこの値から求める） */
+  paymentStatus: string;
+  /** 決済記録に書き込む返金・異議申し立ての項目（返金日時・チャージバック日時を含む）。何も無ければ空 */
+  fields: Record<string, unknown>;
+  entitlement: InitialEntitlement;
+};
+
+/**
+ * 決済確定の時点で Stripe にもう返金・異議申し立てがあるときの、決済記録・注文・占い権利の初期の状態。
+ * 確定の後に「返金 → 異議申し立て」の順に通知が届いたときと同じ結果にする（decideRefundSync・decideDisputeSync を
+ * まだ何も反映していない決済記録に順に当てはめる）。権利は initialEntitlementOf の規則で、最初から止めて作るかを決める。
+ * dispute は金額・通貨を disputeAmountProblem で確認済みのもの（1件まで）。
+ */
+export function decideConfirmState(amount: number, refunds: StripeRefundSummary, dispute: DisputeFacts | null, now: Date): ConfirmState {
+  let paymentStatus = "SUCCEEDED";
+  const fields: Record<string, unknown> = {};
+  if (refunds.state !== "none") {
+    const r = decideRefundSync({ paymentStatus, refundKey: undefined }, refunds, now);
+    if (r.kind === "apply") {
+      Object.assign(fields, r.fields);
+      if (r.statusChange) {
+        paymentStatus = r.statusChange.paymentStatus;
+        fields.refundedAt = r.statusChange.refundedAt;
+      }
+    }
+  }
+  let disputeState: DisputeState | null = null;
+  if (dispute) {
+    const d = decideDisputeSync(
+      { disputeId: undefined, disputeStatus: undefined, disputeKey: undefined, paymentStatus, amount, amountRefunded: refunds.succeededAmount, refundStatus: refunds.state === "none" ? null : refunds.state },
+      dispute,
+      now,
+    );
+    if (d.kind === "apply") {
+      Object.assign(fields, d.fields);
+      disputeState = d.state;
+      if (d.statusChange) {
+        paymentStatus = d.statusChange.paymentStatus;
+        fields.chargebackAt = d.statusChange.chargebackAt;
+      }
+    }
+  }
+  return { paymentStatus, fields, entitlement: initialEntitlementOf(refunds.state, disputeState) };
+}
+
+// ---------- 返金・異議申し立ての反映の後の注文の状態 ----------
+
+/**
+ * 決済の今の状態（反映の後の返金・異議申し立て）から、注文を REFUNDED にすべき理由。止めるべきでなければ null。
+ * 権利を止める規則（refundSuspendsEntitlement・disputeSuspendsEntitlement）と同じ。敗訴があれば chargeback を優先する。
+ */
+export function checkoutRefundReasonOf(refundStatus: unknown, disputeStatus: unknown): CheckoutRefundReason | null {
+  if (disputeStatus === "lost") return "chargeback";
+  if (refundStatus === "pending" || refundStatus === "succeeded" || refundStatus === "partial") return "refund";
+  return null;
+}
+
+/**
+ * 返金・異議申し立ての反映（決済記録の更新と同じトランザクション）で、注文の状態をどう変えるか。変えなければ null。
+ *  - 決済の今の状態が返金（処理中・成功・一部）か敗訴なら、SUCCEEDED の注文を REFUNDED にする（理由も今の状態に合わせる）
+ *  - REFUNDED から SUCCEEDED には戻さない（返金の失敗・勝訴でも自動では戻さない。権利の復旧は運営の操作だけ）
+ *  - SUCCEEDED・REFUNDED 以外の注文（決済記録と紐付いていないもの）は変えない
+ */
+export function decideCheckoutAfterSync(cur: { status: unknown; refundReason: unknown }, after: { refundStatus: unknown; disputeStatus: unknown }): { status: "REFUNDED"; refundReason: CheckoutRefundReason } | null {
+  const reason = checkoutRefundReasonOf(after.refundStatus, after.disputeStatus);
+  if (!reason) return null;
+  if (cur.status !== "SUCCEEDED" && cur.status !== "REFUNDED") return null;
+  if (cur.status === "REFUNDED" && cur.refundReason === reason) return null;
+  return { status: "REFUNDED", refundReason: reason };
+}

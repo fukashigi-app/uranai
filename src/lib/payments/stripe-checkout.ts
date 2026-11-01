@@ -2,6 +2,7 @@ import "server-only";
 import Stripe from "stripe";
 import { CURRENCY, PRICE_JPY } from "@/config/pricing";
 import { isLocalEmulatorTarget, stripeTestConfig, STRIPE_TEST_DENY_MESSAGE } from "./stripe-guard";
+import { disputeAmountProblem } from "./stripe-sync-rules";
 
 /**
  * Stripe Checkout（Stripe の決済画面へ移動する方式）。Stripe 公式 SDK を使う。
@@ -198,6 +199,38 @@ export async function listStripeRefunds(chargeId: string, rt: StripeRuntime = st
   const page = await rt.client.refunds.list({ charge: chargeId, limit: 100 });
   if (page.has_more) throw new Error("too many refunds"); // 100円の商品では起きない。取りこぼすくらいなら処理しない
   return page.data;
+}
+
+/** 決済確定の前に、返金・異議申し立ての状態を取得・検証できなかった（一時的なエラーとして扱い、決済確定を進めない） */
+export class StripeAdjustmentsUnverifiedError extends Error {
+  constructor(public readonly reason: string) {
+    super(`Stripe refunds/disputes could not be verified: ${reason}`);
+    this.name = "StripeAdjustmentsUnverifiedError";
+  }
+}
+
+export type StripeChargeAdjustments = { refunds: StripeRefundSummary; dispute: Stripe.Dispute | null };
+
+/**
+ * Charge の返金・異議申し立ての今の状態（決済確定の前と、確定の後の再確認で使う。Stripe API から取り直す）。
+ * 次のときは例外（呼び出し側は決済確定を進めない）：Stripe API の失敗・返金や異議申し立てが多すぎる・
+ * 別の Charge・通貨・金額・モードの食い違い・同じ決済に複数の異議申し立て（StripeAdjustmentsUnverifiedError）。
+ */
+export async function readStripeChargeAdjustments(charge: { id: string; amount: number; livemode: boolean }, rt: StripeRuntime = stripeRuntime()): Promise<StripeChargeAdjustments> {
+  if (!/^(ch|py)_[A-Za-z0-9_]{1,200}$/.test(charge.id)) throw new Error("invalid charge id");
+  const [refunds, disputes] = await Promise.all([listStripeRefunds(charge.id, rt), rt.client.disputes.list({ charge: charge.id, limit: 10 })]);
+  for (const r of refunds) {
+    if (idOf(r.charge) !== charge.id || r.currency !== CURRENCY || !Number.isSafeInteger(r.amount) || r.amount <= 0 || r.amount > charge.amount) throw new StripeAdjustmentsUnverifiedError("refund_invalid");
+  }
+  if (disputes.has_more || disputes.data.length > 1) throw new StripeAdjustmentsUnverifiedError("multiple_disputes");
+  const dispute = disputes.data[0] ?? null;
+  if (dispute) {
+    if (!/^(dp|du)_[A-Za-z0-9_]{1,200}$/.test(dispute.id)) throw new StripeAdjustmentsUnverifiedError("dispute_id");
+    if (dispute.livemode !== charge.livemode) throw new StripeAdjustmentsUnverifiedError("dispute_livemode");
+    if (idOf(dispute.charge) !== charge.id) throw new StripeAdjustmentsUnverifiedError("dispute_charge_mismatch");
+    if (disputeAmountProblem(dispute, charge.amount)) throw new StripeAdjustmentsUnverifiedError("dispute_amount");
+  }
+  return { refunds: summarizeRefunds(charge.id, charge.amount, refunds), dispute };
 }
 
 /** モードに合った Checkout Session の ID か（テストは cs_test_、本番は cs_live_） */

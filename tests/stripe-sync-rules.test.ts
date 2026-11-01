@@ -12,6 +12,8 @@ import {
   disputeAmountProblem,
   disputeKeyOf,
   disputeSuspendsEntitlement,
+  checkoutRefundReasonOf,
+  decideCheckoutAfterSync,
   decideEntitlementRestore,
   initialEntitlementOf,
   isOurPayment,
@@ -410,5 +412,63 @@ describe("純粋な関数のモジュール", () => {
     const imports = [...src.matchAll(/^import\s+(type\s+)?[^;]*?from\s+"([^"]+)";/gm)].map((m) => ({ typeOnly: Boolean(m[1]), from: m[2] }));
     expect(src).not.toMatch(/server-only|firebase-admin|@\/lib\/firestore/);
     for (const i of imports) if (!i.typeOnly) expect(i.from).toBe("./settlement-rules");
+  });
+});
+
+describe("返金・異議申し立ての反映の後の注文の状態", () => {
+  const REFUND = [null, "none", "pending", "succeeded", "partial", "failed"] as const;
+  const DISPUTE = [null, "open", "won", "lost"] as const;
+
+  it("注文を REFUNDED にする理由：敗訴は chargeback、返金（処理中・成功・一部）は refund、それ以外は null", () => {
+    expect(checkoutRefundReasonOf("succeeded", null)).toBe("refund");
+    expect(checkoutRefundReasonOf("pending", "open")).toBe("refund");
+    expect(checkoutRefundReasonOf("partial", "won")).toBe("refund");
+    expect(checkoutRefundReasonOf("failed", "lost")).toBe("chargeback");
+    expect(checkoutRefundReasonOf("succeeded", "lost")).toBe("chargeback");
+    expect(checkoutRefundReasonOf("failed", null)).toBeNull();
+    expect(checkoutRefundReasonOf(null, "open")).toBeNull();
+    expect(checkoutRefundReasonOf(undefined, undefined)).toBeNull();
+  });
+
+  it("権利を止める規則・決済確定の時点の注文の状態と同じ（すべての組み合わせ）", () => {
+    for (const r of REFUND) {
+      for (const d of DISPUTE) {
+        const reason = checkoutRefundReasonOf(r, d);
+        const init = initialEntitlementOf((r ?? "none") as StripeRefundState, d);
+        expect(reason).toBe(init.refundReason);
+        expect(reason !== null).toBe(!init.grant);
+      }
+    }
+  });
+
+  it("SUCCEEDED の注文は、返金・敗訴で REFUNDED（理由つき）にする", () => {
+    expect(decideCheckoutAfterSync({ status: "SUCCEEDED", refundReason: null }, { refundStatus: "pending", disputeStatus: null })).toEqual({ status: "REFUNDED", refundReason: "refund" });
+    expect(decideCheckoutAfterSync({ status: "SUCCEEDED", refundReason: null }, { refundStatus: "partial", disputeStatus: null })).toEqual({ status: "REFUNDED", refundReason: "refund" });
+    expect(decideCheckoutAfterSync({ status: "SUCCEEDED", refundReason: null }, { refundStatus: "succeeded", disputeStatus: null })).toEqual({ status: "REFUNDED", refundReason: "refund" });
+    expect(decideCheckoutAfterSync({ status: "SUCCEEDED", refundReason: null }, { refundStatus: null, disputeStatus: "lost" })).toEqual({ status: "REFUNDED", refundReason: "chargeback" });
+  });
+
+  it("REFUNDED の理由は今の状態に合わせる（返金の後の敗訴は chargeback）。同じ理由なら書き込まない", () => {
+    expect(decideCheckoutAfterSync({ status: "REFUNDED", refundReason: "refund" }, { refundStatus: "succeeded", disputeStatus: "lost" })).toEqual({ status: "REFUNDED", refundReason: "chargeback" });
+    expect(decideCheckoutAfterSync({ status: "REFUNDED", refundReason: "refund" }, { refundStatus: "succeeded", disputeStatus: null })).toBeNull();
+    expect(decideCheckoutAfterSync({ status: "REFUNDED", refundReason: "chargeback" }, { refundStatus: null, disputeStatus: "lost" })).toBeNull();
+  });
+
+  it("REFUNDED から SUCCEEDED に自動では戻さない（返金の失敗・取り消し・勝訴・古い通知・再送でも）", () => {
+    for (const refundStatus of ["failed", "none", null]) {
+      for (const disputeStatus of [null, "open", "won"]) {
+        for (const refundReason of ["refund", "chargeback", null]) {
+          expect(decideCheckoutAfterSync({ status: "REFUNDED", refundReason }, { refundStatus, disputeStatus })).toBeNull();
+        }
+      }
+    }
+  });
+
+  it("SUCCEEDED・REFUNDED 以外の注文は変えない。返金が無ければ SUCCEEDED のまま", () => {
+    for (const status of ["CREATED", "PROCESSING", "FAILED", "EXPIRED", undefined]) {
+      expect(decideCheckoutAfterSync({ status, refundReason: null }, { refundStatus: "succeeded", disputeStatus: "lost" })).toBeNull();
+    }
+    expect(decideCheckoutAfterSync({ status: "SUCCEEDED", refundReason: null }, { refundStatus: "failed", disputeStatus: "open" })).toBeNull();
+    expect(decideCheckoutAfterSync({ status: "SUCCEEDED", refundReason: null }, { refundStatus: null, disputeStatus: "won" })).toBeNull();
   });
 });
