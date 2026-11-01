@@ -3,6 +3,7 @@ import path from "node:path";
 import type Stripe from "stripe";
 import { describe, expect, it } from "vitest";
 import { chargebackCoversRemainder, disputeStateOf } from "@/lib/payments/settlement-rules";
+import type { DisputeState } from "@/lib/payments/settlement-rules";
 import type { StripeRefundState, StripeRefundSummary } from "@/lib/payments/stripe-checkout";
 import {
   chargeMismatches,
@@ -11,12 +12,17 @@ import {
   disputeAmountProblem,
   disputeKeyOf,
   disputeSuspendsEntitlement,
+  decideEntitlementRestore,
+  initialEntitlementOf,
   isOurPayment,
+  normalizeRestoreReason,
+  RESTORE_REASON_MAX,
   refundKeyOf,
   refundSuspendsEntitlement,
   type DisputeFacts,
   type DisputeTxFacts,
   type RefundTxFacts,
+  type RestoreFacts,
 } from "@/lib/payments/stripe-sync-rules";
 
 // 返金・異議申し立ての反映の判定（stripe-confirm.ts から切り出した純粋な関数）。Firestore・Stripe には接続しない
@@ -107,9 +113,9 @@ describe("返金の反映の判定", () => {
     expect(d).toMatchObject({ kind: "apply", outcome: "refund_pending", statusChange: null, suspendEntitlement: true, fields: { refundStatus: "pending", refundPendingAmount: 100, refundNeedsReview: false } });
   });
 
-  it("一部の返金：管理者の確認にする（今の規則では権利を止めない。決済確定の前後での統一は第2段階）", () => {
+  it("一部の返金：管理者の確認にし、未使用の権利を止める（決済確定の前後で同じ規則）", () => {
     const d = decideRefundSync(tx(), summary("partial"), NOW);
-    expect(d).toMatchObject({ kind: "apply", outcome: "partial", statusChange: null, suspendEntitlement: false, fields: { refundStatus: "partial", amountRefunded: 30, refundNeedsReview: true } });
+    expect(d).toMatchObject({ kind: "apply", outcome: "partial", statusChange: null, suspendEntitlement: true, fields: { refundStatus: "partial", amountRefunded: 30, refundNeedsReview: true } });
   });
 
   it("失敗：管理者の確認にする。権利は止めない", () => {
@@ -128,8 +134,8 @@ describe("返金の反映の判定", () => {
     }
   });
 
-  it("権利を止める返金の状態（今の規則：処理中・成功）", () => {
-    expect((["none", "pending", "succeeded", "partial", "failed"] as const).filter(refundSuspendsEntitlement)).toEqual(["pending", "succeeded"]);
+  it("権利を止める返金の状態（処理中・成功・一部。失敗では止めない）", () => {
+    expect((["none", "pending", "succeeded", "partial", "failed"] as const).filter(refundSuspendsEntitlement)).toEqual(["pending", "succeeded", "partial"]);
   });
 });
 
@@ -214,7 +220,8 @@ describe("異議申し立ての反映の判定", () => {
   });
 });
 
-// 切り出す前の stripe-confirm.ts の判定をそのまま写したもの（第1段階で動作が変わっていないことの確認用。日時は NOW に固定）
+// 切り出す前の stripe-confirm.ts の判定をそのまま写したもの（第1段階で動作が変わっていないことの確認用。日時は NOW に固定）。
+// 第2段階で意図して変えたのは「一部の返金で権利を止める」ことだけ（下の比較で、その1点だけを差し替えて確かめる）
 function legacyRefund(t: RefundTxFacts, s: StripeRefundSummary) {
   const refundKey = refundKeyOf(s);
   if (t.refundKey === refundKey) return { outcome: "unchanged" };
@@ -276,7 +283,7 @@ describe("切り出す前の判定と同じ結果（すべての組み合わせ�
           const legacy = legacyRefund(t, s);
           const d = decideRefundSync(t, s, NOW);
           if (d.kind === "unchanged") expect(legacy).toEqual({ outcome: "unchanged" });
-          else expect({ outcome: d.outcome, patch: { ...d.fields, ...(d.statusChange ?? {}) }, suspend: d.suspendEntitlement }).toEqual(legacy);
+          else expect({ outcome: d.outcome, patch: { ...d.fields, ...(d.statusChange ?? {}) }, suspend: d.suspendEntitlement }).toEqual({ ...legacy, suspend: legacy.suspend || state === "partial" });
           n++;
         }
       }
@@ -309,6 +316,91 @@ describe("切り出す前の判定と同じ結果（すべての組み合わせ�
       }
     }
     expect(n).toBe(3 * 4 * 4 * 9 * 2 * 3);
+  });
+});
+
+describe("決済確定の時点の占い権利", () => {
+  const REFUND: StripeRefundState[] = ["none", "pending", "succeeded", "partial", "failed"];
+  const DISPUTE: (DisputeState | null)[] = [null, "open", "won", "lost"];
+
+  it("返金も異議申し立ても無い・返金の失敗・異議申し立ての対応中・勝訴：権利を付与し、注文は SUCCEEDED", () => {
+    for (const r of ["none", "failed"] as const) {
+      for (const d of [null, "open", "won"] as const) {
+        expect(initialEntitlementOf(r, d)).toEqual({ grant: true, checkoutStatus: "SUCCEEDED", refundReason: null, suspendedByRefund: false, suspendedByDispute: false });
+      }
+    }
+  });
+
+  it.each(["pending", "succeeded", "partial"] as const)("返金（%s）：権利を止めて作り、注文は REFUNDED（理由 refund）", (r) => {
+    expect(initialEntitlementOf(r, null)).toEqual({ grant: false, checkoutStatus: "REFUNDED", refundReason: "refund", suspendedByRefund: true, suspendedByDispute: false });
+    expect(initialEntitlementOf(r, "open")).toMatchObject({ grant: false, refundReason: "refund" });
+  });
+
+  it("異議申し立ての敗訴：権利を止めて作り、注文は REFUNDED（理由 chargeback。返金もあるときも chargeback）", () => {
+    expect(initialEntitlementOf("none", "lost")).toEqual({ grant: false, checkoutStatus: "REFUNDED", refundReason: "chargeback", suspendedByRefund: false, suspendedByDispute: true });
+    expect(initialEntitlementOf("partial", "lost")).toEqual({ grant: false, checkoutStatus: "REFUNDED", refundReason: "chargeback", suspendedByRefund: true, suspendedByDispute: true });
+    expect(initialEntitlementOf("failed", "lost")).toMatchObject({ grant: false, refundReason: "chargeback" });
+  });
+
+  it("確定の後に届いた場合の規則と同じ（すべての組み合わせで、権利を止めるのは返金か敗訴の規則のどちらかに当たるとき）", () => {
+    for (const r of REFUND) {
+      for (const d of DISPUTE) {
+        const e = initialEntitlementOf(r, d);
+        const suspend = refundSuspendsEntitlement(r) || (d !== null && disputeSuspendsEntitlement(d));
+        expect(e.grant).toBe(!suspend);
+        expect(e.checkoutStatus).toBe(suspend ? "REFUNDED" : "SUCCEEDED");
+        expect(e.refundReason === null).toBe(!suspend); // 付与しないときは必ず理由がある
+      }
+    }
+  });
+});
+
+describe("止めた占い権利の復旧（運営の操作）", () => {
+  const ok = (over: Partial<RestoreFacts> = {}, ent: Partial<RestoreFacts["entitlement"]> = {}): RestoreFacts => ({
+    paymentStatus: "SUCCEEDED",
+    refundStatus: "failed",
+    disputeStatus: null,
+    ...over,
+    entitlement: { exists: true, status: "EXPIRED", suspendedByRefund: true, suspendedByDispute: undefined, usedAt: null, ...ent },
+  });
+  const REASON = "返金が失敗したため、お客さまに確認のうえ権利を戻す";
+
+  it("返金がすべて失敗・一部の返金で、返金で止めた未使用の権利なら、理由付きで戻せる", () => {
+    expect(decideEntitlementRestore(ok(), REASON)).toEqual({ ok: true, refundState: "failed", reason: REASON });
+    expect(decideEntitlementRestore(ok({ refundStatus: "partial" }), REASON)).toEqual({ ok: true, refundState: "partial", reason: REASON });
+    expect(decideEntitlementRestore(ok({ disputeStatus: "won" }), REASON)).toMatchObject({ ok: true }); // 勝訴した異議申し立ては妨げない
+  });
+
+  it.each([
+    ["全額の返金済み（REFUNDED）", ok({ paymentStatus: "REFUNDED", refundStatus: "succeeded" }), "payment_not_succeeded"],
+    ["チャージバック（CHARGEBACK）", ok({ paymentStatus: "CHARGEBACK" }), "payment_not_succeeded"],
+    ["返金の処理中", ok({ refundStatus: "pending" }), "refund_pending"],
+    ["返金が成功（状態の食い違い）", ok({ refundStatus: "succeeded" }), "refund_not_restorable"],
+    ["返金が無い", ok({ refundStatus: null }), "refund_not_restorable"],
+    ["異議申し立ての対応中", ok({ disputeStatus: "open" }), "dispute_open"],
+    ["異議申し立ての敗訴（一部の額。決済は SUCCEEDED のまま）", ok({ disputeStatus: "lost" }), "dispute_lost"],
+    ["一部の返金＋異議申し立ての対応中", ok({ refundStatus: "partial", disputeStatus: "open" }), "dispute_open"],
+    ["権利の記録が無い", ok({}, { exists: false }), "entitlement_missing"],
+    ["権利は使用済み", ok({}, { status: "USED" }), "entitlement_used"],
+    ["使用日時がある", ok({}, { usedAt: new Date() }), "entitlement_used"],
+    ["権利は有効のまま（すでに戻した）", ok({}, { status: "PAID", suspendedByRefund: false }), "entitlement_not_suspended"],
+    ["期限切れで止まった（返金で止めたものではない）", ok({}, { suspendedByRefund: false }), "entitlement_not_suspended"],
+    ["異議申し立てで止めた", ok({}, { suspendedByDispute: true }), "entitlement_suspended_by_dispute"],
+  ] as const)("%s → 戻さない（%s）", (_label, facts, deny) => {
+    expect(decideEntitlementRestore(facts, REASON)).toEqual({ ok: false, deny });
+  });
+
+  it("理由の入力は必須・最大文字数まで。制御文字は空白にして前後の空白を除く", () => {
+    for (const r of [undefined, null, 1, "", "   ", "\n\t"]) expect(decideEntitlementRestore(ok(), r)).toEqual({ ok: false, deny: "reason_required" });
+    expect(decideEntitlementRestore(ok(), "あ".repeat(RESTORE_REASON_MAX))).toMatchObject({ ok: true });
+    expect(decideEntitlementRestore(ok(), "あ".repeat(RESTORE_REASON_MAX + 1))).toEqual({ ok: false, deny: "reason_too_long" });
+    expect(decideEntitlementRestore(ok(), "😀".repeat(RESTORE_REASON_MAX))).toMatchObject({ ok: true }); // 文字数で数える（サロゲートペアも1文字）
+    expect(decideEntitlementRestore(ok(), "  返金失敗\nのため  ")).toEqual({ ok: true, refundState: "failed", reason: "返金失敗 のため" });
+    expect(normalizeRestoreReason("a\u0000b\u007fc")).toBe("a b c");
+  });
+
+  it("戻せない状態なら、理由が無くても状態の理由を返す（状態の確認が先）", () => {
+    expect(decideEntitlementRestore(ok({ refundStatus: "pending" }), "")).toEqual({ ok: false, deny: "refund_pending" });
   });
 });
 

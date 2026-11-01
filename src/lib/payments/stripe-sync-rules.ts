@@ -56,10 +56,11 @@ export const refundKeyOf = (s: StripeRefundSummary) => `${s.state}:${s.succeeded
 export type StripeRefundSyncOutcome = "refund_pending" | "refunded" | "partial" | "refund_failed";
 
 /**
- * 返金の状態で、未使用の占い権利を止めるか。
- * 今の規則：処理中・成功で止める。一部の返金・失敗では止めない（管理者が確認する）。
+ * 返金の状態で、未使用の占い権利を止めるか（決済確定の前後で同じ規則）。
+ * 処理中・成功・一部の返金で止める。失敗（すべて失敗・取り消し）では止めない（管理者が確認する）。
+ * 止めた権利は自動では戻さない（運営の理由付きの操作だけ。decideEntitlementRestore）。
  */
-export const refundSuspendsEntitlement = (state: StripeRefundState) => state === "succeeded" || state === "pending";
+export const refundSuspendsEntitlement = (state: StripeRefundState) => state === "succeeded" || state === "pending" || state === "partial";
 
 export type RefundTxFacts = { paymentStatus: unknown; refundKey: unknown };
 
@@ -190,4 +191,91 @@ export function decideDisputeSync(t: DisputeTxFacts, dp: DisputeFacts, now: Date
     statusChange: nextStatus !== cur ? { paymentStatus: nextStatus, chargebackAt: nextStatus === "CHARGEBACK" ? now : null } : null,
     suspendEntitlement: disputeSuspendsEntitlement(state),
   };
+}
+
+// ---------- 決済確定の時点の占い権利 ----------
+
+export type InitialEntitlement = {
+  /** 占い権利を有効（PAID）で作るか */
+  grant: boolean;
+  /** 注文の状態（権利を付与しないときは REFUNDED） */
+  checkoutStatus: "SUCCEEDED" | "REFUNDED";
+  /** REFUNDED の理由（返金か、異議申し立ての敗訴か）。付与するときは null */
+  refundReason: "refund" | "chargeback" | null;
+  suspendedByRefund: boolean;
+  suspendedByDispute: boolean;
+};
+
+/**
+ * 決済確定の時点で、Stripe にもう返金・異議申し立てがあるときの占い権利（確定の後に届いた場合と同じ規則）。
+ * 返金（処理中・成功・一部）または異議申し立ての敗訴があれば、権利を最初から止めて作り、注文を REFUNDED にする。
+ * 敗訴があれば理由は chargeback（返金もあるときも chargeback を優先する）。異議申し立ての対応中・勝訴、返金の失敗では付与する。
+ */
+export function initialEntitlementOf(refundState: StripeRefundState, disputeState: DisputeState | null): InitialEntitlement {
+  const suspendedByRefund = refundSuspendsEntitlement(refundState);
+  const suspendedByDispute = disputeState !== null && disputeSuspendsEntitlement(disputeState);
+  const grant = !suspendedByRefund && !suspendedByDispute;
+  return {
+    grant,
+    checkoutStatus: grant ? "SUCCEEDED" : "REFUNDED",
+    refundReason: suspendedByDispute ? "chargeback" : suspendedByRefund ? "refund" : null,
+    suspendedByRefund,
+    suspendedByDispute,
+  };
+}
+
+// ---------- 止めた占い権利の復旧（運営の操作） ----------
+
+/** 復旧の理由の最大の長さ（文字数） */
+export const RESTORE_REASON_MAX = 200;
+
+export type RestoreFacts = {
+  paymentStatus: unknown;
+  refundStatus: unknown;
+  disputeStatus: unknown;
+  entitlement: { exists: boolean; status?: unknown; suspendedByRefund?: unknown; suspendedByDispute?: unknown; usedAt?: unknown };
+};
+
+export type RestoreDenyReason =
+  | "payment_not_succeeded"
+  | "refund_pending"
+  | "refund_not_restorable"
+  | "dispute_open"
+  | "dispute_lost"
+  | "entitlement_missing"
+  | "entitlement_used"
+  | "entitlement_not_suspended"
+  | "entitlement_suspended_by_dispute"
+  | "reason_required"
+  | "reason_too_long";
+
+export type RestoreDecision = { ok: true; refundState: "failed" | "partial"; reason: string } | { ok: false; deny: RestoreDenyReason };
+
+/** 理由の入力を整える（制御文字は空白にし、前後の空白を除く） */
+export const normalizeRestoreReason = (v: unknown) => (typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f]/g, " ").trim() : "");
+
+/**
+ * 返金で止めた占い権利を、運営が戻してよいか（呼び出し側は Stripe API で返金の状態を反映してから、トランザクションの中で判定する）。
+ * 戻せるのは次のすべてを満たすときだけ：
+ *  - 決済が SUCCEEDED（全額の返金 REFUNDED・チャージバック CHARGEBACK は戻さない）
+ *  - 返金がすべて失敗・取り消し（failed）か、一部の返金（partial）。処理中・成功は戻さない
+ *  - 異議申し立てが対応中・敗訴でない
+ *  - 権利があり、未使用で、返金で止めたもの（異議申し立てで止めたものは戻さない）
+ *  - 理由が入力されている（RESTORE_REASON_MAX 文字まで。監査ログに残す）
+ */
+export function decideEntitlementRestore(f: RestoreFacts, reasonInput: unknown): RestoreDecision {
+  if (f.paymentStatus !== "SUCCEEDED") return { ok: false, deny: "payment_not_succeeded" };
+  if (f.refundStatus === "pending") return { ok: false, deny: "refund_pending" };
+  if (f.refundStatus !== "failed" && f.refundStatus !== "partial") return { ok: false, deny: "refund_not_restorable" };
+  if (f.disputeStatus === "open") return { ok: false, deny: "dispute_open" };
+  if (f.disputeStatus === "lost") return { ok: false, deny: "dispute_lost" };
+  const e = f.entitlement;
+  if (!e.exists) return { ok: false, deny: "entitlement_missing" };
+  if (e.status === "USED" || e.usedAt) return { ok: false, deny: "entitlement_used" };
+  if (e.suspendedByDispute === true) return { ok: false, deny: "entitlement_suspended_by_dispute" };
+  if (e.status !== "EXPIRED" || e.suspendedByRefund !== true) return { ok: false, deny: "entitlement_not_suspended" };
+  const reason = normalizeRestoreReason(reasonInput);
+  if (!reason) return { ok: false, deny: "reason_required" };
+  if ([...reason].length > RESTORE_REASON_MAX) return { ok: false, deny: "reason_too_long" };
+  return { ok: true, refundState: f.refundStatus, reason };
 }
