@@ -10,7 +10,10 @@ import { paymentKind } from "@/lib/payments/kind";
 import { listAllStores } from "./stores";
 
 /**
- * 売上集計（Firestore 版）。すべて transactions の決済成功分（返金除外・テスト決済除外）から計算する。
+ * 売上集計（Firestore 版）。売上は transactions の決済成功分（返金除外・テスト決済除外）から計算する。
+ * 決済手数料は、返金・チャージバックの決済も含めて数える（Stripe は返金しても手数料を返さない）。手数料の集計用のキー
+ * （feeYm・feeStoreYm・feeDate・feeStore・feeCountable。lib/firestore/shared.ts の feeKeys）で別に読み、決済記録ごとに1回だけ足す。
+ * キーが無い以前の決済記録は、今までどおり売上の対象のものだけ手数料に数える（データの移行はしない）。
  * 金額・店舗取り分・運営取り分は決済時に保存した値を合計するだけ（再計算しない）。
  *
  * 検索条件はすべて「1つの等価条件」にしてあるため、Firestore の自動インデックスだけで動作する
@@ -24,7 +27,7 @@ import { listAllStores } from "./stores";
  */
 
 const tx = () => fsdb().collection(C.transactions);
-const ZERO: Totals = { count: 0, gross: 0, storeShare: 0, operatorShare: 0, fee: 0 };
+const ZERO: Totals = { count: 0, gross: 0, storeShare: 0, operatorShare: 0, fee: 0, feeEstimated: 0 };
 
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 
@@ -45,18 +48,51 @@ function figures(d: { get(f: string): unknown }) {
   });
 }
 
-async function aggregate(q: Query): Promise<Totals> {
-  const snap = await q.select(...NET_FIELDS, "paymentFee", "paymentProvider", "livemode").get();
+type Doc = { id: string; get(f: string): unknown };
+const FEE_FIELDS = ["paymentFee", "feeEstimated", "feeCountable", "paymentProvider", "livemode"] as const;
+
+/** 手数料が推定値か（Stripe の確定値が無い。Stripe 以外の以前の決済は、固定の率で計算した推定値） */
+const feeIsEstimated = (d: Doc) => d.get("feeEstimated") === true || d.get("paymentProvider") !== "stripe";
+
+function addSales(total: Totals, d: Doc) {
+  const f = figures(d);
+  total.count += 1;
+  total.gross += f.gross;
+  total.storeShare += f.storeShare;
+  total.operatorShare += f.operatorShare;
+}
+
+/**
+ * 手数料を足す。feeDocs … 手数料の集計用のキーで読んだ決済記録、salesDocs … 売上の対象として読んだ決済記録。
+ * 同じ決済記録は1回だけ（ID で重複を除く）。キーの無い以前の決済記録は、売上の対象のものだけ足す（今までどおり）。
+ */
+export function feeTotalsOf(feeDocs: Doc[], salesDocs: Doc[]): { fee: number; feeEstimated: number } {
+  const out = { fee: 0, feeEstimated: 0 };
+  const seen = new Set<string>();
+  const add = (d: Doc) => {
+    if (seen.has(d.id) || !isSalesDoc(d)) return; // テスト決済などは数えない
+    seen.add(d.id);
+    const fee = num(d.get("paymentFee"));
+    out.fee += fee;
+    if (feeIsEstimated(d)) out.feeEstimated += fee;
+  };
+  for (const d of feeDocs) add(d);
+  for (const d of salesDocs) if (d.get("feeCountable") === undefined) add(d);
+  return out;
+}
+
+function addFees(total: Totals, feeDocs: Doc[], salesDocs: Doc[]) {
+  const f = feeTotalsOf(feeDocs, salesDocs);
+  total.fee += f.fee;
+  total.feeEstimated += f.feeEstimated;
+}
+
+async function aggregate(q: Query, feeQ: Query): Promise<Totals> {
+  const [snap, fees] = await Promise.all([q.select(...NET_FIELDS, ...FEE_FIELDS).get(), feeQ.select(...FEE_FIELDS).get()]);
   const total: Totals = { ...ZERO };
-  for (const d of snap.docs) {
-    if (!isSalesDoc(d)) continue; // 以前の判定で countable になっているテスト決済などを除く
-    const f = figures(d);
-    total.count += 1;
-    total.gross += f.gross;
-    total.storeShare += f.storeShare;
-    total.operatorShare += f.operatorShare;
-    total.fee += num(d.get("paymentFee"));
-  }
+  const sales = snap.docs.filter((d) => isSalesDoc(d)); // 以前の判定で countable になっているテスト決済などを除く
+  for (const d of sales) addSales(total, d);
+  addFees(total, fees.docs, sales);
   return total;
 }
 
@@ -68,6 +104,14 @@ function allTimeQuery(storeId?: string): Query {
   return storeId ? tx().where("cStore", "==", storeId) : tx().where("countable", "==", true);
 }
 
+/** 手数料の集計（決済の状態に関係なく、本番の決済） */
+function feeMonthQuery(yearMonth: string, storeId?: string): Query {
+  return storeId ? tx().where("feeStoreYm", "==", `${storeId}_${yearMonth}`) : tx().where("feeYm", "==", yearMonth);
+}
+function feeAllTimeQuery(storeId?: string): Query {
+  return storeId ? tx().where("feeStore", "==", storeId) : tx().where("feeCountable", "==", true);
+}
+
 /** range がちょうど1か月（JST）なら、その年月を返す */
 function wholeMonth(range: { start: Date; end: Date }): string | null {
   const ym = jstYearMonth(range.start);
@@ -76,7 +120,7 @@ function wholeMonth(range: { start: Date; end: Date }): string | null {
 }
 
 export async function monthTotals(yearMonth: string, storeId?: string): Promise<Totals> {
-  return aggregate(monthQuery(yearMonth, storeId));
+  return aggregate(monthQuery(yearMonth, storeId), feeMonthQuery(yearMonth, storeId));
 }
 
 /** 任意の期間（日単位）の合計。運営ダッシュボードの「本日」などで使う */
@@ -86,23 +130,20 @@ export async function totalsBetween(start: Date, end: Date, storeId?: string): P
   const total: Totals = { ...ZERO };
   for (let t = start.getTime(); t < end.getTime(); t += 86_400_000) {
     const day = jstDateString(new Date(t));
-    const q = await tx().where("cDate", "==", day).get();
-    for (const d of q.docs) {
+    const [q, fq] = await Promise.all([tx().where("cDate", "==", day).get(), tx().where("feeDate", "==", day).get()]);
+    const inRange = (d: Doc) => {
       const paidAt = mustDate(d.get("paidAt"));
-      if (paidAt < start || paidAt >= end || (storeId && d.get("storeId") !== storeId) || !isSalesDoc(d)) continue;
-      const f = figures(d);
-      total.count += 1;
-      total.gross += f.gross;
-      total.storeShare += f.storeShare;
-      total.operatorShare += f.operatorShare;
-      total.fee += Number(d.get("paymentFee"));
-    }
+      return paidAt >= start && paidAt < end && (!storeId || d.get("storeId") === storeId);
+    };
+    const sales = q.docs.filter((d) => inRange(d) && isSalesDoc(d));
+    for (const d of sales) addSales(total, d);
+    addFees(total, fq.docs.filter(inRange), sales);
   }
   return total;
 }
 
 export async function totalsForRange(range: Range, storeId?: string): Promise<Totals> {
-  if (!range) return aggregate(allTimeQuery(storeId));
+  if (!range) return aggregate(allTimeQuery(storeId), feeAllTimeQuery(storeId));
   return totalsBetween(range.start, range.end, storeId);
 }
 
@@ -155,7 +196,7 @@ export async function listStores(opts: {
   const ym = opts.range ? wholeMonth(opts.range) : null;
   const rows: (StoreListRow & { createdAt: Date })[] = await Promise.all(
     stores.map(async (s) => {
-      const t = opts.range ? (ym ? await monthTotals(ym, s.id) : await totalsBetween(opts.range.start, opts.range.end, s.id)) : await aggregate(allTimeQuery(s.id));
+      const t = opts.range ? (ym ? await monthTotals(ym, s.id) : await totalsBetween(opts.range.start, opts.range.end, s.id)) : await aggregate(allTimeQuery(s.id), feeAllTimeQuery(s.id));
       return {
         id: s.id,
         name: s.name,
@@ -234,6 +275,7 @@ export async function listTransactions(opts: { storeId?: string; yearMonth?: str
       storeShare: Number(d.get("storeShare")),
       operatorShare: Number(d.get("operatorShare")),
       paymentFee: Number(d.get("paymentFee")),
+      feeEstimated: feeIsEstimated(d),
       paymentStatus: String(d.get("paymentStatus")),
       amountRefunded: num(d.get("amountRefunded")),
       // 一部返金の後の店舗の取り分（決済時の記録は書き換えない）

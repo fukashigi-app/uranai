@@ -18,11 +18,13 @@ import { dataProvider } from "@/lib/data-provider";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createOperator, createStore, createStoreUser } from "@/lib/services/stores";
 import { randomToken, sha256Hex } from "@/lib/security/crypto";
-import { monthTotals } from "@/lib/services/reports";
+import { monthTotals, totalsBetween, totalsForRange } from "@/lib/services/reports";
+import { listAllStores } from "@/lib/firestore/stores";
+import { salesKeys } from "@/lib/firestore/shared";
 import { generateSettlements, listSettlements, updateSettlementStatus } from "@/lib/services/settlements";
 import { listAdjustments } from "@/lib/firestore/settlement-adjustments";
 import { createCheckout } from "@/lib/firestore/payments";
-import { jstYearMonth, shiftYearMonth } from "@/lib/time";
+import { jstMonthRange, jstYearMonth, shiftYearMonth } from "@/lib/time";
 import { createSimulatedStripeRuntime, STRIPE_SESSION_TTL_MS, type StripeRuntime } from "@/lib/payments/stripe-checkout";
 import { startStripeCheckout, syncStripeDispute, syncStripeRefunds } from "@/lib/payments/stripe-confirm";
 import { handleStripeWebhook } from "@/lib/payments/stripe-webhook";
@@ -51,13 +53,13 @@ async function webhook(rt: StripeRuntime, type: string, object: Record<string, u
 const outcomeOf = (r: { body: unknown }) => (r.body as { outcome?: string }).outcome;
 
 /** 指定した月の15日に支払われた決済を作る（本番またはテストの模擬 Stripe） */
-async function paid(rt: StripeRuntime, stripe: ReturnType<typeof createFakeStripe>, storeCode: string, ym: string) {
+async function paid(rt: StripeRuntime, stripe: ReturnType<typeof createFakeStripe>, storeCode: string, ym: string, opts: { fee?: number | null } = {}) {
   const { checkoutId, accessToken } = await createCheckout(storeCode, "ZODIAC", { provider: "stripe", ttlMs: STRIPE_SESSION_TTL_MS });
   const r = await startStripeCheckout(accessToken, ORIGIN, rt);
   assert.equal(r.status, "redirect");
   const sessionId = (r as { url: string }).url.split("/").pop()!;
   const created = Math.floor(new Date(`${ym}-15T12:00:00+09:00`).getTime() / 1000);
-  const p = await stripe.ctl(`pay/${sessionId}`, { created, fee: 4 });
+  const p = await stripe.ctl(`pay/${sessionId}`, { created, fee: opts.fee === undefined ? 4 : opts.fee });
   assert.equal(outcomeOf(await webhook(rt, "checkout.session.completed", { id: sessionId, object: "checkout.session" })), "confirmed");
   const [t] = (await fsdb().collection(C.transactions).where("checkoutId", "==", checkoutId).get()).docs;
   return { txId: t.id, charge: p.charge!, pi: p.paymentIntent! };
@@ -110,7 +112,8 @@ async function main() {
   assert.deepEqual([sA.transactionCount, sA.grossSales, sA.storeShare, sA.heldShare, sA.status], [3, 300, 60, 30, "UNPAID"]);
   assert.equal((await adjOf(a4.txId)).length + (await adjOf(a2.txId)).length, 0, "振込前なのに調整が作られました");
   // 売上：全額返金は除く。異議申し立ての対応中は売上に数えたまま。テスト決済は含めない
-  assert.deepEqual(await monthTotals(Ma, storeA.id), { count: 3, gross: 300, storeShare: 90, operatorShare: 210, fee: 12 });
+  // 手数料は全額返金した a4 の分も数える（Stripe は返金しても手数料を返さない。4件×4円。すべて Stripe の確定値）
+  assert.deepEqual(await monthTotals(Ma, storeA.id), { count: 3, gross: 300, storeShare: 90, operatorShare: 210, fee: 16, feeEstimated: 0 });
   assert.equal((await txDoc(at.txId)).livemode, false);
   step("振込前：全額返金は精算から除く（調整なし）。返金の処理中・失敗は減らさない。異議申し立ての対応中は保留（店舗報酬60円・保留30円）。テスト決済は含めない");
 
@@ -179,7 +182,8 @@ async function main() {
   assert.deepEqual(adj.map((a) => [a.amount, a.reason]).sort(), [[-21, "dispute_hold"], [-9, "partial_refund"]].sort());
   assert.deepEqual([(await txDoc(a3.txId)).paymentStatus, (await txDoc(a3.txId)).countable], ["CHARGEBACK", false]);
   // 売上（Ma・店舗A）：a1 返金・a3 敗訴・a4 返金を除き、a2（勝訴）だけ
-  assert.deepEqual(await monthTotals(Ma, storeA.id), { count: 1, gross: 100, storeShare: 30, operatorShare: 70, fee: 4 });
+  // 手数料は返金・敗訴の決済（a1・a3・a4）の分も数える（4件×4円。二重には数えない）
+  assert.deepEqual(await monthTotals(Ma, storeA.id), { count: 1, gross: 100, storeShare: 30, operatorShare: 70, fee: 16, feeEstimated: 0 });
   step("振込後の異議申し立て：対応中は調整なし（確定時に保留済み）→ 勝訴で +30円（同時の通知でも1件）。一部返金は -9円（返金後70円の30%＝21円）・決済時の記録は不変。その後の敗訴は保留の -21円だけで二重に引かない。売上から除く");
 
   // ================= 5. 締め後に確定した決済（確定済みの月）：支払った額0円＋調整 =================
@@ -294,6 +298,64 @@ async function main() {
     await stopApp(app);
   }
   step("画面：運営の精算（調整の一覧・理由・元の決済ID・繰越・保留）、決済要確認（原因・対象ID・未確認）、決済履歴（チャージバック・勝訴・確認が必要な一覧）、振込用CSV（調整・繰越・振込額）、店舗の振込状況（自店舗の調整だけ）");
+
+  // ================= 8. 決済手数料の集計：返金・チャージバックの後も手数料は運営の負担のまま（二重に数えない）・精算額は変わらない =================
+  const Mf = shiftYearMonth(now, -5);
+  const storeF = await createStore({ name: `手数料検証店舗 ${stamp}`, contactName: "", postalCode: "", address: "", phone: "", email: "" }, SYSTEM);
+  const f1 = await paid(live, liveStripe, storeF.storeCode, Mf); // 正常（手数料4円・確定値）
+  const f2 = await paid(live, liveStripe, storeF.storeCode, Mf); // 全額の返金
+  const f3 = await paid(live, liveStripe, storeF.storeCode, Mf); // 一部の返金（30円）
+  const f4 = await paid(live, liveStripe, storeF.storeCode, Mf); // チャージバックの敗訴
+  const prevRate = process.env.PAYMENT_FEE_RATE_BPS;
+  process.env.PAYMENT_FEE_RATE_BPS = "500"; // 推定値（5%＝5円）と確定値（4円）を区別できるように
+  const f5 = await paid(live, liveStripe, storeF.storeCode, Mf, { fee: null }); // 手数料が未確定（推定値）
+  if (prevRate === undefined) delete process.env.PAYMENT_FEE_RATE_BPS;
+  else process.env.PAYMENT_FEE_RATE_BPS = prevRate;
+  const ft = await paid(test, testStripe, storeF.storeCode, Mf); // 同じ店舗・同じ月の Sandbox（テスト決済）
+  assert.deepEqual([(await txDoc(f5.txId)).paymentFee, (await txDoc(f5.txId)).feeEstimated], [5, true]);
+  assert.deepEqual([(await txDoc(f1.txId)).feeYm, (await txDoc(f1.txId)).feeStoreYm, (await txDoc(f1.txId)).feeCountable], [Mf, `${storeF.id}_${Mf}`, true]);
+  assert.deepEqual([(await txDoc(ft.txId)).feeYm, (await txDoc(ft.txId)).feeCountable], [null, false], "テスト決済に手数料の集計のキーが付きました");
+  // 全額の返金：同じ通知の重複・同時の通知・再送
+  await liveStripe.ctl(`refund/${f2.charge}`);
+  const evF2 = `evt_settle_fee_f2_${stamp}`;
+  await Promise.all([
+    webhook(live, "charge.refunded", { id: f2.charge, object: "charge" }, { eventId: evF2 }),
+    webhook(live, "charge.refunded", { id: f2.charge, object: "charge" }, { eventId: evF2 }),
+    webhook(live, "charge.refunded", { id: f2.charge, object: "charge" }),
+  ]);
+  assert.equal(outcomeOf(await webhook(live, "charge.refunded", { id: f2.charge, object: "charge" })), "unchanged");
+  await liveStripe.ctl(`refund/${f3.charge}`, { amount: 30 });
+  assert.equal(outcomeOf(await webhook(live, "charge.refunded", { id: f3.charge, object: "charge" })), "partial");
+  const dpF4 = await liveStripe.ctl(`dispute/${f4.charge}`, { status: "lost" });
+  await Promise.all([webhook(live, "charge.dispute.created", { id: dpF4.dispute, object: "dispute" }), webhook(live, "charge.dispute.closed", { id: dpF4.dispute, object: "dispute" })]);
+  assert.deepEqual([(await txDoc(f2.txId)).paymentStatus, (await txDoc(f3.txId)).refundStatus, (await txDoc(f4.txId)).paymentStatus], ["REFUNDED", "partial", "CHARGEBACK"]);
+  // 返金・敗訴の後も手数料のキー・額は変わらない
+  for (const t of [f2, f3, f4]) assert.deepEqual([(await txDoc(t.txId)).paymentFee, (await txDoc(t.txId)).feeYm, (await txDoc(t.txId)).feeCountable], [4, Mf, true]);
+  // 以前の形の決済記録（手数料の集計用のキーが無い。キーを追加する前に作られた記録）を同じ店舗・同じ月に混ぜる：
+  //  o1 成功（売上・手数料とも今までどおり数える）、o2 全額返金（今までどおり売上・手数料とも数えない）
+  const legacyPaid = new Date(`${Mf}-16T12:00:00+09:00`);
+  const legacyBase = { checkoutId: `legacy-${stamp}`, paymentProvider: "stripe", providerPaymentId: "pi_legacy", storeId: storeF.id, fortuneType: "ZODIAC", amount: 100, storeShare: 30, operatorShare: 70, storeShareBps: 3000, paymentFee: 4, feeEstimated: false, livemode: true, paidAt: legacyPaid, fortuneStatus: "COMPLETED", createdAt: legacyPaid, updatedAt: legacyPaid };
+  await fsdb().collection(C.transactions).doc(`stripe_pi_legacy_ok_${stamp}`).set({ ...legacyBase, paymentStatus: "SUCCEEDED", amountRefunded: 0, ...salesKeys(storeF.id, "stripe", "SUCCEEDED", legacyPaid, true) });
+  await fsdb().collection(C.transactions).doc(`stripe_pi_legacy_refunded_${stamp}`).set({ ...legacyBase, paymentStatus: "REFUNDED", amountRefunded: 100, refundStatus: "succeeded", ...salesKeys(storeF.id, "stripe", "REFUNDED", legacyPaid, true) });
+  // 月別（店舗）：売上は f1・f3（一部の返金の後の70円）・f5・o1。手数料は新しい5件すべて（4+4+4+4+5）と以前の形の o1（4円）＝25円、うち推定5円。
+  // 新しい記録は手数料のキーの側で1回、以前の形の記録は売上の側で1回だけ（両方の検索に出る f1・f3・f5 も二重にしない）。テスト決済は含めない
+  const expF = { count: 4, gross: 370, storeShare: 111, operatorShare: 259, fee: 25, feeEstimated: 5 };
+  assert.deepEqual(await monthTotals(Mf, storeF.id), expF);
+  // 日別の経路（月の範囲を1ミリ秒だけ短くして、日ごとの検索で数える）・全期間（店舗）と一致
+  const rf = jstMonthRange(Mf);
+  assert.deepEqual(await totalsBetween(rf.start, new Date(rf.end.getTime() - 1), storeF.id), expF, "日別の集計が月別と一致しません");
+  assert.deepEqual(await totalsForRange(null, storeF.id), expF, "全期間の集計が月別と一致しません");
+  // 全店舗の月の合計は、店舗ごとの合計の和と一致（ほかの検証の店舗を含む）
+  const allF = await monthTotals(Mf);
+  const perStore = await Promise.all((await listAllStores()).map((x) => monthTotals(Mf, x.id)));
+  const sumF = perStore.reduce((a, t) => ({ count: a.count + t.count, gross: a.gross + t.gross, storeShare: a.storeShare + t.storeShare, operatorShare: a.operatorShare + t.operatorShare, fee: a.fee + t.fee, feeEstimated: a.feeEstimated + t.feeEstimated }), { count: 0, gross: 0, storeShare: 0, operatorShare: 0, fee: 0, feeEstimated: 0 });
+  assert.deepEqual(allF, sumF, "全店舗の月の合計が、店舗ごとの合計の和と一致しません");
+  assert.deepEqual(await totalsBetween(rf.start, new Date(rf.end.getTime() - 1)), allF, "全店舗の日別の集計が月別と一致しません");
+  // 精算：店舗の取り分は今までの規則のまま（f1 30円・f3 21円・f5 30円・o1 30円＝111円。返金・敗訴は0円。手数料は差し引かない）
+  await generateSettlements(Mf, SYSTEM);
+  const sF = (await settlementOf(storeF.id, Mf))!;
+  assert.deepEqual([sF.transactionCount, sF.grossSales, sF.storeShare, sF.heldShare], [4, 370, 111, 0], "手数料の集計の変更で精算額が変わりました");
+  step("決済手数料：返金・一部返金・チャージバックの後も手数料を数え、通知の重複・同時・再送でも二重にしない。以前の形の記録（キーなし）を混ぜても1回ずつ（6件25円・うち推定5円）。テスト決済は含めない。月別・日別・全期間・店舗の和が一致。精算額（111円）は今までの規則のまま");
 
   console.log("\nSTRIPE SETTLEMENT E2E PASSED");
 }

@@ -178,7 +178,10 @@ export default async function AdminStoreDetail(props: PageProps<"/admin/stores/[
               <td>{FORTUNE_CATALOG[t.fortuneType].short}</td>
               <td className="tabular-nums">{formatYen(t.amount)}</td>
               <td className="tabular-nums text-gold-200">{formatYen(t.storeShare)}</td>
-              <td className="tabular-nums">{formatYen(t.paymentFee)}</td>
+              <td className="tabular-nums">
+                {formatYen(t.paymentFee)}
+                {t.feeEstimated ? <span className="ml-1 text-[10px] text-ink-faint" title="Stripe の確定値ではなく、固定の率で計算した推定値">推定</span> : null}
+              </td>
               <td>
                 <StatusBadge status={t.paymentStatus} />
                 <PaymentKindBadge kind={t.kind} />

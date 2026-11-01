@@ -27,6 +27,25 @@ export function salesKeys(storeId: string, provider: string, paymentStatus: stri
   };
 }
 
+/**
+ * 手数料の集計用のフィールド（決済記録の作成時に1回だけ保存し、返金・異議申し立てでは変えない）。
+ * 決済手数料は返金・チャージバックの後も返されない（Stripe は返金しても手数料を返さない。運営の負担のまま）ので、
+ * 売上の集計（countable。返金・敗訴で false になる）とは分けて、決済の状態に関係なく数える。
+ * 対象は売上と同じく本番の決済（自動テスト環境の疑似決済を含む。lib/payments/kind.ts）だけ。テスト決済は null。
+ * 年月・日付は決済日時（日本時間）。手数料は決済の時点で発生するため。
+ */
+export function feeKeys(storeId: string, provider: string, paidAt: Date, livemode: unknown) {
+  const yearMonth = jstYearMonth(paidAt);
+  const ok = isSalesPayment(provider, livemode);
+  return {
+    feeCountable: ok,
+    feeYm: ok ? yearMonth : null,
+    feeDate: ok ? jstDateString(paidAt) : null,
+    feeStore: ok ? storeId : null,
+    feeStoreYm: ok ? `${storeId}_${yearMonth}` : null,
+  };
+}
+
 /** 集計の読み取り時の確認（以前の判定で countable=true になっているテスト決済などを除く） */
 export function isSalesDoc(d: { get(field: string): unknown }): boolean {
   return isSalesPayment(String(d.get("paymentProvider")), d.get("livemode"));

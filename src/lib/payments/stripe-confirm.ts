@@ -4,7 +4,7 @@ import { defaultFeeRateBps, FORTUNE_SESSION_TTL_MS, PRICE_JPY, STORE_SHARE_BPS }
 import { calcFee, splitRevenue } from "@/lib/money";
 import { C, fsdb, mustDate, safeId, toDate } from "@/lib/firestore/admin";
 import { isSalesPayment } from "@/lib/payments/kind";
-import { isAlreadyExists, salesKeys } from "@/lib/firestore/shared";
+import { feeKeys, isAlreadyExists, salesKeys } from "@/lib/firestore/shared";
 import { sha256Hex } from "@/lib/security/crypto";
 import type { CheckoutStatusResult } from "@/lib/services/checkout";
 import { isCheckoutRefundReason, refundedNotice, type CheckoutRefundReason } from "./refunded-notice";
@@ -288,6 +288,8 @@ export async function confirmStripeCheckout(sessionId: string, rt?: StripeRuntim
         // 確定の前からある返金・異議申し立て（確定の後に通知が届いたときと同じ項目・値）
         ...state.fields,
         ...salesKeys(f.storeId, STRIPE_PROVIDER, state.paymentStatus, f.paidAt, f.livemode),
+        // 手数料の集計（返金済み・チャージバックで確定した決済も含める。この後の返金・異議申し立てでも変えない）
+        ...feeKeys(f.storeId, STRIPE_PROVIDER, f.paidAt, f.livemode),
         createdAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp(),
       });

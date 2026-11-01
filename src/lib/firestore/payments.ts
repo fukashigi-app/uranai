@@ -14,7 +14,7 @@ import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
 import { randomToken, sha256Hex } from "@/lib/security/crypto";
 import { CheckoutError, PAID_FLOW_BLOCKED_STORE_CODES, providerOrThrow } from "@/lib/errors";
 import { C, fsdb, mustDate, safeId, toDate } from "./admin";
-import { isAlreadyExists, salesKeys } from "./shared";
+import { feeKeys, isAlreadyExists, salesKeys } from "./shared";
 import { reconcileTransactionInTx, settlementRefForTx } from "./settlement-adjustments";
 import { recordPaymentReview, type PaymentReviewInput } from "./payment-reviews";
 import { isSalesPayment } from "@/lib/payments/kind";
@@ -274,6 +274,7 @@ export async function confirmCharge(providerId: ProviderId, chargeId: string): P
         paidAt,
         refundedAt: null,
         ...salesKeys(co.storeId, providerId, "SUCCEEDED", paidAt, charge.livemode),
+        ...feeKeys(co.storeId, providerId, paidAt, charge.livemode),
         createdAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp(),
       });

@@ -59,7 +59,7 @@ async function main() {
   const top = await check("listStores(今月・上位5)", () => listStores({ range: jstMonthRange(ym), sort: "count", dir: "desc", page: 1, perPage: 5 }));
   assert.deepEqual(stores, { total: 0, active: 0 });
   assert.equal(todayT.count, 0);
-  assert.deepEqual(month, { count: 0, gross: 0, storeShare: 0, operatorShare: 0, fee: 0 });
+  assert.deepEqual(month, { count: 0, gross: 0, storeShare: 0, operatorShare: 0, fee: 0, feeEstimated: 0 });
   assert.ok(daily.length >= 28 && daily.every((d) => d.count === 0));
   assert.deepEqual(top.rows, []);
   ok("/admin ダッシュボードのデータ取得（店舗数・本日・今月・日別・上位店舗）が0件でも動く");
@@ -111,7 +111,8 @@ async function main() {
   // 独立に計算した期待値
   const expected = (pred: (t: (typeof seed)[number]) => boolean) => {
     const n = seed.filter((t) => t.status === "SUCCEEDED" && t.provider !== "mock" && pred(t)).length;
-    return { count: n, gross: 100 * n, storeShare: 30 * n, operatorShare: 70 * n, fee: 4 * n };
+    // 手数料の集計用のキーが無い以前の形の決済記録：手数料は今までどおり売上の対象だけ（PAY.JP の手数料は推定値）
+    return { count: n, gross: 100 * n, storeShare: 30 * n, operatorShare: 70 * n, fee: 4 * n, feeEstimated: 4 * n };
   };
   // 以前の方式（Firestore の SUM 集計。Emulator では動く）
   const firestoreSum = async (field: string, value: string | boolean) => {
@@ -122,7 +123,7 @@ async function main() {
         .aggregate({ count: AggregateField.count(), gross: AggregateField.sum("amount"), storeShare: AggregateField.sum("storeShare"), operatorShare: AggregateField.sum("operatorShare"), fee: AggregateField.sum("paymentFee") })
         .get()
     ).data();
-    return { count: Number(d.count), gross: Number(d.gross), storeShare: Number(d.storeShare), operatorShare: Number(d.operatorShare), fee: Number(d.fee) };
+    return { count: Number(d.count), gross: Number(d.gross), storeShare: Number(d.storeShare), operatorShare: Number(d.operatorShare), fee: Number(d.fee), feeEstimated: Number(d.fee) };
   };
   const inYm = (y: string) => (t: (typeof seed)[number]) => jstYearMonth(t.paidAt) === y;
   const cases: [string, () => Promise<unknown>, () => Promise<unknown>, ReturnType<typeof expected>][] = [
@@ -187,10 +188,10 @@ async function main() {
   b2.set(fsdb().collection(C.settlements).doc(`${sd.id}_${lastYm}`), paidSettlement);
   await b2.commit();
 
-  const one = { count: 1, gross: 100, storeShare: 30, operatorShare: 70, fee: 4 };
+  const one = { count: 1, gross: 100, storeShare: 30, operatorShare: 70, fee: 4, feeEstimated: 4 };
   assert.deepEqual(await monthTotals(ym, sc.id), one, "今月・店舗C: テスト決済・判定不可を数えている");
   assert.deepEqual(await monthTotals(lastYm, sc.id), one);
-  assert.deepEqual(await totalsForRange(null, sc.id), { count: 2, gross: 200, storeShare: 60, operatorShare: 140, fee: 8 });
+  assert.deepEqual(await totalsForRange(null, sc.id), { count: 2, gross: 200, storeShare: 60, operatorShare: 140, fee: 8, feeEstimated: 8 });
   assert.deepEqual(await totalsBetween(at(ym, 5, 0), at(ym, 6, 0), sc.id), one);
   assert.equal((await dailySeries(ym, sc.id))[4].count, 1);
   const scRow = (await listStores({ range: jstMonthRange(ym), sort: "count", dir: "desc", page: 1, perPage: 50 })).rows.find((r) => r.id === sc.id)!;

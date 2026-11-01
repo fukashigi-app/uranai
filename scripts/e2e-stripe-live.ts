@@ -80,7 +80,7 @@ async function main() {
   const store = await createStore({ name: `本番モード検証店舗 ${stamp}`, contactName: "", postalCode: "", address: "", phone: "", email: "" }, SYSTEM);
   const ym = jstYearMonth(new Date());
   const before = await monthTotals(ym, store.id);
-  assert.deepEqual(before, { count: 0, gross: 0, storeShare: 0, operatorShare: 0, fee: 0 });
+  assert.deepEqual(before, { count: 0, gross: 0, storeShare: 0, operatorShare: 0, fee: 0, feeEstimated: 0 });
 
   // ---- 1. 本番モードの Session：cs_live_・livemode=true。注文に本番モードを記録 ----
   const p1 = await begin(live, store.storeCode);
@@ -119,7 +119,7 @@ async function main() {
   step("本番モード：Webhook 2通・戻り先・状態の確認が同時でも、決済記録・占い権利は1件。livemode=true・countable=true・100円→店舗30円・運営70円・手数料4円。再送・重複も1件のまま");
 
   // ---- 3. 本番の決済だけが売上・店舗の取り分に入る。店舗の最終利用日も更新 ----
-  assert.deepEqual(await monthTotals(ym, store.id), { count: 1, gross: 100, storeShare: 30, operatorShare: 70, fee: 4 });
+  assert.deepEqual(await monthTotals(ym, store.id), { count: 1, gross: 100, storeShare: 30, operatorShare: 70, fee: 4, feeEstimated: 0 });
   const lastUsed = (await fsdb().collection(C.stores).doc(store.id).get()).get("lastUsedAt");
   assert.ok(lastUsed, "店舗の最終利用日が更新されていません");
   step("本番の決済は売上（今月・店舗別）に計上：1件・100円・店舗30円・運営70円・手数料4円。店舗の最終利用日も更新");
@@ -131,7 +131,7 @@ async function main() {
   assert.equal(outcomeOf(await webhook(test, "checkout.session.completed", { id: pt.sessionId, object: "checkout.session" })), "confirmed");
   const [tt] = await txOf(pt.checkoutId);
   assert.deepEqual([tt.get("livemode"), tt.get("countable"), tt.get("cYm")], [false, false, null]);
-  assert.deepEqual(await monthTotals(ym, store.id), { count: 1, gross: 100, storeShare: 30, operatorShare: 70, fee: 4 });
+  assert.deepEqual(await monthTotals(ym, store.id), { count: 1, gross: 100, storeShare: 30, operatorShare: 70, fee: 4, feeEstimated: 0 });
   step("テストモードの決済は記録するが livemode=false・countable=false。売上は本番の1件のまま");
 
   // ---- 5. モードの取り違え：テストの接続で本番の Session、本番の接続でテストの Session・通知は扱わない ----
@@ -178,7 +178,7 @@ async function main() {
   await liveStripe.ctl(`async-fail/${p6.sessionId}`);
   assert.equal(outcomeOf(await webhook(live, "checkout.session.async_payment_failed", { id: p6.sessionId })), "failed");
   assert.equal((await txOf(p5.checkoutId)).length + (await txOf(p6.checkoutId)).length, 0);
-  assert.deepEqual(await monthTotals(ym, store.id), { count: 2, gross: 200, storeShare: 60, operatorShare: 140, fee: 8 });
+  assert.deepEqual(await monthTotals(ym, store.id), { count: 2, gross: 200, storeShare: 60, operatorShare: 140, fee: 8, feeEstimated: 0 });
   step("本番モードの確定待ち（PayPay）→ 確定で計上、期限切れ・非同期の失敗は記録なし。売上は本番の2件（200円・店舗60円）");
 
   // ---- 8. 返金：処理中 → 成功で REFUNDED、売上から外れる。再送しても1回だけ ----
@@ -196,7 +196,8 @@ async function main() {
   await assert.rejects(syncStripeRefunds(String(t1.get("stripeChargeId")), test), /No such charge/);
   assert.equal(await restoreStripeEntitlement(t1.id, { userId: "op-unit", role: "OPERATOR" }, "モードの違う決済", test), "not_eligible");
   assert.equal((await fsdb().collection(C.transactions).doc(t1.id).get()).get("paymentStatus"), "REFUNDED");
-  assert.deepEqual(await monthTotals(ym, store.id), { count: 1, gross: 100, storeShare: 30, operatorShare: 70, fee: 4 });
+  // 売上は返金の分を除く（2件→1件）。手数料は返金した決済の分も残す（Stripe は返金しても手数料を返さない）
+  assert.deepEqual(await monthTotals(ym, store.id), { count: 1, gross: 100, storeShare: 30, operatorShare: 70, fee: 8, feeEstimated: 0 });
   step("本番モードの返金：処理中 → 成功で REFUNDED・countable=false、売上から外れる（2件→1件）。同時の通知でも反映は1回。テストの接続では扱わない");
 
   // ---- 9. 月次精算：先月分の本番の決済だけを含める（テスト決済は含めない） ----

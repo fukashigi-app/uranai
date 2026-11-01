@@ -275,7 +275,7 @@ async function main() {
   await liveStripe.ctl(`dispute-status/${dp2.dispute}`, { status: "won" });
   await webhook(live, "charge.dispute.closed", { id: dp2.dispute, object: "dispute" });
   assert.deepEqual((await adjOf(p2.txId)).map((a) => [a.amount, a.reason]).sort(), [[-12, "dispute_hold"], [12, "dispute_won"]].sort());
-  assert.deepEqual(await monthTotals(Ma, storeP.id), { count: 2, gross: 160, storeShare: 48, operatorShare: 112, fee: 8 });
+  assert.deepEqual(await monthTotals(Ma, storeP.id), { count: 2, gross: 160, storeShare: 48, operatorShare: 112, fee: 8, feeEstimated: 0 });
   await checkInvariants(storeP.id);
   step("一部の額の異議申し立て：40円の申し立てでは12円だけ保留（店舗報酬48円）。一部敗訴は CHARGEBACK にせず売上60円分を残す。振込後の一部申し立ては -12円 → 勝訴で +12円");
 

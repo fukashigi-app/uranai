@@ -48,7 +48,7 @@ export default async function AdminTransactionsPage(props: PageProps<"/admin/tra
               </Link>
             </>
           ) : (
-            "Webhookで決済成功を確認した本番環境の決済のみが計上されます。テスト決済・疑似決済は一覧に印を付けて表示し、売上・精算には含めません。"
+            "Webhookで決済成功を確認した本番環境の決済のみが計上されます。テスト決済・疑似決済は一覧に印を付けて表示し、売上・精算には含めません。決済手数料は、返金・チャージバックの決済の分も含めます（Stripe は返金しても手数料を返しません）。"
           )
         }
         actions={<MonthPicker value={ym} makeHref={(v) => q({ ym: v, page: 1 })} />}
@@ -59,7 +59,7 @@ export default async function AdminTransactionsPage(props: PageProps<"/admin/tra
           ["売上", formatYen(totals.gross)],
           ["店舗取り分", formatYen(totals.storeShare)],
           ["運営取り分", formatYen(totals.operatorShare)],
-          ["手数料(推定)", formatYen(totals.fee)],
+          ["決済手数料", totals.feeEstimated > 0 ? `${formatYen(totals.fee)}（うち推定手数料 ${formatYen(totals.feeEstimated)}）` : formatYen(totals.fee)],
         ].map(([k, v]) => (
           <div key={k} className="glass rounded-xl px-3 py-2">
             <p className="text-[11px] text-ink-faint">{k}</p>
@@ -85,7 +85,10 @@ export default async function AdminTransactionsPage(props: PageProps<"/admin/tra
               <td className="tabular-nums">{formatYen(t.amount)}</td>
               <td className="tabular-nums text-gold-200">{formatYen(t.storeShare)}</td>
               <td className="tabular-nums">{formatYen(t.operatorShare)}</td>
-              <td className="tabular-nums">{formatYen(t.paymentFee)}</td>
+              <td className="tabular-nums">
+                {formatYen(t.paymentFee)}
+                {t.feeEstimated ? <span className="ml-1 text-[10px] text-ink-faint" title="Stripe の確定値ではなく、固定の率で計算した推定値">推定</span> : null}
+              </td>
               <td>
                 <StatusBadge status={t.paymentStatus} />
                 <PaymentKindBadge kind={t.kind} />

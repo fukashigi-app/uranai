@@ -36,7 +36,7 @@ export default async function AdminDashboard() {
 
   return (
     <>
-      <PageHeader title="ダッシュボード" description={`${formatYearMonthJa(ym)}（JST）の集計。返金分は除外しています。`} />
+      <PageHeader title="ダッシュボード" description={`${formatYearMonthJa(ym)}（JST）の集計。売上は返金分を除外しています。決済手数料は返金・チャージバックの決済の分も含みます。`} />
       <SystemStatusNotice issues={productionConfigIssues()} maintenance={maintenance} production={isProductionDeployment()} comingSoon={siteStatus().status === "coming_soon"} devMode={devMode} className="mb-4" />
       <OperatorInfoNotice issues={readOperatorInfo().issues} className="mb-4" />
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -46,7 +46,7 @@ export default async function AdminDashboard() {
         <Stat label="今月総売上" value={formatYen(month.gross)} />
         <Stat label="店舗取り分合計" value={formatYen(month.storeShare)} />
         <Stat label="運営取り分（運営売上）" value={formatYen(month.operatorShare)} />
-        <Stat label="決済手数料" value={formatYen(month.fee)} sub="推定値" />
+        <Stat label="決済手数料" value={formatYen(month.fee)} sub={month.feeEstimated > 0 ? `うち推定手数料 ${formatYen(month.feeEstimated)}（ほかは Stripe の確定値）` : "Stripe の確定値（返金・チャージバックの分を含む）"} />
         <Stat label="推定運営純売上" value={formatYen(net)} sub="運営売上 − 決済手数料" emphasis />
       </div>
       <TestUsagePanel

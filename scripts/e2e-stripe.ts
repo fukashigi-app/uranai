@@ -217,11 +217,18 @@ async function main() {
   let t2 = (await txOf(p2.checkoutId))[0];
   assert.equal(t2.get("feeEstimated"), true);
   assert.equal(t2.get("paymentFee"), calcFee(100, defaultFeeRateBps()));
+  // 運営の決済履歴：推定値の手数料に印を付ける（Stripe の確定値と区別する）。合計の欄は「決済手数料」
+  const ESTIMATED_MARK = "Stripe の確定値ではなく、固定の率で計算した推定値";
+  let txHtml = await (await op.req("/admin/transactions")).text();
+  assert.ok(txHtml.includes(ESTIMATED_MARK), "推定値の手数料に印がありません");
+  assert.match(txHtml, /決済手数料/);
   await ctl(`fee/${pay2.charge}`, { fee: 3 });
   r = await webhook("charge.updated", { id: pay2.charge, object: "charge" });
   assert.equal(((await r.json()) as { outcome: string }).outcome, "fee_updated");
   t2 = (await txOf(p2.checkoutId))[0];
   assert.deepEqual([t2.get("paymentFee"), t2.get("feeEstimated")], [3, false]);
+  txHtml = await (await op.req("/admin/transactions")).text();
+  assert.ok(!txHtml.includes(ESTIMATED_MARK), "確定値になった手数料に推定の印が残りました"); // この時点で推定値の決済はこの1件だけ
   step("手数料が未確定：推定値で記録（feeEstimated=true）→ 確定後の通知で確定値（3円）に更新");
 
   // ---- 7. 返金：処理中 → 成功。未使用の占い権利は処理中の時点で止め、使用済みはそのまま。再送・重複しても1回だけ ----

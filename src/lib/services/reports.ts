@@ -19,12 +19,17 @@ function realPaymentsOnly() {
     : sql`AND payment_provider <> 'mock' AND livemode = true`;
 }
 
-export type Totals = { count: number; gross: number; storeShare: number; operatorShare: number; fee: number };
+/**
+ * fee … 決済手数料の合計（運営の負担）。Firestore 版は返金・チャージバックの決済も含める（Stripe は返金しても手数料を返さない）。
+ * feeEstimated … fee のうち、Stripe の確定値ではなく推定値（固定の率で計算）の分
+ */
+export type Totals = { count: number; gross: number; storeShare: number; operatorShare: number; fee: number; feeEstimated: number };
 
 const num = (v: unknown) => Number(v ?? 0);
 
 function toTotals(r: Record<string, unknown> | undefined): Totals {
-  return { count: num(r?.count), gross: num(r?.gross), storeShare: num(r?.store_share), operatorShare: num(r?.operator_share), fee: num(r?.fee) };
+  // PostgreSQL 版の手数料は、すべて固定の率で計算した推定値（疑似決済・以前の決済代行）
+  return { count: num(r?.count), gross: num(r?.gross), storeShare: num(r?.store_share), operatorShare: num(r?.operator_share), fee: num(r?.fee), feeEstimated: num(r?.fee) };
 }
 
 const totalsSelect = sql`count(*)::int AS count, coalesce(sum(amount),0)::int AS gross, coalesce(sum(store_share),0)::int AS store_share,
@@ -210,6 +215,7 @@ export async function listTransactions(opts: { storeId?: string; yearMonth?: str
       storeShare: num(r.store_share),
       operatorShare: num(r.operator_share),
       paymentFee: num(r.payment_fee),
+      feeEstimated: true, // PostgreSQL 版の手数料は固定の率で計算した推定値
       paymentStatus: String(r.payment_status),
       // PostgreSQL 版は Stripe の返金・異議申し立てを扱わない（一部返金・異議申し立ての記録なし）
       amountRefunded: 0,

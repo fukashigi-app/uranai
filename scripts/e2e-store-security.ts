@@ -88,8 +88,8 @@ async function main() {
   assert.equal(overallAfter.testStore.total - overallBefore.testStore.total, 1);
   // 有料の利用件数・売上・取り分には入らない
   for (const st of [storeA, storeB]) {
-    assert.deepEqual(await monthTotals(jstYearMonth(), st.id), { count: 0, gross: 0, storeShare: 0, operatorShare: 0, fee: 0 });
-    assert.deepEqual(await totalsForRange(null, st.id), { count: 0, gross: 0, storeShare: 0, operatorShare: 0, fee: 0 });
+    assert.deepEqual(await monthTotals(jstYearMonth(), st.id), { count: 0, gross: 0, storeShare: 0, operatorShare: 0, fee: 0, feeEstimated: 0 });
+    assert.deepEqual(await totalsForRange(null, st.id), { count: 0, gross: 0, storeShare: 0, operatorShare: 0, fee: 0, feeEstimated: 0 });
   }
   ok("無料テストの利用件数：店舗A=3回（QR再発行前のコード分を含む）・店舗B=1回・全体+5回（うちテスト店舗1回）。有料の件数・売上・取り分は0のまま");
 
