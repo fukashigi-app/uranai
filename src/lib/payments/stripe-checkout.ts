@@ -31,6 +31,13 @@ export type StripeRuntime = {
   readonly webhookSecret: string;
   /** 戻り先に http を許すか（ローカルの自動テストだけ） */
   readonly allowHttpOrigin: boolean;
+  /** 自動テスト専用（createSimulatedStripeRuntime だけが設定する）：処理の途中の停止を再現する */
+  readonly testHooks?: StripeTestHooks;
+};
+
+export type StripeTestHooks = {
+  /** 決済確定のトランザクションが成功した直後、再確認の前に呼ばれる（例外を投げると、その時点で処理が止まったのと同じになる） */
+  afterConfirmCommit?: (transactionId: string) => void | Promise<void>;
 };
 
 type ApiBase = { host: string; port: number; protocol: "http" | "https" };
@@ -73,7 +80,7 @@ const LOOPBACK = new Set(["localhost", "127.0.0.1"]);
  */
 export function createSimulatedStripeRuntime(
   mode: StripeMode,
-  opts: { apiBase: string; secretKey: string; webhookSecret: string },
+  opts: { apiBase: string; secretKey: string; webhookSecret: string; testHooks?: StripeTestHooks },
   e: Record<string, string | undefined> = process.env,
 ): StripeRuntime {
   if (e.VERCEL_ENV) throw new StripeUnavailableError("simulated runtime is for local automated tests only");
@@ -83,7 +90,7 @@ export function createSimulatedStripeRuntime(
   if (!opts.secretKey.startsWith(`sk_${mode}_`) || !opts.webhookSecret.startsWith("whsec_")) throw new StripeUnavailableError("simulated runtime key does not match the mode");
   const protocol = u.protocol === "https:" ? "https" : "http";
   const apiBase = { host: u.hostname, port: Number(u.port || (protocol === "https" ? 443 : 80)), protocol } as const;
-  return { mode, client: newClient(opts.secretKey, apiBase), webhookSecret: opts.webhookSecret, allowHttpOrigin: true };
+  return { mode, client: newClient(opts.secretKey, apiBase), webhookSecret: opts.webhookSecret, allowHttpOrigin: true, ...(opts.testHooks ? { testHooks: opts.testHooks } : {}) };
 }
 
 /** Stripe の Checkout Session の有効期限（Stripe の下限は作成から30分）。注文の有効期限もこれに合わせる */

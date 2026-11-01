@@ -26,6 +26,10 @@ import {
   disputeKeyOf,
   isOurPayment,
   normalizeRestoreReason,
+  RECHECK_DONE,
+  RECHECK_PENDING,
+  recheckFailureOf,
+  recheckStateOf,
   refundKeyOf,
   RESTORE_REASON_MAX,
   type RestoreOutcomeCode,
@@ -76,13 +80,21 @@ import {
 export const STRIPE_PROVIDER = "stripe" as const;
 export const stripeTransactionId = (paymentIntentId: string) => safeId(STRIPE_PROVIDER, paymentIntentId);
 
-export type StripeConfirmOutcome =
+/**
+ * 決済確定の結果。recheck は決済確定の後の再確認を実行したときだけ付く
+ * （done＝完了、pending＝失敗して PENDING のまま。Webhook は 500 を返して Stripe に再送させる）。
+ */
+export type StripeConfirmOutcome = (
   | { status: "confirmed"; transactionId: string }
   | { status: "duplicate"; transactionId: string }
   /** 返金済み・チャージバック：決済記録は作る（または作成済み）が、占い権利は付与しない（注文は REFUNDED） */
   | { status: "refunded"; transactionId: string; refundReason: CheckoutRefundReason | null }
   | { status: "not_paid"; reason: string }
-  | { status: "rejected"; reason: string };
+  | { status: "rejected"; reason: string }
+) & { recheck?: RecheckRun };
+
+/** 再確認の実行の結果（not_pending＝PENDING ではなかったので何もしていない） */
+export type RecheckRun = "done" | "pending" | "not_pending";
 
 const checkoutRef = (id: string) => fsdb().collection(C.checkouts).doc(id);
 
@@ -226,11 +238,15 @@ export async function confirmStripeCheckout(sessionId: string, rt?: StripeRuntim
   const feeEstimated = f.fee === null;
   let outcome: StripeConfirmOutcome;
   let createdHere = false; // この呼び出しで決済記録を作成したか（トランザクションのやり直しのたびに初期化）
+  let recheckPending = false; // 確定済みの決済記録の再確認が未完了か（同上）
   try {
     outcome = await fsdb().runTransaction(async (tx): Promise<StripeConfirmOutcome> => {
       createdHere = false;
+      recheckPending = false;
       const [coSnap, existing] = await Promise.all([tx.get(checkoutRef(f.checkoutId)), tx.get(txRef)]);
       if (existing.exists) {
+        // 確定済み（Webhook の再送・戻り先の再読み込みなど）。作成の後の再確認が未完了なら、この後で再確認する
+        recheckPending = recheckStateOf(existing.get("recheckState")) === RECHECK_PENDING;
         // 確定済み。手数料が推定値のままで、確定値が取れていれば直す
         if (existing.get("feeEstimated") === true && f.fee !== null) {
           tx.update(txRef, { paymentFee: f.fee, feeEstimated: false, stripeBalanceTransactionId: f.balanceTransactionId, updatedAt: FieldValue.serverTimestamp() });
@@ -290,6 +306,13 @@ export async function confirmStripeCheckout(sessionId: string, rt?: StripeRuntim
         ...salesKeys(f.storeId, STRIPE_PROVIDER, state.paymentStatus, f.paidAt, f.livemode),
         // 手数料の集計（返金済み・チャージバックで確定した決済も含める。この後の返金・異議申し立てでも変えない）
         ...feeKeys(f.storeId, STRIPE_PROVIDER, f.paidAt, f.livemode),
+        // 作成の後の再確認（recheckStripePayment）が完了するまで PENDING。作成と同じトランザクションで保存するので、
+        // 作成の直後に処理が止まっても PENDING が残り、同じ決済の次の決済確定（Webhook の再送など）で再確認する
+        recheckState: RECHECK_PENDING,
+        recheckAttempts: 0,
+        recheckLastAttemptAt: null,
+        recheckLastError: null,
+        recheckDoneAt: null,
         createdAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp(),
       });
@@ -315,33 +338,82 @@ export async function confirmStripeCheckout(sessionId: string, rt?: StripeRuntim
       return ent.grant ? ({ status: "confirmed", transactionId: txId } as const) : ({ status: "refunded", transactionId: txId, refundReason: ent.refundReason } as const);
     });
   } catch (e) {
-    // 同時に別の処理（Webhook と戻り先など）が先に作成した場合
-    if (isAlreadyExists(e)) return { status: "duplicate", transactionId: txId };
-    throw e;
+    if (!isAlreadyExists(e)) throw e;
+    // 同時に別の処理（Webhook と戻り先など）が先に作成した場合。その決済記録の再確認が未完了なら、ここでも再確認する
+    // （先に作成した処理が再確認の前に止まっても、取りこぼさない。再確認は何度実行しても二重に反映しない）
+    const created = await txRef.get();
+    if (recheckStateOf(created.get("recheckState")) !== RECHECK_PENDING) return { status: "duplicate", transactionId: txId };
+    return { status: "duplicate", transactionId: txId, recheck: await recheckStripePayment(txId, f, r0) };
   }
-  if (!createdHere) return outcome;
-  if (!ent.grant) console.warn("[stripe] payment confirmed with a refund or chargeback (entitlement not granted)", { sessionId, reason: ent.refundReason });
-  // この呼び出しで作成したときだけ、作成の後に Stripe の状態を読み直す（読んだ後から作成までの間の返金・異議申し立てを取りこぼさない）
-  await recheckAfterConfirm(f, txId, state.fields, r0);
-  return outcome;
+  if (createdHere) {
+    if (!ent.grant) console.warn("[stripe] payment confirmed with a refund or chargeback (entitlement not granted)", { sessionId, reason: ent.refundReason });
+    await r0.testHooks?.afterConfirmCommit?.(txId);
+  } else if (!recheckPending) {
+    return outcome;
+  }
+  // 作成の後（または未完了の決済記録）に Stripe の状態を読み直す（読んだ後から作成までの間の返金・異議申し立てを取りこぼさない）
+  return { ...outcome, recheck: await recheckStripePayment(txId, f, r0) };
 }
 
+type RecheckFacts = { sessionId: string; chargeId: string; amount: number; livemode: boolean; storeId: string; checkoutId: string };
+
 /**
- * 決済記録の作成の後の再確認。Stripe から今の状態を読み、作成時に書いた状態（キー）と違えば、反映の処理で取り直して反映する。
- * 反映の処理は Stripe から最新の状態を取り直し、決済記録のキーと比べて書き込むので、古い情報で新しい状態を上書きしない
+ * 決済記録の作成の後の再確認（recheckState が PENDING の決済記録だけ）。
+ *  1) 決済記録を読み、PENDING であることを確かめる（この後の Stripe の読み取りは、決済記録の作成より後であることが保証される）
+ *  2) Stripe から返金・異議申し立ての今の状態を読み、検証する
+ *  3) 決済記録の今の状態（キー）と違えば、反映の処理（syncStripeRefunds・syncStripeDispute）で取り直して反映する
+ *  4) 2・3 がすべて成功し、反映しなかった結果（照合できない・対象外）も無ければ、DONE にする（まだ PENDING のときだけ）
+ * 2〜4 のどこかで失敗したら PENDING のまま（回数・最後のエラーの名前だけを記録）。例外は握りつぶして DONE にしない。
+ * 反映の処理は Stripe から最新の状態を取り直し、決済記録のキーと比べて書き込むので、何度・同時に実行しても二重に反映しない
  * （同時に届いた Webhook が先に反映していれば何もしない。結果が出た異議申し立てを対応中に戻さない）。
- * 決済記録はもう作成済みなので、失敗しても確定は取り消さない（サーバーのログと決済監視に記録する。その後の通知でも反映される）。
+ * 1 の後に起きた返金・異議申し立ては、決済記録がある状態で通知が届くので、通常の反映の処理で反映される。
+ * 決済記録はもう作成済みなので、失敗しても確定は取り消さない（サーバーのログと決済監視に記録する）。
  */
-async function recheckAfterConfirm(f: { sessionId: string; chargeId: string; amount: number; livemode: boolean; storeId: string; checkoutId: string }, txId: string, written: Record<string, unknown>, r0: StripeRuntime) {
+async function recheckStripePayment(txId: string, f: RecheckFacts, r0: StripeRuntime): Promise<RecheckRun> {
+  const txRef = fsdb().collection(C.transactions).doc(txId);
+  const cur = await txRef.get();
+  if (!cur.exists || recheckStateOf(cur.get("recheckState")) !== RECHECK_PENDING) return "not_pending";
+  let error: string | null;
   try {
     const now = await readStripeChargeAdjustments({ id: f.chargeId, amount: f.amount, livemode: f.livemode }, r0);
-    if (now.refunds.state !== "none" && refundKeyOf(now.refunds) !== written.refundKey) await syncStripeRefunds(f.chargeId, r0, "confirm_recheck");
-    if (now.dispute && disputeKeyOf(now.dispute) !== written.disputeKey) await syncStripeDispute(now.dispute.id, r0, "confirm_recheck");
+    const outcomes: string[] = [];
+    if (now.refunds.state !== "none" && refundKeyOf(now.refunds) !== cur.get("refundKey")) outcomes.push(await syncStripeRefunds(f.chargeId, r0, "confirm_recheck"));
+    if (now.dispute && disputeKeyOf(now.dispute) !== cur.get("disputeKey")) outcomes.push(await syncStripeDispute(now.dispute.id, r0, "confirm_recheck"));
+    error = recheckFailureOf(outcomes);
   } catch (e) {
-    console.error("[stripe] recheck after confirmation failed", { sessionId: f.sessionId, error: (e as Error)?.name });
-    await recordPaymentAlert({ kind: "refund_sync_failed", objectType: "transaction", objectId: txId, transactionId: txId, checkoutId: f.checkoutId, storeId: f.storeId, mode: alertModeOf(f.livemode), errorName: (e as Error)?.name ?? null });
+    error = errorNameOf(e);
   }
+  if (error === null) {
+    try {
+      await fsdb().runTransaction(async (tx) => {
+        const t = await tx.get(txRef);
+        if (recheckStateOf(t.get("recheckState")) !== RECHECK_PENDING) return; // 同時の再確認が先に完了した
+        tx.update(txRef, { recheckState: RECHECK_DONE, recheckAttempts: FieldValue.increment(1), recheckLastAttemptAt: new Date(), recheckLastError: null, recheckDoneAt: FieldValue.serverTimestamp() });
+      });
+      return "done";
+    } catch (e) {
+      error = errorNameOf(e); // 完了の記録に失敗：PENDING のまま（次の再確認でやり直す）
+    }
+  }
+  console.error("[stripe] recheck after confirmation failed", { sessionId: f.sessionId, error });
+  try {
+    await fsdb().runTransaction(async (tx) => {
+      const t = await tx.get(txRef);
+      if (recheckStateOf(t.get("recheckState")) !== RECHECK_PENDING) return;
+      tx.update(txRef, { recheckAttempts: FieldValue.increment(1), recheckLastAttemptAt: new Date(), recheckLastError: error });
+    });
+  } catch (e) {
+    console.error("[stripe] recording the recheck failure failed", { sessionId: f.sessionId, error: errorNameOf(e) }); // PENDING は残る
+  }
+  await recordPaymentAlert({ kind: "refund_sync_failed", objectType: "transaction", objectId: txId, transactionId: txId, checkoutId: f.checkoutId, storeId: f.storeId, mode: alertModeOf(f.livemode), errorName: error });
+  return "pending";
 }
+
+/** ログ・記録に残すエラーの名前（英数字と記号だけ。エラー文・秘密情報は含めない） */
+const errorNameOf = (e: unknown) => {
+  const n = (e as Error)?.name;
+  return typeof n === "string" && /^[\w.\-]{1,60}$/.test(n) ? n : "Error";
+};
 
 /**
  * 支払いが終わらなかった注文を閉じる（Stripe API から Session を取り直して判断する。支払い済み・確定待ちなら何もしない）。

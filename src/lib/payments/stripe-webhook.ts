@@ -66,6 +66,8 @@ async function handle(event: Stripe.Event, rt: StripeRuntime): Promise<string> {
     case "checkout.session.async_payment_succeeded": {
       const r = await confirmStripeCheckout((event.data.object as Stripe.Checkout.Session).id, rt);
       if (r.status === "rejected") console.error("[stripe-webhook] payment rejected", { eventId: event.id, reason: r.reason });
+      // 決済確定の後の再確認が失敗した（決済記録は PENDING のまま）：処理済みにせず 500 を返し、Stripe の再送で再確認する
+      if (r.recheck === "pending") throw Object.assign(new Error("recheck after confirmation is pending"), { name: "StripeRecheckPendingError" });
       return r.status;
     }
     case "checkout.session.expired":

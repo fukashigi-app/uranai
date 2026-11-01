@@ -9,6 +9,8 @@ import {
   chargeMismatches,
   decideDisputeSync,
   decideRefundSync,
+  recheckFailureOf,
+  recheckStateOf,
   disputeAmountProblem,
   disputeKeyOf,
   disputeSuspendsEntitlement,
@@ -489,5 +491,25 @@ describe("復旧の結果の説明", () => {
     expect(Object.keys(RESTORE_OUTCOME_MESSAGE).sort()).toEqual([...codes].sort());
     for (const c of codes) expect(RESTORE_OUTCOME_MESSAGE[c].length).toBeGreaterThan(5);
     expect(RESTORE_OUTCOME_MESSAGE.reason_too_long).toContain(String(RESTORE_REASON_MAX));
+  });
+});
+
+describe("決済確定の後の再確認の状態（recheckState）", () => {
+  it("項目が無い以前の決済記録は UNKNOWN（再確認の対象外。再確認が済んだことは意味しない）", () => {
+    expect(recheckStateOf(undefined)).toBe("UNKNOWN");
+    expect(recheckStateOf(null)).toBe("UNKNOWN");
+  });
+  it("DONE だけを完了として扱い、それ以外の値は安全側で PENDING", () => {
+    expect(recheckStateOf("DONE")).toBe("DONE");
+    expect(recheckStateOf("PENDING")).toBe("PENDING");
+    expect(recheckStateOf("done")).toBe("PENDING");
+    expect(recheckStateOf("")).toBe("PENDING");
+    expect(recheckStateOf(1)).toBe("PENDING");
+  });
+  it("反映の結果に照合できない・対象外があれば完了にしない", () => {
+    expect(recheckFailureOf([])).toBeNull();
+    expect(recheckFailureOf(["refunded", "dispute_open", "unchanged", "partial", "refund_failed"])).toBeNull();
+    expect(recheckFailureOf(["refunded", "rejected"])).toBe("sync_rejected");
+    expect(recheckFailureOf(["ignored"])).toBe("sync_ignored");
   });
 });

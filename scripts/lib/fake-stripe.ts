@@ -29,6 +29,13 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
     forceManagedResponse: false,
     /** これに一致する API（/v1/…）は 500 を返す（Stripe の障害・処理の失敗の再現用） */
     failPaths: [] as RegExp[],
+    /**
+     * 指定した API の呼び出しだけを失敗させる（一致する呼び出しのうち、skip 件を通した後の count 件を 500。使い終わったら何もしない）。
+     * SDK が自動で再試行しないよう stripe-should-retry: false を付ける（1回の呼び出しの失敗を正確に再現する）
+     */
+    failCalls: [] as { path: RegExp; method?: string; skip: number; count: number }[],
+    /** 受け付けた API の呼び出し（"GET /v1/refunds" の形。呼び出しの有無・回数の確認用） */
+    callLog: [] as string[],
     /** 作成時の expires_at（ID ごと）と作成時刻 */
     created: new Map<string, number>(),
     /** Charge ごとに1回だけ：返金の一覧を返した直後に実行する（決済確定の途中で Stripe の状態が変わるのを再現する） */
@@ -96,6 +103,18 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
     const body = await readBody(req);
     if (!url.pathname.startsWith("/__test") && req.headers.authorization !== `Bearer ${apiKey}`) return send(res, 401, { error: { type: "invalid_request_error", message: "bad key" } });
     if (url.pathname.startsWith("/v1/") && fake.failPaths.some((re) => re.test(url.pathname))) return stripeError(res, 500, "api_error", "simulated failure");
+    if (url.pathname.startsWith("/v1/")) {
+      fake.callLog.push(`${req.method} ${url.pathname}`);
+      const rule = fake.failCalls.find((f) => f.path.test(url.pathname) && (!f.method || f.method === req.method) && (f.skip > 0 || f.count > 0));
+      if (rule) {
+        if (rule.skip > 0) rule.skip--;
+        else {
+          rule.count--;
+          res.writeHead(500, { "content-type": "application/json", "request-id": `req_${fake.n}`, "stripe-should-retry": "false" });
+          return res.end(JSON.stringify({ error: { type: "api_error", message: "simulated failure (single call)" } }));
+        }
+      }
+    }
     const m = (re: RegExp) => re.exec(url.pathname);
     if (req.method === "POST" && url.pathname === "/v1/checkout/sessions") {
       const key = String(req.headers["idempotency-key"] ?? "");

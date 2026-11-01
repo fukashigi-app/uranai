@@ -387,3 +387,26 @@ export const RESTORE_OUTCOME_MESSAGE: Record<RestoreOutcomeCode, string> = {
   stripe_unverified: "Stripe の返金・異議申し立ての状態を確認できない内容があるため、戻せません（決済要確認を確認してください）。",
   state_changed: "確認の途中で返金・異議申し立ての状態が変わりました。画面を開き直して、もう一度確認してください。",
 };
+
+/**
+ * 決済確定の後の再確認の状態（決済記録の recheckState）。
+ *  PENDING … 決済記録を作成したトランザクションで保存する。作成の後に Stripe の返金・異議申し立てを読み直し、
+ *            読み取り・検証・必要な反映がすべて成功するまで維持する（失敗・途中の停止では変えない）
+ *  DONE    … 作成の後に Stripe を読み直し、必要な反映がすべて成功した。この後の返金・異議申し立ては、それぞれの通知で反映する
+ *            （DONE の後の通知の取りこぼしは、この仕組みでは防げない）
+ *  UNKNOWN … 項目が無い（この仕組みより前に作成された決済記録）。再確認の対象にはしないが、再確認が済んだことは意味しない
+ * PENDING・DONE 以外の値が入っていたら、安全側で PENDING として扱う（再確認をやり直すだけで、反映は冪等）。
+ */
+export const RECHECK_PENDING = "PENDING" as const;
+export const RECHECK_DONE = "DONE" as const;
+export type RecheckState = typeof RECHECK_PENDING | typeof RECHECK_DONE | "UNKNOWN";
+export const recheckStateOf = (v: unknown): RecheckState => (v === undefined || v === null ? "UNKNOWN" : v === RECHECK_DONE ? RECHECK_DONE : RECHECK_PENDING);
+
+/**
+ * 再確認で実行した反映の結果から、完了にできない理由を返す（null なら完了にしてよい）。
+ * 「反映しなかった」結果（記録と照合できない rejected・対象外の ignored）があれば完了にしない（PENDING のまま、運営が確認する）。
+ */
+export function recheckFailureOf(outcomes: readonly string[]): string | null {
+  const bad = outcomes.find((o) => o === "rejected" || o === "ignored");
+  return bad ? `sync_${bad}` : null;
+}
