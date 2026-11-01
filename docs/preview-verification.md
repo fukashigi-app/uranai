@@ -86,12 +86,19 @@ Firebase CLI で、**必ず `--project uranai-preview` を付けて**実行し�
 
 ```bash
 firebase deploy --only firestore:rules   --project uranai-preview   # ブラウザからの読み書きを全面禁止（firestore.rules）
-firebase deploy --only firestore:indexes --project uranai-preview   # firestore.indexes.json の複合インデックス2件
+firebase deploy --only firestore:indexes --project uranai-preview   # firestore.indexes.json の複合インデックス3件
 ```
 
-- 複合インデックスは決済監視の一覧（`paymentAlerts`：`status`＋`lastSeenAt` 降順、`status`＋`mode`＋`lastSeenAt` 降順）だけに必要です。
-  ほかの検索は単一フィールドのインデックス（自動）で動きます
-- インデックスの作成には時間がかかります。Firebase コンソールの「インデックス」で状態が「有効」になってから、決済監視の画面を開いてください
+- 複合インデックスは次の3件です（定義は `firestore.indexes.json` が正。コレクション単位・この順番・この向き）：
+
+| コレクション | 項目（順番・向き） | 使う処理 |
+| --- | --- | --- |
+| `paymentAlerts` | `status` 昇順 → `lastSeenAt` 降順 | 決済監視の一覧（状態で絞り込み） |
+| `paymentAlerts` | `status` 昇順 → `mode` 昇順 → `lastSeenAt` 降順 | 決済監視の一覧（状態とモードで絞り込み） |
+| `webhookEvents` | `provider` 昇順 → `processedAt` 昇順 → `createdAt` 昇順 → `__name__` 昇順 | 処理が終わっていない通知の一覧（「Webhook の復旧」の画面・自動の復旧。§12） |
+
+  ほかの検索は単一フィールドのインデックス（自動）で動きます。`webhookEvents` のインデックスが無いと、「Webhook の復旧」の画面と自動の復旧が Firestore のエラーになります
+- インデックスの作成には時間がかかります。Firebase コンソールの「インデックス」で3件とも状態が「有効」になってから、決済監視・Webhook の復旧の画面を開いてください
   （作成前に開くと Firestore がエラーを返す。Firestore Emulator はインデックスを確かめないため、自動テストでは検出できない）
 - `firebase deploy` を `--only` なしで実行しない（Hosting・Functions など、ほかの設定に触れないため）
 
@@ -313,7 +320,7 @@ Hobby＋Fluid Compute の上限が300秒であることは、作業の環境か�
 - **自動（定期処理）：** `/api/cron/maintenance`（1日1回・`CRON_SECRET` の認証）のメンテナンスの後に実行します。対象は、最後の処理から30分以上たった RECEIVED・RETRYABLE で、処理権の期限が切れたもの。1回に20件まで・開始から60秒を過ぎたら新しい通知を始めない・読むのは500件（5ページ）まで。同じ通知は20時間あけて5回まで（未実施の通知を先に処理）。結果の件数は `system/webhookRecovery` に記録します
   - Vercel の Cron は Production でだけ動きます。今の Production はテスト決済を拒否する（Stripe の接続が無い）ので、**自動の復旧は何もしません**（`stripe_unavailable`）。本番決済を有効にした後に動きます
 - **手動（運営画面「Webhook の復旧」）：** 運営のログインが必須。未処理の通知の一覧（処理中・要確認を含む）と、通知ごとの「再処理」、自動の復旧を今すぐ実行するボタン。結果と理由を表示し、監査ログ（`webhook_event.recover`・`webhook_recovery.run`）に記録します。Preview では定期処理が動かないので、こちらを使います
-- **結果：** 処理済み（`recovered`・`ignored_other_env`）以外は processedAt を書きません。Stripe API の失敗（通信・認証・回数の制限・Stripe の障害）は `stripe_error`（RETRYABLE のまま。後で試し直す）。Stripe から通知を取得できない（`events.retrieve` が 404）ときは `FAILED_PERMANENT`（要確認。自動の対象外。運営画面には表示され、手動で再処理できる）にします。404 は Stripe の通知の保存期間を過ぎた場合（未確認：保存期間は30日とされる）のほか、Stripe のキーが別のアカウントのものになっているなどの設定違いでも起こるため、原因は判断しません。Stripe の接続の設定と、Stripe のダッシュボードの決済の状態を確認してください
+- **結果：** 処理済み（`recovered`・`ignored_other_env`）以外は processedAt を書きません。Stripe API の失敗（通信・認証・回数の制限・Stripe の障害）は `stripe_error`（RETRYABLE のまま。後で試し直す）。Stripe から通知を取得できない（`events.retrieve` が 404）ときは `FAILED_PERMANENT`（要確認。自動の対象外。運営画面には表示され、手動で再処理できる）にします。`events.retrieve` で取得できるのは作成から30日以内の通知です。404 は30日を過ぎた場合のほか、Stripe のキーが別のアカウントのものになっているなどの設定違いでも起こるため、原因は判断しません。自動の復旧は最後の処理から30分後に始め、20時間あけて5回まで（4日ほどで終わる）なので、通常は30日以内に試し終わります。Stripe の接続の設定と、Stripe のダッシュボードの決済の状態を確認してください
 - **実行時間の限界：** 60秒は新しい通知の処理を始めない区切りで、関数全体の終了の時間は保証しません。先に実行するメンテナンス（Firestore の処理。時間の上限なし）と、始めた通知の処理（Stripe API は1回の取り直しで最悪約62秒、1件で数回）を合わせると、定期処理の `maxDuration`（300秒）を超えて Vercel に打ち切られることがあります
   - 打ち切られると、その回の復旧の実行の記録（`system/webhookRecovery`）が更新されないことがあります（画面の「最後の実行」が古いまま。メンテナンスの記録は復旧の前に書くので残る）
   - 処理の途中で打ち切られた通知は processedAt が無いまま残り、処理権の期限（360秒）の後の Stripe の再送・次の復旧の対象になります（反映は冪等なので二重にならない）
