@@ -314,3 +314,61 @@ export async function dismissStripeRefundReviewAction(transactionId: string, _pr
   // 完了：対象は一覧から消えるので、決済履歴の画面に移動して上部に通知を出す（クエリは通知の表示だけ）
   redirect(adminTxNoticeUrl("refund_reviewed"));
 }
+
+/**
+ * Stripe の Webhook の通知を ID で再処理する（webhookEvents に記録がある未処理の通知だけ。通知は Stripe API から取り直し、
+ * Webhook と同じ処理で反映する。処理済み・処理中・別の環境は、その処理の中で判定する）。結果と理由を表示し、監査ログに記録する。
+ */
+export async function recoverWebhookEventAction(eventId: string, _prev: FormState): Promise<FormState> {
+  const { actor } = await operator();
+  if (!/^evt_[A-Za-z0-9_]{1,200}$/.test(eventId)) throw new Error("invalid id");
+  const { isFirestore } = await import("@/lib/data-provider");
+  if (!isFirestore()) return { message: "この機能は Firestore を使うときだけ利用できます。" };
+  const { stripeRuntime } = await import("@/lib/payments/stripe-checkout");
+  const { recoverStripeWebhookEvent } = await import("@/lib/payments/webhook-recovery");
+  const { WEBHOOK_RECOVERY_RESULT_LABEL } = await import("@/lib/payments/webhook-recovery-rules");
+  let rt;
+  try {
+    rt = stripeRuntime();
+  } catch {
+    return { message: "Stripe の接続が設定されていないため、再処理できません（何もしていません）。" };
+  }
+  let o: Awaited<ReturnType<typeof recoverStripeWebhookEvent>>;
+  try {
+    o = await recoverStripeWebhookEvent(eventId, rt);
+  } catch (e) {
+    console.error("[admin] webhook event recovery failed", (e as Error)?.name);
+    return { message: "再処理を開始できませんでした（データベースに接続できない可能性）。処理済みにはしていません。" };
+  }
+  await writeAudit({ actorUserId: actor.userId, actorRole: actor.role, action: "webhook_event.recover", targetType: "webhook_event", targetId: eventId, after: { result: o.result, outcome: o.outcome, errorName: o.errorName } }).catch((e) =>
+    console.error("[admin] audit failed", (e as Error)?.name),
+  );
+  revalidatePath("/admin/webhook-events");
+  // 処理済みになった通知は一覧から消える（行のボタンの表示も消える）ので、一覧に移動して上部に結果を出す（固定の文言だけ）
+  if (o.result === "recovered" || o.result === "ignored_other_env" || o.result === "already_processed") redirect(`/admin/webhook-events?notice=${o.result}`);
+  return { message: `${WEBHOOK_RECOVERY_RESULT_LABEL[o.result]}${o.errorName ? `（${o.errorName}）` : ""}` };
+}
+
+/** Webhook の通知の自動の復旧（定期処理と同じ）を今すぐ実行する（Preview など定期処理が動かない環境の確認用。監査ログに記録） */
+export async function runWebhookRecoveryAction(_prev: FormState): Promise<FormState> {
+  const { actor } = await operator();
+  const { isFirestore } = await import("@/lib/data-provider");
+  if (!isFirestore()) return { message: "この機能は Firestore を使うときだけ利用できます。" };
+  const { stripeRuntime } = await import("@/lib/payments/stripe-checkout");
+  const { runStripeWebhookRecovery } = await import("@/lib/payments/webhook-recovery");
+  let rt;
+  try {
+    rt = stripeRuntime();
+  } catch {
+    return { message: "Stripe の接続が設定されていないため、実行できません（何もしていません）。" };
+  }
+  const s = await runStripeWebhookRecovery(rt, { source: "admin" });
+  await writeAudit({ actorUserId: actor.userId, actorRole: actor.role, action: "webhook_recovery.run", targetType: "webhook_recovery", targetId: null, after: { status: s.status, attempted: s.attempted, results: s.results } }).catch((e) =>
+    console.error("[admin] audit failed", (e as Error)?.name),
+  );
+  revalidatePath("/admin/webhook-events");
+  if (s.status === "failed") return { message: `実行に失敗しました（${s.errorName ?? "Error"}）。処理済みにしたものはありません。` };
+  const r = s.results;
+  const text = `対象 ${s.candidates}件のうち ${s.attempted}件を処理：処理済み ${r.recovered}件・別の環境 ${r.ignored_other_env}件・失敗 ${r.failed + r.stripe_error}件・取得できない ${r.event_unavailable}件・処理中 ${r.busy}件・処理済みだった ${r.already_processed}件`;
+  return s.status === "completed" ? { ok: true, message: `${text}。` } : { message: `${text}。上限・時間の都合で残りがあります（もう一度実行してください）。` };
+}

@@ -43,6 +43,7 @@
     "e2e:stripe-review-noevent": "tsx --conditions=react-server scripts/e2e-stripe-review-noevent.ts",
     "e2e:stripe-webhook-lease": "tsx --conditions=react-server scripts/e2e-stripe-webhook-lease.ts",
     "e2e:stripe-env": "tsx --conditions=react-server scripts/e2e-stripe-env.ts",
+    "e2e:stripe-webhook-recovery": "tsx --conditions=react-server scripts/e2e-stripe-webhook-recovery.ts",
     "e2e:admin-restore-browser": "tsx --conditions=react-server scripts/e2e-admin-restore-browser.ts",
     "monitor:payments": "tsx --conditions=react-server scripts/payment-monitor.ts"
   },

@@ -228,6 +228,15 @@ export async function retrieveStripeSession(sessionId: string, rt: StripeRuntime
   return rt.client.checkout.sessions.retrieve(sessionId, { expand: ["payment_intent.latest_charge.balance_transaction"] });
 }
 
+/**
+ * Stripe の通知を Stripe API から取り直す（通知の復旧用。webhook-recovery.ts）。署名の確認の代わりに、この接続のキーで
+ * Stripe から直接受け取った値を信頼する（保存した中身は使わない）。Stripe が保存している期間を過ぎた通知は取得できない。
+ */
+export async function retrieveStripeEvent(eventId: string, rt: StripeRuntime = stripeRuntime()): Promise<Stripe.Event> {
+  if (!/^evt_[A-Za-z0-9_]{1,200}$/.test(eventId)) throw new Error("invalid event id");
+  return rt.client.events.retrieve(eventId);
+}
+
 export async function retrieveStripeCharge(chargeId: string, rt: StripeRuntime = stripeRuntime()): Promise<Stripe.Charge> {
   if (!/^(ch|py)_[A-Za-z0-9_]{1,200}$/.test(chargeId)) throw new Error("invalid charge id");
   return rt.client.charges.retrieve(chargeId, { expand: ["balance_transaction"] });

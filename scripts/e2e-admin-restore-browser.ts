@@ -23,6 +23,7 @@ import { dismissStripeDisputeReview, dismissStripeRefundReview } from "@/lib/pay
 import { createRequire } from "node:module";
 import { recordPaymentReview } from "@/lib/firestore/payment-reviews";
 import { recordPaymentAlert } from "@/lib/firestore/payment-alerts";
+import { acquireWebhookEventLease, recordWebhookEventFailure } from "@/lib/firestore/payments";
 import path from "node:path";
 
 // 使う範囲の Playwright の型（プロジェクトの依存関係に入れないため、ここで最小限だけ定義する）
@@ -287,7 +288,7 @@ async function main() {
     const reviewBId = await docIdOf(C.paymentReviews, reviewB);
     const alertAId = await docIdOf(C.paymentAlerts, alertA);
     const audit = async (action: string, targetId: string) => (await fsdb().collection(C.auditLogs).where("targetId", "==", targetId).where("action", "==", action).get()).size;
-    for (const path of ["/admin/payment-reviews", "/admin/payment-monitor"]) {
+    for (const path of ["/admin/payment-reviews", "/admin/payment-monitor", "/admin/webhook-events"]) {
       const a = await browser.newContext();
       const ap = await a.newPage();
       await ap.goto(`${BASE}${path}`);
@@ -298,7 +299,7 @@ async function main() {
       assert.equal((await (await st.newPage()).goto(`${BASE}${path}`))?.status(), 404, `店舗アカウントで ${path} が開けました`);
       await st.close();
     }
-    step("決済要確認・決済監視：ログインなしはログイン画面へ、店舗アカウントは 404（確認済みにする操作もできない。サーバーの処理の権限は単体テストでも確認）");
+    step("決済要確認・決済監視・Webhook の復旧：ログインなしはログイン画面へ、店舗アカウントは 404（確認済みにする操作もできない。サーバーの処理の権限は単体テストでも確認）");
 
     // ---- 11. 決済要確認：未確認の一覧（既定）と、すべての一覧（status=all）でそれぞれ確認済みにする ----
     await page.goto(`${BASE}/admin/payment-reviews`);
@@ -338,6 +339,31 @@ async function main() {
     await page.goto(`${BASE}/admin/payment-monitor?notice=%3Cb%3Ex%3C%2Fb%3E`);
     assert.equal(await page.locator("[data-notice]").count(), 0);
     step("決済監視の異常を確認済みにする：絞り込み（status=OPEN・mode=test）を保って上部に「決済監視の異常を確認済みにしました」。未確認の一覧から消え、監査ログ1件。再読み込み・戻る・再アクセスでは再実行されない");
+
+    // ---- 13. Webhook の復旧：失敗した通知を一覧に表示し、運営が ID で再処理する（Stripe から取り直して処理。結果を表示・監査ログ） ----
+    {
+      const evId = `evt_browser_rcv_${stamp}`;
+      fakeStripe.fake.events.set(evId, { id: evId, object: "event", type: "customer.created", livemode: false, created: Math.floor(Date.now() / 1000), data: { object: { id: "cus_browser", object: "customer" } } });
+      const lease = await acquireWebhookEventLease("stripe", evId, "customer.created", { objectId: "cus_browser", chargeId: null, livemode: false, eventCreatedAt: new Date() });
+      await recordWebhookEventFailure("stripe", evId, "SimulatedFailure", (lease as { token: string }).token);
+      await page.goto(`${BASE}/admin/webhook-events`);
+      const row = page.locator(`tr[data-webhook-event="${evId}"]`);
+      assert.equal(await row.getAttribute("data-webhook-state"), "RETRYABLE");
+      await row.getByRole("button", { name: "再処理" }).click();
+      await page.waitForURL(/\/admin\/webhook-events\?notice=recovered$/);
+      assert.equal(((await page.locator('[data-notice="webhook_recovered"]').textContent()) ?? "").trim(), "再処理して処理済みにしました");
+      const d = (await fsdb().collection(C.webhookEvents).doc(`stripe_${evId}`).get()).data()!;
+      assert.deepEqual([d.state, Boolean(d.processedAt), d.recoveryAttempts, d.lastRecoveryResult], ["PROCESSED", true, 1, "recovered"]);
+      assert.equal(await audit("webhook_event.recover", evId), 1);
+      assert.equal(await page.locator(`tr[data-webhook-event="${evId}"]`).count(), 0, "処理済みの通知が一覧に残っています");
+      // 再読み込みでは再実行されない。知らない通知の値は表示しない
+      await page.reload();
+      assert.equal(await audit("webhook_event.recover", evId), 1, "再読み込みで再処理されました");
+      await page.goto(`${BASE}/admin/webhook-events?notice=%3Cb%3Ex%3C%2Fb%3E`);
+      assert.equal(await page.locator("[data-notice]").count(), 0);
+      await fsdb().collection(C.webhookEvents).doc(`stripe_${evId}`).delete(); // 次の実行に残さない
+      step("Webhook の復旧：失敗した通知が一覧に出て、運営の「再処理」で Stripe から取り直して処理済み（上部に結果・監査ログ1件）。処理済みは一覧から消え、再読み込みでは再実行されない");
+    }
     await ctx.close();
   } finally {
     await browser.close();

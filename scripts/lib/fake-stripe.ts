@@ -19,6 +19,8 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
     charges: new Map<string, Record<string, unknown>>(),
     refunds: new Map<string, Record<string, unknown>>(),
     disputes: new Map<string, Record<string, unknown>>(),
+    /** Stripe が保存している通知（events.retrieve で返す。E2E が送った通知を登録する。無い ID は 404＝保存期間切れの再現） */
+    events: new Map<string, Record<string, unknown>>(),
     createCalls: 0,
     /** Stripe 側で表示される支払い方法（ダッシュボードの設定で有効なもの）。絞り込みの確認用に増やせる */
     eligible: ["card", "paypay", "link", "konbini"],
@@ -116,6 +118,11 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
       }
     }
     const m = (re: RegExp) => re.exec(url.pathname);
+    const evm = m(/^\/v1\/events\/([^/]+)$/);
+    if (req.method === "GET" && evm) {
+      const ev = fake.events.get(evm[1]);
+      return ev ? send(res, 200, ev) : send(res, 404, { error: { type: "invalid_request_error", code: "resource_missing", message: "No such event" } });
+    }
     if (req.method === "POST" && url.pathname === "/v1/checkout/sessions") {
       const key = String(req.headers["idempotency-key"] ?? "");
       const prev = key ? fake.idem.get(key) : undefined;

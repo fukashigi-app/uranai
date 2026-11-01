@@ -462,6 +462,13 @@ export type UnfinishedWebhookEvent = {
   objectId: string | null;
   chargeId: string | null;
   livemode: boolean | null;
+  /** 処理権の期限（処理中でなければ null） */
+  leaseExpiresAt: Date | null;
+  /** 復旧（webhook-recovery.ts）の記録。項目が無い記録は 0・null */
+  recoveryAttempts: number;
+  lastRecoveryAt: Date | null;
+  lastRecoveryResult: string | null;
+  lastRecoveryError: string | null;
 };
 
 export type UnfinishedWebhookEventsPage = {
@@ -491,7 +498,7 @@ export const UNFINISHED_WEBHOOK_PAGE_MAX = 100;
  *    （並びの項目が無い記録は検索から外れる）。このアプリは作成時に必ず両方を書くので、通常はできない
  *  - 形の正しくない続きの位置は例外（推測で位置を決めない。呼び出し側は最初から読み直す）
  */
-export async function listUnfinishedWebhookEvents(opts: { staleMs: number; now?: Date; cursor?: string | null; pageSize?: number }): Promise<UnfinishedWebhookEventsPage> {
+export async function listUnfinishedWebhookEvents(opts: { staleMs: number; now?: Date; cursor?: string | null; pageSize?: number; includeAll?: boolean }): Promise<UnfinishedWebhookEventsPage> {
   const now = opts.now ?? new Date();
   const pageSize = Math.max(1, Math.min(UNFINISHED_WEBHOOK_PAGE_MAX, Math.floor(opts.pageSize ?? UNFINISHED_WEBHOOK_PAGE_MAX)));
   let q = fsdb().collection(C.webhookEvents).where("provider", "==", "stripe").where("processedAt", "==", null).orderBy("createdAt", "asc").orderBy(FieldPath.documentId(), "asc");
@@ -508,7 +515,8 @@ export async function listUnfinishedWebhookEvents(opts: { staleMs: number; now?:
   const nextCursor = hasMore && last && lastCreated instanceof Timestamp ? encodeWebhookEventCursor({ seconds: lastCreated.seconds, nanoseconds: lastCreated.nanoseconds, id: last.id }) : null;
   const records = page
     .map((d) => ({ d, lastAttemptAt: toDate(d.get("lastAttemptAt")), createdAt: toDate(d.get("createdAt")) }))
-    .filter(({ d, lastAttemptAt, createdAt }) => isStaleUnfinished({ state: d.get("state"), processedAt: d.get("processedAt"), lastAttemptAt, createdAt }, now, opts.staleMs))
+    // includeAll：時間・状態で絞り込まない（運営の画面の一覧。処理中・FAILED_PERMANENT も含む）
+    .filter(({ d, lastAttemptAt, createdAt }) => opts.includeAll === true || isStaleUnfinished({ state: d.get("state"), processedAt: d.get("processedAt"), lastAttemptAt, createdAt }, now, opts.staleMs))
     .map(({ d, lastAttemptAt, createdAt }) => ({
       id: d.id,
       provider: String(d.get("provider")),
@@ -522,6 +530,92 @@ export async function listUnfinishedWebhookEvents(opts: { staleMs: number; now?:
       objectId: d.get("objectId") ?? null,
       chargeId: d.get("chargeId") ?? null,
       livemode: typeof d.get("livemode") === "boolean" ? d.get("livemode") : null,
+      leaseExpiresAt: typeof d.get("leaseOwner") === "string" && d.get("leaseOwner") ? toDate(d.get("leaseExpiresAt")) : null,
+      recoveryAttempts: typeof d.get("recoveryAttempts") === "number" ? d.get("recoveryAttempts") : 0,
+      lastRecoveryAt: toDate(d.get("lastRecoveryAt")),
+      lastRecoveryResult: typeof d.get("lastRecoveryResult") === "string" ? d.get("lastRecoveryResult") : null,
+      lastRecoveryError: typeof d.get("lastRecoveryError") === "string" ? d.get("lastRecoveryError") : null,
     }));
   return { records, nextCursor, hasMore, scanned: page.length };
+}
+
+// ---------- Webhook の通知の復旧（webhook-recovery.ts） ----------
+
+/** 復旧の前に読む通知の記録（処理済みか・処理中か・モード・種類）。記録が無ければ null（記録の無い通知は復旧しない） */
+export type WebhookEventRecord = { eventId: string; type: string; processed: boolean; state: WebhookEventState; livemode: boolean | null; leaseOwner: string | null; leaseExpiresAt: Date | null };
+
+export async function getWebhookEventRecord(provider: "stripe", eventId: string): Promise<WebhookEventRecord | null> {
+  const d = await fsdb().collection(C.webhookEvents).doc(safeId(provider, eventId)).get();
+  if (!d.exists) return null;
+  return {
+    eventId: String(d.get("eventId")),
+    type: String(d.get("type")),
+    processed: Boolean(d.get("processedAt")),
+    state: webhookEventStateOf({ state: d.get("state"), processedAt: d.get("processedAt") }),
+    livemode: typeof d.get("livemode") === "boolean" ? d.get("livemode") : null,
+    leaseOwner: typeof d.get("leaseOwner") === "string" && d.get("leaseOwner") ? d.get("leaseOwner") : null,
+    leaseExpiresAt: toDate(d.get("leaseExpiresAt")),
+  };
+}
+
+/**
+ * 復旧の結果を記録する（recoveryAttempts・lastRecoveryAt・lastRecoveryResult・lastRecoveryError だけ）。
+ * 処理済み（processedAt）・状態（state）・処理権には触れない（処理の結果はいつもの処理が記録する）。記録が無ければ何もしない。
+ * 呼ぶのは Stripe・処理を試したときだけ（回数を1増やす）。記録できなくても例外にしない（結果は呼び出し側が返す）。
+ */
+export async function recordWebhookRecoveryResult(provider: "stripe", eventId: string, r: { result: string; errorName: string | null }, now = new Date()): Promise<boolean> {
+  const ref = fsdb().collection(C.webhookEvents).doc(safeId(provider, eventId));
+  try {
+    await ref.update({
+      recoveryAttempts: FieldValue.increment(1),
+      lastRecoveryAt: now,
+      lastRecoveryResult: /^[a-z_]{1,40}$/.test(r.result) ? r.result : "unknown",
+      lastRecoveryError: r.errorName && /^[\w.\-]{1,60}$/.test(r.errorName) ? r.errorName : null,
+    });
+    return true;
+  } catch (e) {
+    console.error("[webhook-recovery] recording the recovery result failed", { provider, error: (e as Error)?.name });
+    return false;
+  }
+}
+
+/**
+ * Stripe から通知を取得できない（404。保存期間切れ・アカウントの設定違いなど、原因は判断しない）ことを記録する（state=FAILED_PERMANENT・lastError）。
+ * 処理済みではない（processedAt は書かない）。運営が決済の状態を Stripe のダッシュボードで確認する対象。
+ * 処理済み・処理中（期限内の処理権がある）の記録には書かない。自動の復旧の対象から外れる（手動では試せる）。
+ */
+export async function markWebhookEventUnavailable(provider: "stripe", eventId: string, now = new Date()): Promise<boolean> {
+  const ref = fsdb().collection(C.webhookEvents).doc(safeId(provider, eventId));
+  return fsdb().runTransaction(async (tx) => {
+    const cur = await tx.get(ref);
+    if (!cur.exists) return false;
+    if (decideWebhookLease({ exists: true, processedAt: cur.get("processedAt"), leaseOwner: cur.get("leaseOwner"), leaseExpiresAt: toDate(cur.get("leaseExpiresAt")) }, now) !== "acquire") return false;
+    tx.update(ref, { state: "FAILED_PERMANENT", lastError: "StripeEventUnavailable" });
+    return true;
+  });
+}
+
+/** 自動の復旧の最後の実行（system/webhookRecovery。件数・時刻・結果の種類だけ） */
+export type WebhookRecoveryRunRecord = { source: string; startedAt: Date; finishedAt: Date; status: string; counts: Record<string, number>; truncated: boolean; errorName: string | null };
+
+export async function recordWebhookRecoveryRun(run: WebhookRecoveryRunRecord): Promise<void> {
+  try {
+    await fsdb().collection(C.system).doc("webhookRecovery").set({ ...run, updatedAt: FieldValue.serverTimestamp() });
+  } catch (e) {
+    console.error("[webhook-recovery] recording the run failed", (e as Error)?.name);
+  }
+}
+
+export async function readWebhookRecoveryRun(): Promise<WebhookRecoveryRunRecord | null> {
+  const d = await fsdb().collection(C.system).doc("webhookRecovery").get();
+  if (!d.exists) return null;
+  return {
+    source: String(d.get("source") ?? ""),
+    startedAt: toDate(d.get("startedAt")) ?? new Date(0),
+    finishedAt: toDate(d.get("finishedAt")) ?? new Date(0),
+    status: String(d.get("status") ?? ""),
+    counts: (d.get("counts") ?? {}) as Record<string, number>,
+    truncated: d.get("truncated") === true,
+    errorName: typeof d.get("errorName") === "string" ? d.get("errorName") : null,
+  };
 }

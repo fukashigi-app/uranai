@@ -304,3 +304,19 @@ Hobby＋Fluid Compute の上限が300秒であることは、作業の環境か�
 - Pro プランに移って300秒より長くする場合は、処理権の期限も「maxDuration＋60秒」以上に延ばす（単体テストが確かめる）
 - 戻り先・決済画面の作成・点検には、まだ設定していない
 追加すると、単体テスト（`tests/preview-runbook.test.ts`）が点検の時間の上限との関係を確かめます。
+
+## 12. Webhook の通知の復旧（自動・手動）
+
+処理が終わっていない Stripe の通知（webhookEvents の processedAt が無い記録）を、通知の ID で処理し直します（`src/lib/payments/webhook-recovery.ts`）。
+
+- **方法：** Stripe API から通知を取り直し（`events.retrieve`）、Webhook と同じ処理（`processStripeEvent`：処理権・環境の識別・冪等性・決済要確認の重複の防止）で反映します。保存した中身は使いません。決済の内容を画面から入力・変更することはできません
+- **自動（定期処理）：** `/api/cron/maintenance`（1日1回・`CRON_SECRET` の認証）のメンテナンスの後に実行します。対象は、最後の処理から30分以上たった RECEIVED・RETRYABLE で、処理権の期限が切れたもの。1回に20件まで・開始から60秒を過ぎたら新しい通知を始めない・読むのは500件（5ページ）まで。同じ通知は20時間あけて5回まで（未実施の通知を先に処理）。結果の件数は `system/webhookRecovery` に記録します
+  - Vercel の Cron は Production でだけ動きます。今の Production はテスト決済を拒否する（Stripe の接続が無い）ので、**自動の復旧は何もしません**（`stripe_unavailable`）。本番決済を有効にした後に動きます
+- **手動（運営画面「Webhook の復旧」）：** 運営のログインが必須。未処理の通知の一覧（処理中・要確認を含む）と、通知ごとの「再処理」、自動の復旧を今すぐ実行するボタン。結果と理由を表示し、監査ログ（`webhook_event.recover`・`webhook_recovery.run`）に記録します。Preview では定期処理が動かないので、こちらを使います
+- **結果：** 処理済み（`recovered`・`ignored_other_env`）以外は processedAt を書きません。Stripe API の失敗（通信・認証・回数の制限・Stripe の障害）は `stripe_error`（RETRYABLE のまま。後で試し直す）。Stripe から通知を取得できない（`events.retrieve` が 404）ときは `FAILED_PERMANENT`（要確認。自動の対象外。運営画面には表示され、手動で再処理できる）にします。404 は Stripe の通知の保存期間を過ぎた場合（未確認：保存期間は30日とされる）のほか、Stripe のキーが別のアカウントのものになっているなどの設定違いでも起こるため、原因は判断しません。Stripe の接続の設定と、Stripe のダッシュボードの決済の状態を確認してください
+- **実行時間の限界：** 60秒は新しい通知の処理を始めない区切りで、関数全体の終了の時間は保証しません。先に実行するメンテナンス（Firestore の処理。時間の上限なし）と、始めた通知の処理（Stripe API は1回の取り直しで最悪約62秒、1件で数回）を合わせると、定期処理の `maxDuration`（300秒）を超えて Vercel に打ち切られることがあります
+  - 打ち切られると、その回の復旧の実行の記録（`system/webhookRecovery`）が更新されないことがあります（画面の「最後の実行」が古いまま。メンテナンスの記録は復旧の前に書くので残る）
+  - 処理の途中で打ち切られた通知は processedAt が無いまま残り、処理権の期限（360秒）の後の Stripe の再送・次の復旧の対象になります（反映は冪等なので二重にならない）
+- **対象外：** 一度も受信していない通知（webhookEvents に記録が無い）は、今の復旧の仕組みでは見つけられません（Stripe の送信先が止まっていて一度も届かなかった通知など）
+- **インデックス：** 既存の webhookEvents の複合インデックス（provider・processedAt・createdAt・__name__）だけを使います（追加なし）
+

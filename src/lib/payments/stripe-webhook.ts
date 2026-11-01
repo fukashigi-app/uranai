@@ -35,6 +35,8 @@ async function noteInvalidSignature() {
 }
 
 export type StripeWebhookResult = { status: number; body: Record<string, unknown> | string };
+/** processStripeEvent の結果。500 のときは記録したエラーの名前も返す（復旧の結果の記録用。応答には使わない） */
+export type StripeEventProcessResult = StripeWebhookResult & { errorName?: string };
 
 export async function handleStripeWebhook(rawBody: string, signature: string | null, rt: StripeRuntime): Promise<StripeWebhookResult> {
   let event: Stripe.Event;
@@ -46,6 +48,16 @@ export async function handleStripeWebhook(rawBody: string, signature: string | n
     await noteInvalidSignature();
     return { status: 400, body: "Invalid signature" };
   }
+  const r = await processStripeEvent(event, rt);
+  return { status: r.status, body: r.body };
+}
+
+/**
+ * 信頼できる Stripe の通知（署名を確認した通知、または Stripe API から取り直した通知）を処理する（上の 2〜4）。
+ * Webhook の受信と、通知の復旧（webhook-recovery.ts。Stripe API の events.retrieve で取り直した通知）が共通で使う。
+ * 呼び出し側は、署名の確認か Stripe API からの取得のどちらかを必ず済ませること（保存した中身・外から渡された中身は渡さない）。
+ */
+export async function processStripeEvent(event: Stripe.Event, rt: StripeRuntime): Promise<StripeEventProcessResult> {
   if (event.livemode !== (rt.mode === "live")) {
     console.error("[stripe-webhook] event mode mismatch", { eventId: event.id, mode: rt.mode });
     // 署名は正しいが本番とテストの取り違え（送信先・署名の値の設定の誤り）：受け付けずに決済要確認に記録する（対象ごとに1件）
@@ -76,7 +88,7 @@ export async function handleStripeWebhook(rawBody: string, signature: string | n
     if (!rt.testHooks?.skipFailureStateRecord?.(event.id)) await recordWebhookEventFailure("stripe", event.id, webhookErrorNameOf(e), lease.token);
     // 署名を確認できた通知の処理の失敗（Stripe が再送する）。通知ごとに1件（再送は回数だけ増える）
     await recordPaymentAlert({ kind: alertKindForWebhookEvent(event.type), objectType: "event", objectId: event.id, eventType: event.type, mode: alertModeOf(event.livemode), errorName: (e as Error)?.name ?? null });
-    return { status: 500, body: "error" };
+    return { status: 500, body: "error", errorName: webhookErrorNameOf(e) };
   }
 }
 
