@@ -1,6 +1,6 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
-import { FieldValue, type DocumentData } from "firebase-admin/firestore";
+import { FieldPath, FieldValue, Timestamp, type DocumentData } from "firebase-admin/firestore";
 import type { checkouts, FortuneTypeValue } from "@/lib/db/schema";
 import { CHECKOUT_TTL_MS, CURRENCY, defaultFeeRateBps, FORTUNE_SESSION_TTL_MS, PRICE_JPY, STORE_SHARE_BPS } from "@/config/pricing";
 import { siteConfig } from "@/config/site";
@@ -19,6 +19,7 @@ import { reconcileTransactionInTx, settlementRefForTx } from "./settlement-adjus
 import { paymentReviewRef, recordPaymentReview, recordPaymentReviewInTx, type PaymentReviewInput } from "./payment-reviews";
 import { isSalesPayment } from "@/lib/payments/kind";
 import { findStoreByCode } from "./stores";
+import { decodeWebhookEventCursor, encodeWebhookEventCursor, isStaleUnfinished, webhookEventStateOf, type StripeEventMeta, type WebhookEventState } from "@/lib/payments/webhook-event-state";
 
 /**
  * 決済（Firestore 版）。ロジックは PostgreSQL 版（services/checkout.ts・payments/confirm.ts）と同じ。
@@ -342,17 +343,127 @@ export async function markRefunded(providerId: ProviderId, chargeId: string): Pr
 
 // ---------- Webhook の冪等性 ----------
 
-export async function beginWebhookEvent(provider: ProviderId | "stripe", eventId: string, type: string): Promise<boolean> {
+/**
+ * 通知の処理を始める（処理済みなら false。処理済みかどうかは今までどおり processedAt だけで判定する）。
+ * 記録が無ければ RECEIVED・回数1で作る。あれば（再送・同時・途中で止まった通知の処理し直し）RECEIVED にして回数を増やす。
+ * 処理済みの記録には何も書かない。meta（通知の対象の ID・モード・作成日時）は、記録に無い項目だけ書く（以前の記録にも足す）。
+ * 記録に失敗したら例外（今までどおり。呼び出し側は処理を始めない＝Webhook は 500 になり、Stripe が再送する）。
+ */
+export async function beginWebhookEvent(provider: ProviderId | "stripe", eventId: string, type: string, meta?: StripeEventMeta): Promise<boolean> {
   const ref = fsdb().collection(C.webhookEvents).doc(safeId(provider, eventId));
-  try {
-    await ref.create({ provider, eventId, type, processedAt: null, createdAt: FieldValue.serverTimestamp() });
-  } catch (e) {
-    if (!isAlreadyExists(e)) throw e;
-  }
-  const snap = await ref.get();
-  return !snap.get("processedAt");
+  return fsdb().runTransaction(async (tx) => {
+    const cur = await tx.get(ref);
+    if (cur.exists && cur.get("processedAt")) return false;
+    const now = new Date();
+    const metaFields = meta ? { objectId: meta.objectId, chargeId: meta.chargeId, livemode: meta.livemode, eventCreatedAt: meta.eventCreatedAt } : {};
+    if (!cur.exists) {
+      tx.create(ref, { provider, eventId, type, processedAt: null, createdAt: FieldValue.serverTimestamp(), state: "RECEIVED", attempts: 1, lastAttemptAt: now, lastError: null, replayLeaseUntil: null, ...metaFields });
+      return true;
+    }
+    const missing = Object.fromEntries(Object.entries(metaFields).filter(([k]) => cur.get(k) === undefined));
+    tx.update(ref, { ...missing, state: "RECEIVED", attempts: FieldValue.increment(1), lastAttemptAt: now, ...(cur.get("replayLeaseUntil") === undefined ? { replayLeaseUntil: null } : {}) });
+    return true;
+  });
 }
 
+/** 処理の完了。processedAt と state=PROCESSED を同じ書き込みで記録する（両者が食い違わない） */
 export async function finishWebhookEvent(provider: ProviderId | "stripe", eventId: string): Promise<void> {
-  await fsdb().collection(C.webhookEvents).doc(safeId(provider, eventId)).update({ processedAt: FieldValue.serverTimestamp() });
+  await fsdb().collection(C.webhookEvents).doc(safeId(provider, eventId)).update({ processedAt: FieldValue.serverTimestamp(), state: "PROCESSED" });
+}
+
+/**
+ * 処理の失敗を記録する（RETRYABLE。最後のエラーの名前だけ）。処理済み・記録が無いときは何もしない。
+ * 応答（500）を変えないよう、記録に失敗しても例外にしない（その場合は RECEIVED のまま残り、lastAttemptAt が古くなるので
+ * 「途中で止まった通知」として見つけられる）。FAILED_PERMANENT は、安全に判定できる場合が無いので今は使わない。
+ */
+export async function recordWebhookEventFailure(provider: ProviderId | "stripe", eventId: string, errorName: string): Promise<boolean> {
+  const ref = fsdb().collection(C.webhookEvents).doc(safeId(provider, eventId));
+  try {
+    return await fsdb().runTransaction(async (tx) => {
+      const cur = await tx.get(ref);
+      if (!cur.exists || cur.get("processedAt")) return false;
+      tx.update(ref, { state: "RETRYABLE", lastError: /^[\w.\-]{1,60}$/.test(errorName) ? errorName : "Error" });
+      return true;
+    });
+  } catch (e) {
+    console.error("[webhook-event] recording the failure state failed", { provider, error: (e as Error)?.name });
+    return false;
+  }
+}
+
+export type UnfinishedWebhookEvent = {
+  id: string;
+  provider: string;
+  eventId: string;
+  type: string;
+  state: WebhookEventState;
+  attempts: number | null;
+  createdAt: Date | null;
+  lastAttemptAt: Date | null;
+  lastError: string | null;
+  objectId: string | null;
+  chargeId: string | null;
+  livemode: boolean | null;
+};
+
+export type UnfinishedWebhookEventsPage = {
+  /** このページのうち、最後に処理を始めてから staleMs 以上たったもの（途中で止まった・失敗した通知） */
+  records: UnfinishedWebhookEvent[];
+  /** 次のページの位置（hasMore が false なら null）。このページのすべての記録（records に入らなかったものも含む）の後から読む */
+  nextCursor: string | null;
+  /** この位置より後に、処理が終わっていない記録が実際に残っているか（ページの件数＋1件を読んで確かめる） */
+  hasMore: boolean;
+  /** このページで読んだ、処理が終わっていない記録の件数（records の絞り込みの前） */
+  scanned: number;
+};
+
+export const UNFINISHED_WEBHOOK_PAGE_MAX = 100;
+
+/**
+ * 処理が終わっていない Stripe の通知（provider == "stripe" かつ processedAt == null）を、作成の時刻・文書の ID の順に
+ * 1ページずつ読む（読み取りだけ。将来の手動の復旧・点検・定期照合用。今は自動で再実行しない）。
+ * 必要な複合インデックス：provider・processedAt・createdAt・__name__（firestore.indexes.json）。
+ *
+ *  - 並び：createdAt の昇順、同じ時刻なら文書の ID の昇順（一意で安定）。続きは最後に読んだ記録の (createdAt, ID) の後から
+ *    （startAfter）。位置は値で決まるので、ページの間に記録が処理済みになって検索から外れても、他の記録を飛ばさない
+ *  - 一定の時間を過ぎたかの絞り込みはページを読んだ後に行い、続きの位置は絞り込みの前の最後の記録で決める
+ *    （止まった通知が新しい処理中の通知の後ろにあっても、全ページを読めば必ず含まれる）
+ *  - ページの間に届いた新しい通知は作成の時刻が後なので、後のページに入る（読み終わるまでに届いた分は含まれ得る）
+ *  - 次の記録は対象外：processedAt の項目が無い記録（null と等しい、の条件に一致しない）、createdAt が無い記録
+ *    （並びの項目が無い記録は検索から外れる）。このアプリは作成時に必ず両方を書くので、通常はできない
+ *  - 形の正しくない続きの位置は例外（推測で位置を決めない。呼び出し側は最初から読み直す）
+ */
+export async function listUnfinishedWebhookEvents(opts: { staleMs: number; now?: Date; cursor?: string | null; pageSize?: number }): Promise<UnfinishedWebhookEventsPage> {
+  const now = opts.now ?? new Date();
+  const pageSize = Math.max(1, Math.min(UNFINISHED_WEBHOOK_PAGE_MAX, Math.floor(opts.pageSize ?? UNFINISHED_WEBHOOK_PAGE_MAX)));
+  let q = fsdb().collection(C.webhookEvents).where("provider", "==", "stripe").where("processedAt", "==", null).orderBy("createdAt", "asc").orderBy(FieldPath.documentId(), "asc");
+  if (opts.cursor) {
+    const c = decodeWebhookEventCursor(opts.cursor);
+    if (!c) throw new Error("invalid webhook event cursor");
+    q = q.startAfter(new Timestamp(c.seconds, c.nanoseconds), c.id);
+  }
+  const snap = await q.limit(pageSize + 1).get();
+  const hasMore = snap.docs.length > pageSize;
+  const page = snap.docs.slice(0, pageSize);
+  const last = page.at(-1);
+  const lastCreated = last?.get("createdAt");
+  const nextCursor = hasMore && last && lastCreated instanceof Timestamp ? encodeWebhookEventCursor({ seconds: lastCreated.seconds, nanoseconds: lastCreated.nanoseconds, id: last.id }) : null;
+  const records = page
+    .map((d) => ({ d, lastAttemptAt: toDate(d.get("lastAttemptAt")), createdAt: toDate(d.get("createdAt")) }))
+    .filter(({ d, lastAttemptAt, createdAt }) => isStaleUnfinished({ state: d.get("state"), processedAt: d.get("processedAt"), lastAttemptAt, createdAt }, now, opts.staleMs))
+    .map(({ d, lastAttemptAt, createdAt }) => ({
+      id: d.id,
+      provider: String(d.get("provider")),
+      eventId: String(d.get("eventId")),
+      type: String(d.get("type")),
+      state: webhookEventStateOf({ state: d.get("state"), processedAt: d.get("processedAt") }),
+      attempts: typeof d.get("attempts") === "number" ? d.get("attempts") : null,
+      createdAt,
+      lastAttemptAt,
+      lastError: d.get("lastError") ?? null,
+      objectId: d.get("objectId") ?? null,
+      chargeId: d.get("chargeId") ?? null,
+      livemode: typeof d.get("livemode") === "boolean" ? d.get("livemode") : null,
+    }));
+  return { records, nextCursor, hasMore, scanned: page.length };
 }

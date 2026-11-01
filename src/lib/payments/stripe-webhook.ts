@@ -2,7 +2,8 @@ import "server-only";
 import type Stripe from "stripe";
 import type { StripeRuntime } from "./stripe-checkout";
 import { closeStripeCheckout, confirmStripeCheckout, refreshStripeFee, syncStripeDispute, syncStripeRefunds } from "./stripe-confirm";
-import { beginWebhookEvent, finishWebhookEvent } from "@/lib/firestore/payments";
+import { beginWebhookEvent, finishWebhookEvent, recordWebhookEventFailure } from "@/lib/firestore/payments";
+import { stripeEventMeta, webhookErrorNameOf } from "./webhook-event-state";
 import { recordPaymentReview } from "@/lib/firestore/payment-reviews";
 import { recordPaymentAlert } from "@/lib/firestore/payment-alerts";
 import { alertKindForWebhookEvent, alertModeOf, hourBucket, newThrottleState, throttleTick } from "./monitor-rules";
@@ -12,7 +13,8 @@ import { alertKindForWebhookEvent, alertModeOf, hourBucket, newThrottleState, th
  *  1) 生の本文で署名を確認（Stripe 公式 SDK。5分以内の通知だけ）。署名の値はモードごとに別（本番と Sandbox の送信先は別）
  *  2) 通知の livemode がモードと一致しなければ拒否（テストの環境に本番の通知、本番の環境にテストの通知を受け付けない）。
  *     署名が正しい通知だけ、運営が気付けるよう決済要確認に記録する。署名が不正な通知は何も記録しない
- *  3) 通知の ID ごとに処理済みを記録し、重複・再送は1回だけ処理する（webhookEvents）。途中で止まった通知は再送で処理し直す
+ *  3) 通知の ID ごとに処理済みを記録し、重複・再送は1回だけ処理する（webhookEvents）。途中で止まった通知は再送で処理し直す。
+ *     処理の状態（RECEIVED→PROCESSED、失敗は RETRYABLE）・回数・最後のエラーの名前・対象の ID も記録する（webhook-event-state.ts）
  *  4) 通知の中身は信用せず、Stripe API から取り直して処理する（stripe-confirm.ts。こちらもモードを照合する）
  * 処理に失敗したら 500 を返して Stripe に再送させる。関係ない通知は 200 で受け流す。
  */
@@ -45,15 +47,18 @@ export async function handleStripeWebhook(rawBody: string, signature: string | n
     return { status: 400, body: rt.mode === "live" ? "Test events are not accepted" : "Live events are not accepted" };
   }
 
-  if (!(await beginWebhookEvent("stripe", event.id, event.type))) {
+  if (!(await beginWebhookEvent("stripe", event.id, event.type, stripeEventMeta(event)))) {
     return { status: 200, body: { received: true, duplicate: true } };
   }
   try {
     const outcome = await handle(event, rt);
+    rt.testHooks?.beforeFinishWebhookEvent?.(event.id);
     await finishWebhookEvent("stripe", event.id);
     return { status: 200, body: { received: true, outcome } };
   } catch (e) {
     console.error("[stripe-webhook] processing failed", { eventId: event.id, type: event.type, error: (e as Error).name });
+    // 処理済みにしない（processedAt を書かない）。状態を RETRYABLE にする（記録できなくても応答は変えない。RECEIVED のまま残る）
+    if (!rt.testHooks?.skipFailureStateRecord?.(event.id)) await recordWebhookEventFailure("stripe", event.id, webhookErrorNameOf(e));
     // 署名を確認できた通知の処理の失敗（Stripe が再送する）。通知ごとに1件（再送は回数だけ増える）
     await recordPaymentAlert({ kind: alertKindForWebhookEvent(event.type), objectType: "event", objectId: event.id, eventType: event.type, mode: alertModeOf(event.livemode), errorName: (e as Error)?.name ?? null });
     return { status: 500, body: "error" };

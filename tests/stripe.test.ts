@@ -187,6 +187,7 @@ vi.mock("@/lib/firestore/payments", () => ({
     return hooks.begin;
   },
   finishWebhookEvent: async (_p: string, id: string) => void hooks.calls.push(`finish:${id}`),
+  recordWebhookEventFailure: async (_p: string, id: string, errorName: string) => (hooks.calls.push(`fail:${id}:${errorName}`), true),
 }));
 vi.mock("@/lib/payments/stripe-confirm", () => ({
   confirmStripeCheckout: async (id: string) => {
@@ -245,6 +246,7 @@ describe("Stripe の Webhook", () => {
     hooks.fail = true;
     expect((await post(ev("checkout.session.completed", { id: "cs_test_abc" }))).status).toBe(500);
     expect(hooks.calls).not.toContain("finish:evt_test_checkout.session.completed");
+    expect(hooks.calls.some((c) => c.startsWith("fail:evt_test_checkout.session.completed:"))).toBe(true); // 状態を RETRYABLE に
   });
 
   it("期限切れ・失敗・返金・手数料の確定・関係ない通知の振り分け", async () => {

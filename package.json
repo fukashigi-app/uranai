@@ -37,6 +37,8 @@
     "e2e:stripe-recheck": "tsx --conditions=react-server scripts/e2e-stripe-recheck.ts",
     "e2e:stripe-review-atomic": "tsx --conditions=react-server scripts/e2e-stripe-review-atomic.ts",
     "e2e:stripe-review-required": "tsx --conditions=react-server scripts/e2e-stripe-review-required.ts",
+    "e2e:stripe-webhook-state": "tsx --conditions=react-server scripts/e2e-stripe-webhook-state.ts",
+    "e2e:stripe-webhook-pages": "tsx --conditions=react-server scripts/e2e-stripe-webhook-pages.ts",
     "e2e:admin-restore-browser": "tsx --conditions=react-server scripts/e2e-admin-restore-browser.ts",
     "monitor:payments": "tsx --conditions=react-server scripts/payment-monitor.ts"
   },
