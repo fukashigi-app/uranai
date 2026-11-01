@@ -72,3 +72,23 @@ describe("以前の方式の項目（recentOccurrenceKeys）", () => {
     expect(e.calls[0].data).not.toHaveProperty("recentOccurrenceKeys");
   });
 });
+
+describe("countRepeat=false（同じ観測を見分ける手がかりが無い記録）", () => {
+  it("記録が無ければ回数1で作る。あれば回数を増やさず、最後の日時・内容・未確認への戻しだけ（最初の日時は書かない）", () => {
+    const a = fakeTx();
+    upsertDedupedRecordInTx(a.tx, ref, snap(null), fields, { causeKey: "k1", reopen: "on_change", countRepeat: false, now: NOW });
+    expect(a.calls[0]).toMatchObject({ op: "create", data: { occurrences: 1, firstSeenAt: NOW } });
+    const b = fakeTx();
+    upsertDedupedRecordInTx(b.tx, ref, snap({ status: "OPEN", causeKey: "k1", occurrences: 5 }), fields, { causeKey: "k1", reopen: "on_change", countRepeat: false, now: NOW });
+    expect(b.calls[0].data).not.toHaveProperty("occurrences");
+    expect(b.calls[0].data).not.toHaveProperty("firstSeenAt");
+    expect(b.calls[0].data.lastSeenAt).toBe(NOW);
+    const c = fakeTx();
+    upsertDedupedRecordInTx(c.tx, ref, snap({ status: "RESOLVED", causeKey: "k1" }), fields, { causeKey: "k2", reopen: "on_change", countRepeat: false, now: NOW });
+    expect(c.calls[0].data).toMatchObject({ status: "OPEN", resolvedAt: null, resolvedBy: null });
+    expect(c.calls[0].data).not.toHaveProperty("occurrences");
+    const d = fakeTx();
+    upsertDedupedRecordInTx(d.tx, ref, snap({ status: "RESOLVED", causeKey: "k1" }), fields, { causeKey: "k1", reopen: "on_change", countRepeat: false, now: NOW });
+    expect(d.calls[0].data).not.toHaveProperty("status");
+  });
+});

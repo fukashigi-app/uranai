@@ -111,6 +111,8 @@ export async function recordPaymentReview(input: PaymentReviewInput): Promise<vo
  * 以前の方式（記録の recentOccurrenceKeys に "event:<通知ID>"）で記録済みのものも、二重に数えない（新しくは追記しない）。
  * 通知の文書が無い（通常は beginWebhookEvent が処理の前に作るので無い）ときは、回数を増やさず PaymentReviewRecordError
  * （Webhook は 500。Stripe の再送で beginWebhookEvent が文書を作り直すので、次の処理で記録される）。
+ * webhookEvent が無い（決済確定の後の再確認・運営の復旧など、同じ観測を見分ける手がかりが無い）ときは、記録が無ければ回数1で作り、
+ * あれば回数を増やさない（最後の日時・内容の更新と、内容が変わったときの未確認への戻しは今までどおり。最初の日時・既存の回数は変えない）。
  * ID・重複のまとめ方・確認済みの扱い・内容が変わったときに未確認へ戻す規則は recordPaymentReview と同じ。
  */
 export async function recordRequiredPaymentReview(
@@ -126,7 +128,7 @@ export async function recordRequiredPaymentReview(
       timeoutMs: opts.timeoutMs ?? REQUIRED_PAYMENT_REVIEW_TIMEOUT_MS,
       ...(opts.webhookEvent
         ? { occurrenceMarker: { ref: fsdb().collection(C.webhookEvents).doc(safeId(opts.webhookEvent.provider, opts.webhookEvent.eventId)), field: "recordedReviewIds", id: ref.id, legacyKey: `event:${opts.webhookEvent.eventId}` } }
-        : {}),
+        : { countRepeat: false }),
       onSettledAfterTimeout: (result) => console.warn("[payment-review] required record settled after the wait ended", { kind: input.kind, objectType: input.objectType, result }),
     });
   } catch (e) {

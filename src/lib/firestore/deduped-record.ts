@@ -15,6 +15,11 @@ type DedupeOpts = {
   now?: Date;
   /** 回数のほかに加算するフィールド（例：間引いた記録の、実際に観測した件数） */
   add?: Record<string, number>;
+  /**
+   * false：記録がすでにあれば回数（occurrences）を増やさない（最後の日時・内容の更新と、内容が変わったときの未確認への戻しは行う）。
+   * 同じ観測を見分ける手がかり（通知の ID など）が無い呼び出しで、くり返しの確認のたびに回数が増えないようにする。既定は true（数える）
+   */
+  countRepeat?: boolean;
 };
 
 /**
@@ -37,7 +42,7 @@ function dedupedWrite(cur: DocumentSnapshot, fields: Record<string, unknown>, op
   if (!cur.exists) return { create: { ...fields, ...add, causeKey: opts.causeKey, status: "OPEN", occurrences: 1, firstSeenAt: now, lastSeenAt: now, resolvedAt: null, resolvedBy: null } };
   const reopen = cur.get("status") === "RESOLVED" && (opts.reopen === "always" || cur.get("causeKey") !== opts.causeKey);
   const inc = Object.fromEntries(Object.entries(add).map(([k, v]) => [k, FieldValue.increment(v)]));
-  return { update: { ...fields, ...inc, causeKey: opts.causeKey, occurrences: FieldValue.increment(1), lastSeenAt: now, ...(reopen ? { status: "OPEN", resolvedAt: null, resolvedBy: null } : {}) } };
+  return { update: { ...fields, ...inc, causeKey: opts.causeKey, ...(opts.countRepeat === false ? {} : { occurrences: FieldValue.increment(1) }), lastSeenAt: now, ...(reopen ? { status: "OPEN", resolvedAt: null, resolvedBy: null } : {}) } };
 }
 
 /**

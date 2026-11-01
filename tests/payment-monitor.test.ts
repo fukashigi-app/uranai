@@ -269,8 +269,48 @@ describe("記録が必須の決済要確認（recordRequiredPaymentReview）", (
     expect(store.docs.get(reviewPath("ch_req_3"))?.occurrences).toBe(25);
     for (const id of ids) await recordRequiredPaymentReview(input("ch_req_3"), wh(id)); // 25件すべての再送
     expect(store.docs.get(reviewPath("ch_req_3"))?.occurrences).toBe(25);
-    await recordRequiredPaymentReview(input("ch_req_3")); // 通知なし（決済確定の後の再確認など）は今までどおり数える
-    expect(store.docs.get(reviewPath("ch_req_3"))?.occurrences).toBe(26);
+    await recordRequiredPaymentReview(input("ch_req_3")); // 通知なし（決済確定の後の再確認など）：既存の記録の回数は増やさない
+    expect(store.docs.get(reviewPath("ch_req_3"))?.occurrences).toBe(25);
+  });
+
+  it("通知なし（再確認・運営の復旧）：新規は回数1。くり返しても回数を増やさず、最初の日時・既存の回数を変えない。最後の日時は更新", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-10-29T01:00:00Z"));
+      await recordRequiredPaymentReview(input("ch_noev_1", 100));
+      const first = store.docs.get(reviewPath("ch_noev_1"))!;
+      expect(first).toMatchObject({ occurrences: 1, status: "OPEN" });
+      for (const h of [2, 3, 4]) {
+        vi.setSystemTime(new Date(`2026-10-29T0${h}:00:00Z`));
+        await recordRequiredPaymentReview(input("ch_noev_1", 100));
+      }
+      const after = store.docs.get(reviewPath("ch_noev_1"))!;
+      expect(after.occurrences).toBe(1);
+      expect(after.firstSeenAt).toEqual(first.firstSeenAt);
+      expect(after.lastSeenAt).toEqual(new Date("2026-10-29T04:00:00Z"));
+      expect(after).not.toHaveProperty("recentOccurrenceKeys"); // 新しい重複防止のキーを作らない
+      expect([...store.docs.keys()].some((k) => k.startsWith("webhookEvents/"))).toBe(false); // 通知の文書を作らない
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("通知なし：以前の仕様で増えた回数はそのまま。確認済みは同じ内容なら確認済みのまま、内容が変わったら未確認に戻す（回数は変えない）", async () => {
+    store.docs.set(reviewPath("ch_noev_2"), { kind: "transaction_not_found", causeKey: JSON.stringify(["transaction_not_found", [], 100]), status: "RESOLVED", resolvedBy: "op", resolvedAt: new Date(), occurrences: 9, firstSeenAt: new Date("2026-01-01T00:00:00Z") });
+    await recordRequiredPaymentReview(input("ch_noev_2", 100));
+    expect(store.docs.get(reviewPath("ch_noev_2"))).toMatchObject({ occurrences: 9, status: "RESOLVED", resolvedBy: "op", firstSeenAt: new Date("2026-01-01T00:00:00Z") });
+    await recordRequiredPaymentReview(input("ch_noev_2", 30)); // 内容（額）が変わる
+    expect(store.docs.get(reviewPath("ch_noev_2"))).toMatchObject({ occurrences: 9, status: "OPEN", resolvedBy: null, resolvedAt: null, amount: 30 });
+  });
+
+  it("通知ありの後に通知なし：通知の分は数え、通知なしの再確認では増やさない（方式Aはそのまま）", async () => {
+    begun("evt_mix_1", "evt_mix_2");
+    await recordRequiredPaymentReview(input("ch_mix"), wh("evt_mix_1"));
+    await recordRequiredPaymentReview(input("ch_mix"));
+    await recordRequiredPaymentReview(input("ch_mix"));
+    await recordRequiredPaymentReview(input("ch_mix"), wh("evt_mix_2"));
+    await recordRequiredPaymentReview(input("ch_mix"), wh("evt_mix_1"));
+    expect(store.docs.get(reviewPath("ch_mix"))?.occurrences).toBe(2);
   });
 
   it("1件の通知から複数の種類の決済要確認：それぞれ1回。通知の文書に両方の ID", async () => {
