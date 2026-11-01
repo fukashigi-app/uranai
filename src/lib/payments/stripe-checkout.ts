@@ -47,7 +47,7 @@ export type StripeTestHooks = {
   /** 記録が必須の決済要確認を待つ上限を短くする（待つのをやめた後に保存される場合を再現する） */
   reviewRecordTimeoutMs?: number;
   /** Webhook の処理の後、処理済みの記録（finishWebhookEvent）の直前に呼ばれる（例外を投げると、処理済みにする前に止まったのと同じになる） */
-  beforeFinishWebhookEvent?: (eventId: string) => void;
+  beforeFinishWebhookEvent?: (eventId: string) => void | Promise<void>;
   /** true を返すと、処理の失敗の状態（RETRYABLE）を記録しない（状態の記録の失敗・処理中の強制終了を再現する） */
   skipFailureStateRecord?: (eventId: string) => boolean;
 };

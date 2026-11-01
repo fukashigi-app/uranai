@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decodeWebhookEventCursor, encodeWebhookEventCursor, isStaleUnfinished, stripeEventMeta, webhookErrorNameOf, webhookEventStateOf } from "@/lib/payments/webhook-event-state";
+import { decideWebhookLease, decodeWebhookEventCursor, encodeWebhookEventCursor, WEBHOOK_LEASE_TTL_MS, isStaleUnfinished, stripeEventMeta, webhookErrorNameOf, webhookEventStateOf } from "@/lib/payments/webhook-event-state";
 
 // Webhook の通知の処理状態の規則（Firestore・Stripe には接続しない）
 describe("webhookEventStateOf：記録の状態（以前の記録との互換）", () => {
@@ -75,5 +75,30 @@ describe("一覧の続きの位置（カーソル）", () => {
     for (const bad of [undefined, null, "", "not-base64!", enc({}), enc([1, 2]), enc([-1, 0, "a"]), enc([1, 1_000_000_000, "a"]), enc([1.5, 0, "a"]), enc([1, 0, "a b"]), enc([1, 0, ""]), "a".repeat(601)]) {
       expect(decodeWebhookEventCursor(bad)).toBeNull();
     }
+  });
+});
+
+describe("decideWebhookLease：通知の処理権を取れるか", () => {
+  const now = new Date("2026-10-31T03:00:00.000Z");
+  const at = (ms: number) => new Date(now.getTime() + ms);
+  it("処理済みは processed（処理権に関係なく）", () => {
+    expect(decideWebhookLease({ exists: true, processedAt: new Date(), leaseOwner: "a", leaseExpiresAt: at(60_000) }, now)).toBe("processed");
+  });
+  it("記録が無い・以前の形（処理権の項目なし）・解放済みは acquire", () => {
+    expect(decideWebhookLease({ exists: false }, now)).toBe("acquire");
+    expect(decideWebhookLease({ exists: true, processedAt: null }, now)).toBe("acquire");
+    expect(decideWebhookLease({ exists: true, processedAt: null, leaseOwner: null, leaseExpiresAt: null }, now)).toBe("acquire");
+  });
+  it("期限内は busy、期限ちょうど・期限後は acquire（境界）", () => {
+    expect(decideWebhookLease({ exists: true, processedAt: null, leaseOwner: "a", leaseExpiresAt: at(1) }, now)).toBe("busy");
+    expect(decideWebhookLease({ exists: true, processedAt: null, leaseOwner: "a", leaseExpiresAt: at(0) }, now)).toBe("acquire");
+    expect(decideWebhookLease({ exists: true, processedAt: null, leaseOwner: "a", leaseExpiresAt: at(-1) }, now)).toBe("acquire");
+  });
+  it("期限の値が壊れている処理権は取れる（止まったままにしない）", () => {
+    expect(decideWebhookLease({ exists: true, processedAt: null, leaseOwner: "a", leaseExpiresAt: null }, now)).toBe("acquire");
+    expect(decideWebhookLease({ exists: true, processedAt: null, leaseOwner: "a", leaseExpiresAt: new Date("x") }, now)).toBe("acquire");
+  });
+  it("期限は関数の実行時間の上限（Fluid Compute の既定 300 秒）より長い", () => {
+    expect(WEBHOOK_LEASE_TTL_MS).toBeGreaterThan(300_000);
   });
 });

@@ -2,7 +2,7 @@ import "server-only";
 import type Stripe from "stripe";
 import type { StripeRuntime } from "./stripe-checkout";
 import { closeStripeCheckout, confirmStripeCheckout, refreshStripeFee, syncStripeDispute, syncStripeRefunds } from "./stripe-confirm";
-import { beginWebhookEvent, finishWebhookEvent, recordWebhookEventFailure } from "@/lib/firestore/payments";
+import { acquireWebhookEventLease, finishWebhookEventWithLease, recordWebhookEventFailure } from "@/lib/firestore/payments";
 import { stripeEventMeta, webhookErrorNameOf } from "./webhook-event-state";
 import { recordPaymentReview } from "@/lib/firestore/payment-reviews";
 import { recordPaymentAlert } from "@/lib/firestore/payment-alerts";
@@ -14,7 +14,10 @@ import { alertKindForWebhookEvent, alertModeOf, hourBucket, newThrottleState, th
  *  2) 通知の livemode がモードと一致しなければ拒否（テストの環境に本番の通知、本番の環境にテストの通知を受け付けない）。
  *     署名が正しい通知だけ、運営が気付けるよう決済要確認に記録する。署名が不正な通知は何も記録しない
  *  3) 通知の ID ごとに処理済みを記録し、重複・再送は1回だけ処理する（webhookEvents）。途中で止まった通知は再送で処理し直す。
- *     処理の状態（RECEIVED→PROCESSED、失敗は RETRYABLE）・回数・最後のエラーの名前・対象の ID も記録する（webhook-event-state.ts）
+ *     処理の状態（RECEIVED→PROCESSED、失敗は RETRYABLE）・回数・最後のエラーの名前・対象の ID も記録する（webhook-event-state.ts）。
+ *     処理は処理権（lease：処理ごとのランダムな値と期限）を取ってから始める。同じ通知を別の処理が期限内に処理中なら、処理せずに
+ *     409 を返す（処理済みにしない。Stripe が後で再送し、その時には処理済みなら 200、処理が止まっていれば期限切れの後に処理し直す）。
+ *     完了・失敗の記録は処理権を持つ処理だけが書く（期限切れの後に古い処理が終わっても、新しい処理の状態を上書きしない）
  *  4) 通知の中身は信用せず、Stripe API から取り直して処理する（stripe-confirm.ts。こちらもモードを照合する）
  * 処理に失敗したら 500 を返して Stripe に再送させる。関係ない通知は 200 で受け流す。
  */
@@ -47,18 +50,26 @@ export async function handleStripeWebhook(rawBody: string, signature: string | n
     return { status: 400, body: rt.mode === "live" ? "Test events are not accepted" : "Live events are not accepted" };
   }
 
-  if (!(await beginWebhookEvent("stripe", event.id, event.type, stripeEventMeta(event)))) {
-    return { status: 200, body: { received: true, duplicate: true } };
+  // 処理権の取得に失敗したら例外（今までどおり。route が 500 を返し、Stripe が再送する）
+  const lease = await acquireWebhookEventLease("stripe", event.id, event.type, stripeEventMeta(event));
+  if (lease.status === "processed") return { status: 200, body: { received: true, duplicate: true } };
+  if (lease.status === "busy") {
+    // 別の処理が処理中。処理済みにはしない（2xx を返すと Stripe は再送しない。処理中の処理が止まっていたら取りこぼす）
+    console.warn("[stripe-webhook] event is being processed by another delivery", { eventId: event.id, type: event.type });
+    return { status: 409, body: "Event is being processed" };
   }
   try {
     const outcome = await handle(event, rt);
-    rt.testHooks?.beforeFinishWebhookEvent?.(event.id);
-    await finishWebhookEvent("stripe", event.id);
+    await rt.testHooks?.beforeFinishWebhookEvent?.(event.id);
+    const finished = await finishWebhookEventWithLease("stripe", event.id, lease.token);
+    // 処理権を失っていた（期限切れの後に別の処理が取り直した）：処理済みにせず 500（新しい処理か Stripe の再送で処理済みにする。反映は冪等）
+    if (finished === "lease_lost") throw Object.assign(new Error("webhook event lease was taken over by another delivery"), { name: "WebhookLeaseLost" });
     return { status: 200, body: { received: true, outcome } };
   } catch (e) {
     console.error("[stripe-webhook] processing failed", { eventId: event.id, type: event.type, error: (e as Error).name });
-    // 処理済みにしない（processedAt を書かない）。状態を RETRYABLE にする（記録できなくても応答は変えない。RECEIVED のまま残る）
-    if (!rt.testHooks?.skipFailureStateRecord?.(event.id)) await recordWebhookEventFailure("stripe", event.id, webhookErrorNameOf(e));
+    // 処理済みにしない（processedAt を書かない）。処理権を持っていれば RETRYABLE にして処理権を外す（記録できなくても応答は変えない。
+    // RECEIVED のまま残り、処理権は期限で切れる）。処理権を失っていれば何も書かない
+    if (!rt.testHooks?.skipFailureStateRecord?.(event.id)) await recordWebhookEventFailure("stripe", event.id, webhookErrorNameOf(e), lease.token);
     // 署名を確認できた通知の処理の失敗（Stripe が再送する）。通知ごとに1件（再送は回数だけ増える）
     await recordPaymentAlert({ kind: alertKindForWebhookEvent(event.type), objectType: "event", objectId: event.id, eventType: event.type, mode: alertModeOf(event.livemode), errorName: (e as Error)?.name ?? null });
     return { status: 500, body: "error" };

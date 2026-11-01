@@ -95,7 +95,7 @@ async function main() {
     const p = await refundedBeforeConfirm(rt, code);
     const e = refundEv(p);
     const rs = await Promise.all([deliver(rt, e), deliver(rt, e), deliver(rt, e)]);
-    for (const [i, r] of rs.entries()) if (r.status === 500) assert.equal((await deliver(rt, e)).status, 200, `${i}: 再送で記録できません`);
+    for (const [i, r] of rs.entries()) if (r.status === 500 || r.status === 409) assert.equal((await deliver(rt, e)).status, 200, `${i}: 再送で記録できません`); // 409：処理中の同じ通知（処理権を取れない）
     assert.equal((await reviewDoc(tnfId(p)))?.occurrences, 1, "同時の同じ通知で回数が増えました");
     assert.deepEqual((await eventDoc(e.id))?.recordedReviewIds, [tnfId(p)]);
     // 処理の開始を待たずに、同じ通知の記録を3件同時に書く（記録の書き込みどうしの競合そのもの）

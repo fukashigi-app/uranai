@@ -86,3 +86,29 @@ export function decodeWebhookEventCursor(s: unknown): WebhookEventCursor | null 
     return null;
   }
 }
+
+/**
+ * Webhook の通知の処理権（lease）。同じ通知が同時に届いても、原則として1つの処理だけが進むようにする。
+ * 処理権は webhookEvents の leaseOwner（処理ごとのランダムな値）と leaseExpiresAt（期限）で表し、Firestore のトランザクションで取る。
+ *  - 期限は WEBHOOK_LEASE_TTL_MS。関数の実行時間の上限（maxDuration は未設定。Fluid Compute の既定は300秒、未確認）より長くする。
+ *    期限を過ぎても古い処理が動いている可能性はあるが、反映の処理はすべて冪等なので、重なってもデータは二重にならない
+ *  - 処理済み（processedAt）の判定は今までどおり。処理権はその前の、処理を始めてよいかの判定だけに使う
+ *  - replayLeaseUntil（将来の復旧用に予約した項目）は使わない（null のまま）
+ */
+export const WEBHOOK_LEASE_TTL_MS = 6 * 60 * 1000;
+
+export type WebhookLeaseDecision = "processed" | "busy" | "acquire";
+
+/**
+ * 処理権を取れるか（読み取った記録と今の時刻だけで判定する）。
+ *  processed … 処理済み（processedAt あり）。処理しない
+ *  busy      … 別の処理が期限内の処理権を持っている。処理しない（Stripe には 2xx 以外を返して、後で再送させる）
+ *  acquire   … 処理権を取ってよい（記録が無い・以前の形で処理権の項目が無い・期限切れ・失敗で解放済み）
+ * 期限ちょうど（今 ≧ 期限）は期限切れとして扱う。期限の値が壊れている場合は、取ってよい（処理が止まったままにしない）。
+ */
+export function decideWebhookLease(d: { exists: boolean; processedAt?: unknown; leaseOwner?: unknown; leaseExpiresAt?: Date | null }, now: Date): WebhookLeaseDecision {
+  if (d.exists && d.processedAt) return "processed";
+  if (!d.exists || typeof d.leaseOwner !== "string" || !d.leaseOwner) return "acquire";
+  if (!(d.leaseExpiresAt instanceof Date) || Number.isNaN(d.leaseExpiresAt.getTime())) return "acquire";
+  return now.getTime() < d.leaseExpiresAt.getTime() ? "busy" : "acquire";
+}

@@ -146,8 +146,9 @@ async function main() {
     const results = await Promise.all(evs.map((e) => deliver(rt, e)));
     // 同じ記録への同時の書き込みが重なると、記録の待ち時間の上限で 500 になることがある（処理済みにならない）。Stripe と同じく再送する
     for (const [i, r] of results.entries()) {
-      assert.ok(r.status === 200 || r.status === 500, `想定外の応答 ${r.status}`);
-      if (r.status === 500) assert.equal((await deliver(rt, evs[i])).status, 200, "再送で記録できません");
+      // 409 は処理中の同じ通知（処理権を取れない。処理済みにしない）。どちらも Stripe と同じく再送する
+      assert.ok(r.status === 200 || r.status === 500 || r.status === 409, `想定外の応答 ${r.status}`);
+      if (r.status !== 200) assert.equal((await deliver(rt, evs[i])).status, 200, "再送で記録できません");
     }
     for (const e of evs) assert.ok((await eventDoc(e.id))?.processedAt, "通知が処理済みになっていません");
     assert.equal(await reviewCount(p.charge), 1, "決済要確認の記録が重複しました");

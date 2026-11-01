@@ -73,7 +73,7 @@ async function allUnfinished(staleMs: number) {
   }
 }
 
-const ALLOWED = new Set(["provider", "eventId", "type", "processedAt", "createdAt", "state", "attempts", "lastAttemptAt", "lastError", "replayLeaseUntil", "objectId", "chargeId", "livemode", "eventCreatedAt", "recordedReviewIds"]);
+const ALLOWED = new Set(["provider", "eventId", "type", "processedAt", "createdAt", "state", "attempts", "lastAttemptAt", "lastError", "replayLeaseUntil", "objectId", "chargeId", "livemode", "eventCreatedAt", "recordedReviewIds", "leaseOwner", "leaseExpiresAt"]);
 function assertNoBody(d: Record<string, unknown>, at: string) {
   for (const k of Object.keys(d)) assert.ok(ALLOWED.has(k), `${at}: webhookEvents に想定外の項目 ${k}`);
   assert.doesNotMatch(JSON.stringify(d), /buyer@example\.com|購入者|whsec_|sk_(live|test)_|"card"|last4/i, `${at}: 通知の本文・個人情報・秘密情報が保存されています`);
@@ -132,12 +132,14 @@ async function main() {
     const p = await paidOnly(rt, code);
     const e = completedEv(p);
     const rs = await Promise.all([deliver(rt, e), deliver(rt, e), deliver(rt, e)]);
-    for (const r of rs) assert.equal(r.status, 200);
+    // 処理中の同じ通知は 409（処理権を取れない）。Stripe と同じく後で再送すると処理済み（200）
+    for (const r of rs) assert.ok(r.status === 200 || r.status === 409, `想定外の応答 ${r.status}`);
+    if (rs.some((r) => r.status === 409)) assert.deepEqual((await deliver(rt, e)).body, { received: true, duplicate: true });
     const d = (await evDoc(e.id))!;
     assert.equal(d.state, "PROCESSED");
-    assert.ok(d.attempts >= 1 && d.attempts <= 3, `回数 ${d.attempts}`);
+    assert.equal(d.attempts, 1, `処理権を取った回数 ${d.attempts}（処理中の同じ通知は処理権を取れない）`);
     assert.equal((await fsdb().collection(C.transactions).where("stripeCheckoutSessionId", "==", p.sessionId).get()).size, 1, "決済記録が二重に作られました");
-    step(`同時の同じ通知×3：決済記録は1件、最後は PROCESSED（回数 ${d.attempts}：処理済みになる前に始めた分だけ）`);
+    step(`同時の同じ通知×3：決済記録は1件、最後は PROCESSED・処理権を取った回数1（409 は ${rs.filter((r) => r.status === 409).length} 件で再送は処理済み）`);
   }
 
   // ================= 3. 一時的な失敗（返金）：RETRYABLE・処理済みにしない → 再送で PROCESSED =================
@@ -194,11 +196,19 @@ async function main() {
     assert.deepEqual([hit!.state, hit!.objectId, hit!.type], ["RECEIVED", p.sessionId, "checkout.session.completed"]);
     assert.ok(!(await allUnfinished(3_600_000)).some((x) => x.eventId === e.id), "処理中かもしれない新しい通知を、止まったものとして扱いました");
     assert.equal((await txDoc(p.txId)).recheckState, "PENDING", "（前提）決済確定の直後に止まった");
+    // 強制終了と同じなので処理権は外れていない：期限内の再送は 409（処理済みにしない）
+    assert.ok(d.leaseOwner && d.leaseExpiresAt, "（前提）処理権が残っています");
+    const busy = await deliver(rt, e);
+    assert.equal(busy.status, 409, "期限内の処理権がある通知を処理しました");
+    assert.equal((await evDoc(e.id))!.attempts, 1, "処理権を取れなかった再送を回数に数えました");
+    // 処理権の期限が過ぎた後の再送：処理権を取り直して PROCESSED（期限が過ぎたことを、記録の期限を過去にして再現する）
+    await evRef(e.id).update({ leaseExpiresAt: new Date(Date.now() - 1000) });
     const r2 = await deliver(rt, e);
     assert.equal(r2.status, 200);
-    assert.deepEqual([(await evDoc(e.id))!.state, (await txDoc(p.txId)).recheckState], ["PROCESSED", "DONE"]);
+    const done = (await evDoc(e.id))!;
+    assert.deepEqual([done.state, done.attempts, done.leaseOwner, done.leaseExpiresAt, (await txDoc(p.txId)).recheckState], ["PROCESSED", 2, null, null, "DONE"]);
     assert.ok(!(await allUnfinished(0)).some((x) => x.eventId === e.id));
-    step("失敗の状態も記録できない（強制終了と同じ）：RECEIVED のまま残り、止まった通知として見つけられる（新しいものは除く）→ 再送で PROCESSED・再確認も完了");
+    step("失敗の状態も記録できない（強制終了と同じ）：RECEIVED のまま残り止まった通知として見つけられる。期限内の再送は 409、期限の後の再送で処理権を取り直して PROCESSED・再確認も完了");
   }
 
   // ================= 6. 以前の記録（state などの項目が無い）との互換 =================

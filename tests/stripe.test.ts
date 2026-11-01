@@ -180,14 +180,18 @@ describe("返金の状態（処理中・成功・一部・失敗）", () => {
 });
 
 // ---- Webhook（署名・重複・振り分け）。Firestore と確定処理は模擬 ----
-const hooks = vi.hoisted(() => ({ begin: true, calls: [] as string[], fail: false }));
+const hooks = vi.hoisted(() => ({ begin: true, lease: "acquired" as "acquired" | "busy" | "processed" | "error", finish: "finished" as "finished" | "already_processed" | "lease_lost", calls: [] as string[], fail: false }));
 vi.mock("@/lib/firestore/payments", () => ({
-  beginWebhookEvent: async (_p: string, id: string) => {
+  // begin=false は処理済み（以前のテストの書き方）。lease で処理中（busy）も再現する
+  acquireWebhookEventLease: async (_p: string, id: string) => {
     hooks.calls.push(`begin:${id}`);
-    return hooks.begin;
+    if (!hooks.begin || hooks.lease === "processed") return { status: "processed" };
+    if (hooks.lease === "busy") return { status: "busy", leaseExpiresAt: new Date() };
+    if (hooks.lease === "error") throw Object.assign(new Error("unavailable"), { name: "FirebaseError" });
+    return { status: "acquired", token: "lease_test", attempts: 1 };
   },
-  finishWebhookEvent: async (_p: string, id: string) => void hooks.calls.push(`finish:${id}`),
-  recordWebhookEventFailure: async (_p: string, id: string, errorName: string) => (hooks.calls.push(`fail:${id}:${errorName}`), true),
+  finishWebhookEventWithLease: async (_p: string, id: string, token: string) => (hooks.calls.push(token === "lease_test" ? `finish:${id}` : `finish-wrong-token:${id}`), hooks.finish),
+  recordWebhookEventFailure: async (_p: string, id: string, errorName: string, token?: string) => (hooks.calls.push(`fail:${id}:${errorName}:${token}`), true),
 }));
 vi.mock("@/lib/payments/stripe-confirm", () => ({
   confirmStripeCheckout: async (id: string) => {
@@ -213,6 +217,8 @@ describe("Stripe の Webhook", () => {
   beforeEach(() => {
     for (const [k, v] of Object.entries(LOCAL)) vi.stubEnv(k, v);
     hooks.begin = true;
+    hooks.lease = "acquired";
+    hooks.finish = "finished";
     hooks.calls = [];
     hooks.fail = false;
     vi.resetModules();
@@ -234,6 +240,30 @@ describe("Stripe の Webhook", () => {
     expect(hooks.calls).toEqual([]);
   });
 
+  it("別の処理が処理中（処理権を取れない）なら 409。処理しない・処理済みにしない（Stripe が後で再送する）", async () => {
+    hooks.lease = "busy";
+    const r = await post(ev("checkout.session.completed", { id: "cs_test_abc" }));
+    expect(r.status).toBe(409);
+    expect(hooks.calls).toEqual(["begin:evt_test_checkout.session.completed"]);
+  });
+
+  it("処理の後に処理権を失っていた（別の処理が取り直した）なら 500。失敗の記録は自分の処理権の値で書こうとする（記録側で拒否される）", async () => {
+    hooks.finish = "lease_lost";
+    expect((await post(ev("checkout.session.completed", { id: "cs_test_abc" }))).status).toBe(500);
+    expect(hooks.calls).toContain("fail:evt_test_checkout.session.completed:WebhookLeaseLost:lease_test");
+  });
+
+  it("処理権の取得で Firestore が失敗したら例外（route は 500。処理しない・処理済みにしない）", async () => {
+    hooks.lease = "error";
+    await expect(post(ev("checkout.session.completed", { id: "cs_test_abc" }))).rejects.toMatchObject({ name: "FirebaseError" });
+    expect(hooks.calls).toEqual(["begin:evt_test_checkout.session.completed"]);
+  });
+
+  it("ほかの処理が先に完了していた（already_processed）なら 200", async () => {
+    hooks.finish = "already_processed";
+    expect((await post(ev("checkout.session.completed", { id: "cs_test_abc" }))).status).toBe(200);
+  });
+
   it("重複・再送は処理済みなら何もしない", async () => {
     hooks.begin = false;
     const r = await post(ev("checkout.session.completed", { id: "cs_test_abc" }));
@@ -246,7 +276,7 @@ describe("Stripe の Webhook", () => {
     hooks.fail = true;
     expect((await post(ev("checkout.session.completed", { id: "cs_test_abc" }))).status).toBe(500);
     expect(hooks.calls).not.toContain("finish:evt_test_checkout.session.completed");
-    expect(hooks.calls.some((c) => c.startsWith("fail:evt_test_checkout.session.completed:"))).toBe(true); // 状態を RETRYABLE に
+    expect(hooks.calls.some((c) => c.startsWith("fail:evt_test_checkout.session.completed:") && c.endsWith(":lease_test"))).toBe(true); // 処理権の値で RETRYABLE に
   });
 
   it("期限切れ・失敗・返金・手数料の確定・関係ない通知の振り分け", async () => {

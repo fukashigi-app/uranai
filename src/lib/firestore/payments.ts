@@ -1,5 +1,5 @@
 import "server-only";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { FieldPath, FieldValue, Timestamp, type DocumentData } from "firebase-admin/firestore";
 import type { checkouts, FortuneTypeValue } from "@/lib/db/schema";
 import { CHECKOUT_TTL_MS, CURRENCY, defaultFeeRateBps, FORTUNE_SESSION_TTL_MS, PRICE_JPY, STORE_SHARE_BPS } from "@/config/pricing";
@@ -19,7 +19,7 @@ import { reconcileTransactionInTx, settlementRefForTx } from "./settlement-adjus
 import { paymentReviewRef, recordPaymentReview, recordPaymentReviewInTx, type PaymentReviewInput } from "./payment-reviews";
 import { isSalesPayment } from "@/lib/payments/kind";
 import { findStoreByCode } from "./stores";
-import { decodeWebhookEventCursor, encodeWebhookEventCursor, isStaleUnfinished, webhookEventStateOf, type StripeEventMeta, type WebhookEventState } from "@/lib/payments/webhook-event-state";
+import { decideWebhookLease, decodeWebhookEventCursor, encodeWebhookEventCursor, isStaleUnfinished, WEBHOOK_LEASE_TTL_MS, webhookEventStateOf, type StripeEventMeta, type WebhookEventState } from "@/lib/payments/webhook-event-state";
 
 /**
  * 決済（Firestore 版）。ロジックは PostgreSQL 版（services/checkout.ts・payments/confirm.ts）と同じ。
@@ -366,9 +366,59 @@ export async function beginWebhookEvent(provider: ProviderId | "stripe", eventId
   });
 }
 
-/** 処理の完了。processedAt と state=PROCESSED を同じ書き込みで記録する（両者が食い違わない） */
+export type WebhookLeaseResult = { status: "acquired"; token: string; attempts: number } | { status: "processed" } | { status: "busy"; leaseExpiresAt: Date };
+
+/**
+ * 通知の処理権（lease）を取る（Stripe の Webhook 用。判定は decideWebhookLease）。
+ *  - 取れたら：leaseOwner＝処理ごとのランダムな値、leaseExpiresAt＝今＋WEBHOOK_LEASE_TTL_MS、state=RECEIVED、attempts（処理権を取った回数）+1。
+ *    記録が無ければ beginWebhookEvent と同じ項目で作る。以前の形の記録には、無い項目（通知の情報）だけを足す
+ *  - 処理済み・別の処理が期限内：何も書かない
+ * 記録に失敗したら例外（呼び出し側は処理を始めない＝Webhook は 500、Stripe が再送する）。
+ */
+export async function acquireWebhookEventLease(provider: ProviderId | "stripe", eventId: string, type: string, meta?: StripeEventMeta, opts: { now?: Date } = {}): Promise<WebhookLeaseResult> {
+  const ref = fsdb().collection(C.webhookEvents).doc(safeId(provider, eventId));
+  return fsdb().runTransaction(async (tx): Promise<WebhookLeaseResult> => {
+    const cur = await tx.get(ref);
+    const now = opts.now ?? new Date();
+    const leaseExpiresAt = toDate(cur.get("leaseExpiresAt"));
+    const d = decideWebhookLease({ exists: cur.exists, processedAt: cur.get("processedAt"), leaseOwner: cur.get("leaseOwner"), leaseExpiresAt }, now);
+    if (d === "processed") return { status: "processed" };
+    if (d === "busy") return { status: "busy", leaseExpiresAt: leaseExpiresAt! };
+    const token = randomBytes(16).toString("hex");
+    const lease = { leaseOwner: token, leaseExpiresAt: new Date(now.getTime() + WEBHOOK_LEASE_TTL_MS) };
+    const metaFields = meta ? { objectId: meta.objectId, chargeId: meta.chargeId, livemode: meta.livemode, eventCreatedAt: meta.eventCreatedAt } : {};
+    if (!cur.exists) {
+      tx.create(ref, { provider, eventId, type, processedAt: null, createdAt: FieldValue.serverTimestamp(), state: "RECEIVED", attempts: 1, lastAttemptAt: now, lastError: null, replayLeaseUntil: null, ...metaFields, ...lease });
+      return { status: "acquired", token, attempts: 1 };
+    }
+    const missing = Object.fromEntries(Object.entries(metaFields).filter(([k]) => cur.get(k) === undefined));
+    const attempts = (typeof cur.get("attempts") === "number" ? cur.get("attempts") : 0) + 1;
+    tx.update(ref, { ...missing, state: "RECEIVED", attempts, lastAttemptAt: now, ...(cur.get("replayLeaseUntil") === undefined ? { replayLeaseUntil: null } : {}), ...lease });
+    return { status: "acquired", token, attempts };
+  });
+}
+
+/** 処理の完了。processedAt と state=PROCESSED を同じ書き込みで記録する（両者が食い違わない）。処理権を使わない経路（疑似決済）用 */
 export async function finishWebhookEvent(provider: ProviderId | "stripe", eventId: string): Promise<void> {
   await fsdb().collection(C.webhookEvents).doc(safeId(provider, eventId)).update({ processedAt: FieldValue.serverTimestamp(), state: "PROCESSED" });
+}
+
+/**
+ * 処理権を持つ処理の完了（Stripe の Webhook 用）。処理権の値（token）が記録と一致するときだけ、processedAt・state=PROCESSED を書き、
+ * 処理権を外す（同じ書き込み）。期限を過ぎていても、ほかの処理が処理権を取り直していなければ完了してよい。
+ *  finished         … 完了を記録した
+ *  already_processed … ほかの処理が先に完了した（何も書かない）
+ *  lease_lost       … ほかの処理が処理権を取り直した（何も書かない。新しい処理の状態を上書きしない）
+ */
+export async function finishWebhookEventWithLease(provider: ProviderId | "stripe", eventId: string, token: string): Promise<"finished" | "already_processed" | "lease_lost"> {
+  const ref = fsdb().collection(C.webhookEvents).doc(safeId(provider, eventId));
+  return fsdb().runTransaction(async (tx) => {
+    const cur = await tx.get(ref);
+    if (cur.exists && cur.get("processedAt")) return "already_processed";
+    if (!cur.exists || cur.get("leaseOwner") !== token) return "lease_lost";
+    tx.update(ref, { processedAt: FieldValue.serverTimestamp(), state: "PROCESSED", leaseOwner: null, leaseExpiresAt: null });
+    return "finished";
+  });
 }
 
 /**
@@ -376,13 +426,16 @@ export async function finishWebhookEvent(provider: ProviderId | "stripe", eventI
  * 応答（500）を変えないよう、記録に失敗しても例外にしない（その場合は RECEIVED のまま残り、lastAttemptAt が古くなるので
  * 「途中で止まった通知」として見つけられる）。FAILED_PERMANENT は、安全に判定できる場合が無いので今は使わない。
  */
-export async function recordWebhookEventFailure(provider: ProviderId | "stripe", eventId: string, errorName: string): Promise<boolean> {
+export async function recordWebhookEventFailure(provider: ProviderId | "stripe", eventId: string, errorName: string, leaseToken?: string): Promise<boolean> {
   const ref = fsdb().collection(C.webhookEvents).doc(safeId(provider, eventId));
   try {
     return await fsdb().runTransaction(async (tx) => {
       const cur = await tx.get(ref);
       if (!cur.exists || cur.get("processedAt")) return false;
-      tx.update(ref, { state: "RETRYABLE", lastError: /^[\w.\-]{1,60}$/.test(errorName) ? errorName : "Error" });
+      // 処理権の値を渡されたら、一致するときだけ書く（期限切れの後の古い処理が、新しい処理の状態を上書きしない）。
+      // 書くときは処理権を外す（失敗した通知は、Stripe の再送ですぐに処理し直せる）
+      if (leaseToken !== undefined && cur.get("leaseOwner") !== leaseToken) return false;
+      tx.update(ref, { state: "RETRYABLE", lastError: /^[\w.\-]{1,60}$/.test(errorName) ? errorName : "Error", ...(leaseToken !== undefined ? { leaseOwner: null, leaseExpiresAt: null } : {}) });
       return true;
     });
   } catch (e) {

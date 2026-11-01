@@ -211,7 +211,9 @@ async function main() {
       deliver(rt, refundEv(p)),
       deliver(rt, refundEv(p)),
     ]);
-    for (const r of results) if ("body" in r) assert.equal(r.status, 200, `同時実行の Webhook が失敗：${JSON.stringify(r.body)}`);
+    // 同じ通知が処理中なら 409（処理権を取れない。処理済みにしない）→ Stripe と同じく後で再送する
+    for (const r of results) if ("body" in r) assert.ok(r.status === 200 || r.status === 409, `同時実行の Webhook が失敗：${r.status} ${JSON.stringify(r.body)}`);
+    if (results.some((r) => "body" in r && r.status === 409)) assert.equal((await deliver(rt, e)).status, 200);
     const s = await stateOf(p);
     assert.equal(s.t.get("recheckState"), "DONE");
     assert.equal(s.t.get("amountRefunded"), 100, "返金が二重に反映されました");

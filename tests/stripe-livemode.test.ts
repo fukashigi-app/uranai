@@ -100,8 +100,9 @@ describe("Stripe との接続（StripeRuntime）：アプリはテストだけ�
 // ---- Webhook：通知の livemode とモードの一致（Firestore と確定処理は模擬） ----
 const calls = vi.hoisted(() => ({ list: [] as string[] }));
 vi.mock("@/lib/firestore/payments", () => ({
-  beginWebhookEvent: async () => true,
-  finishWebhookEvent: async () => undefined,
+  acquireWebhookEventLease: async () => ({ status: "acquired", token: "lease_test", attempts: 1 }),
+  finishWebhookEventWithLease: async () => "finished",
+  recordWebhookEventFailure: async () => true,
 }));
 vi.mock("@/lib/payments/stripe-confirm", () => ({
   confirmStripeCheckout: async (id: string, rt: { mode: string }) => (calls.list.push(`confirm:${id}:${rt.mode}`), { status: "confirmed", transactionId: "stripe_pi" }),
