@@ -237,8 +237,14 @@ export class StripeEnvironmentMismatchError extends Error {
  * expectedPaymentIntentId … 先着の返金・異議申し立ての通知から確定するとき（confirmBeforeSync）に、通知の対象の PaymentIntent を渡す。
  * Session の PaymentIntent が違えば、検証・返金と異議申し立ての読み取り・書き込みの前に rejected（payment_intent_mismatch）を返す
  * （通知の対象ではない別の決済を確定しない。Session が未払いでも「確定待ち」にせず不一致として扱う）。通常の確定では渡さない
+ * requireExistingTransaction … 決済記録の再確認の自動の回収（recheck-recovery.ts）から呼ぶとき。決済記録が無ければ新しく作らず、
+ * rejected（transaction_missing）を返す（回収は決済記録がある決済だけを扱い、記録の作成・権利の付与はしない）
  */
-export async function confirmStripeCheckout(sessionId: string, rt?: StripeRuntime, opts: { expectedPaymentIntentId?: string } = {}): Promise<StripeConfirmOutcome> {
+export async function confirmStripeCheckout(
+  sessionId: string,
+  rt?: StripeRuntime,
+  opts: { expectedPaymentIntentId?: string; requireExistingTransaction?: boolean } = {},
+): Promise<StripeConfirmOutcome> {
   const r0 = rt ?? stripeRuntime();
   if (!isStripeSessionId(sessionId, r0.mode)) return { status: "rejected", reason: "invalid_session_id" };
   const session = await retrieveStripeSession(sessionId, r0);
@@ -287,6 +293,8 @@ export async function confirmStripeCheckout(sessionId: string, rt?: StripeRuntim
         if (coSnap.get("status") === "REFUNDED") return { status: "refunded", transactionId: txId, refundReason: refundReasonOf(coSnap.get("refundReason")) } as const;
         return { status: "duplicate", transactionId: txId } as const;
       }
+      // 自動の回収：決済記録が無いのは異常（作成しない）
+      if (opts.requireExistingTransaction) return { status: "rejected", reason: "transaction_missing" } as const;
       if (!coSnap.exists) return { status: "rejected", reason: "unknown_checkout" } as const;
       const co = coSnap.data()!;
       if (co.provider !== STRIPE_PROVIDER) return { status: "rejected", reason: "provider_mismatch" } as const;

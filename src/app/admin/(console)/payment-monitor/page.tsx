@@ -7,6 +7,7 @@ import { isFirestore } from "@/lib/data-provider";
 import { formatDateTimeJa } from "@/lib/time";
 import { formatYen } from "@/lib/money";
 import { ALERT_MODE_LABEL, API_5XX_ALERT_THRESHOLD, monitorHealth, PAYMENT_ALERT_LABEL, STUCK_PROCESSING_MINUTES, type AlertMode } from "@/lib/payments/monitor-rules";
+import { PENDING_RECHECK_STATUS_LABEL } from "@/lib/payments/recheck-recovery-rules";
 import { resolvePaymentAlertAction, runPaymentMonitorAction } from "../../actions";
 import { ALERT_RESOLVED_NOTICE, LIST_NOTICE } from "@/lib/admin/list-notices";
 
@@ -129,6 +130,11 @@ export default async function PaymentMonitorPage(props: PageProps<"/admin/paymen
                 {PAYMENT_ALERT_LABEL[r.kind] ?? r.kind}
                 {r.kind === "payment_api_5xx" && r.occurrences >= API_5XX_ALERT_THRESHOLD ? <span className="block text-danger">{`多発（1時間に${API_5XX_ALERT_THRESHOLD}回以上）`}</span> : null}
                 {r.eventType ? <span className="block text-ink-faint">{r.eventType}</span> : null}
+                {r.kind === "recheck_pending" && r.recheckStatus ? (
+                  <span data-recheck-status={r.recheckStatus} className="block text-gold-200">
+                    {PENDING_RECHECK_STATUS_LABEL[r.recheckStatus]}
+                  </span>
+                ) : null}
                 {r.errorName ? <span className="block text-ink-faint">{`エラー：${r.errorName}`}</span> : null}
                 {r.httpStatus ? <span className="block text-ink-faint">{`HTTP ${r.httpStatus}`}</span> : null}
                 {r.amount !== null && r.amount !== undefined ? <span className="block text-ink-faint">{`差額 ${formatYen(r.amount)}`}</span> : null}
@@ -146,6 +152,11 @@ export default async function PaymentMonitorPage(props: PageProps<"/admin/paymen
                 {r.kind === "payment_review_record_failed" ? (
                   <Link href="/admin/payment-reviews" className="block text-gold-200 hover:underline">
                     決済要確認を開く
+                  </Link>
+                ) : null}
+                {r.kind === "recheck_pending" ? (
+                  <Link href="/admin/webhook-events#pending-rechecks" className="block text-gold-200 hover:underline">
+                    Webhook の復旧（再確認）を開く
                   </Link>
                 ) : null}
               </td>

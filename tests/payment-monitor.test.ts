@@ -107,6 +107,20 @@ describe("決済監視の記録：重複をまとめる・確認済みからの�
 
   const path = (kind: Parameters<typeof paymentAlertId>[0], objectId: string) => `paymentAlerts/${paymentAlertId(kind, objectId)}`;
 
+  it("決済の確定の後の再確認（recheck_pending）：決済記録ごとに1件にまとめ、区別（recheckStatus）は決まった値だけ保存する", async () => {
+    const input = { kind: "recheck_pending" as const, objectType: "transaction" as const, objectId: "stripe_pi_r1", transactionId: "stripe_pi_r1", mode: "test" as const, recheckStatus: "exhausted" as const };
+    expect(await recordPaymentAlert(input)).toBe(true);
+    expect(await recordPaymentAlert({ ...input, recheckStatus: "rejected" })).toBe(true);
+    const p = path("recheck_pending", "stripe_pi_r1");
+    expect(store.docs.size).toBe(1);
+    expect(store.docs.get(p)).toMatchObject({ status: "OPEN", occurrences: 2, recheckStatus: "rejected", transactionId: "stripe_pi_r1" });
+    await recordPaymentAlert({ ...input, objectId: "stripe_pi_r2", transactionId: "stripe_pi_r2", recheckStatus: "bogus" as never });
+    expect(store.docs.get(path("recheck_pending", "stripe_pi_r2"))!.recheckStatus).toBeNull();
+    // ほかの種類には recheckStatus の項目を書かない
+    await recordPaymentAlert({ kind: "webhook_processing_failed", objectType: "event", objectId: "evt_x", mode: "test", recheckStatus: "pending" });
+    expect("recheckStatus" in store.docs.get(path("webhook_processing_failed", "evt_x"))!).toBe(false);
+  });
+
   it("同じ種類・対象は1件にまとめ、回数だけ増やす。確認済みの後にまた起きたら未確認に戻す", async () => {
     const input = { kind: "webhook_processing_failed" as const, objectType: "event" as const, objectId: "evt_1", mode: "test" as const, eventType: "charge.updated", errorName: "TypeError" };
     expect(await recordPaymentAlert(input)).toBe(true);

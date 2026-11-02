@@ -5,6 +5,7 @@ import { acquireMonitorLock, markMonitorFinished, recordPaymentAlert, releaseMon
 import { countOpenPaymentReviews } from "@/lib/firestore/payment-reviews";
 import { isStripeSessionId, retrieveStripeSession, stripeRuntime, type StripeRuntime } from "./stripe-checkout";
 import { alertModeOf, hourBucket, MONITOR_LOCK_TTL_MS, MONITOR_LOOKBACK_DAYS, STUCK_PROCESSING_MINUTES, type AlertMode } from "./monitor-rules";
+import { classifyPendingRecheck } from "./recheck-recovery-rules";
 
 /**
  * 決済監視の点検（読み取り専用。決済の確定・返金・再決済などは一切しない）。運営画面の「今すぐ点検」・手動のスクリプトから実行する。
@@ -13,6 +14,8 @@ import { alertModeOf, hourBucket, MONITOR_LOCK_TTL_MS, MONITOR_LOOKBACK_DAYS, ST
  *     - Stripe との接続がない・モードの違う注文（テストの接続で本番の注文など）は照合せず「確認できなかった項目」にする
  *  3. 決済の記録・確定した注文があるのに、占い権利が無いもの（さかのぼる期間：MONITOR_LOOKBACK_DAYS 日）
  *  4. 確定済みの精算の金額と、取引に記録した支払った額の合計の食い違い
+ *  5. 決済の確定の後の再確認が終わっていない決済記録（recheckState=PENDING。作成から60分以上。さかのぼる期間の制限なし）
+ *     自動の回収の状態で区別して記録する（自動の回収の対象・上限に達した・確定の処理が拒否・試行の途中で停止）
  * 見つかった異常は決済監視（paymentAlerts）に記録する（種類・対象ごとに1件）。点検の開始・終了・結果は system/paymentMonitor に残す。
  * 一部の確認に失敗・未実施なら結果は partial（「異常なし」とは表示しない）。すべて確認できなかったら failed。
  *
@@ -38,6 +41,8 @@ export const MONITOR_LIMITS = {
   stripeLookups: 50,
   /** 期間内の取引・注文 */
   transactions: 3000,
+  /** 再確認が終わっていない（PENDING の）決済記録（期間を問わない） */
+  pendingRechecks: 500,
   checkouts: 3000,
   /** 確定済みの精算と、1つの精算の取引 */
   settlements: 300,
@@ -259,6 +264,47 @@ async function runChecks(runId: string, now: Date, opts: { rt?: StripeRuntime | 
         await alert({ kind: "paid_without_entitlement", objectType: "checkout", objectId: d.id, checkoutId: d.id, storeId: String(d.get("storeId") ?? ""), mode: modeOfCheckout(d.data()) });
       }
     }
+    return complete;
+  });
+
+  // 5. 決済の確定の後の再確認が終わっていない決済記録（期間を問わず、PENDING をすべて読む。文書の ID の順にページで読む）
+  await step("決済の確定の後の再確認", async () => {
+    const { docs, complete } = await readPaged(fsdb().collection(C.transactions).where("recheckState", "==", "PENDING"), FieldPath.documentId(), L.pendingRechecks);
+    if (!complete) over("決済の確定の後の再確認", L.pendingRechecks);
+    checks.pendingRechecks = docs.length;
+    let flagged = 0;
+    for (const d of docs) {
+      if (timeUp()) throw new TimeUp();
+      const status = classifyPendingRecheck(
+        {
+          paymentProvider: d.get("paymentProvider"),
+          recheckState: d.get("recheckState"),
+          livemode: d.get("livemode"),
+          createdAt: toDate(d.get("createdAt")),
+          recoveryAttempts: d.get("recheckRecoveryAttempts"),
+          recoveryLastAt: toDate(d.get("recheckRecoveryLastAt")),
+          recoveryLastResult: d.get("recheckRecoveryLastResult"),
+          sessionId: d.get("stripeCheckoutSessionId"),
+          paymentIntentId: d.get("stripePaymentIntentId"),
+        },
+        now,
+      );
+      if (!status) continue;
+      flagged++;
+      const errorName = d.get("recheckRecoveryLastError") ?? d.get("recheckLastError") ?? null;
+      await alert({
+        kind: "recheck_pending",
+        objectType: "transaction",
+        objectId: d.id,
+        transactionId: d.id,
+        checkoutId: typeof d.get("checkoutId") === "string" ? d.get("checkoutId") : null,
+        storeId: typeof d.get("storeId") === "string" ? d.get("storeId") : null,
+        mode: alertModeOf(d.get("livemode")),
+        errorName: typeof errorName === "string" ? errorName : null,
+        recheckStatus: status,
+      });
+    }
+    checks.pendingRechecksFlagged = flagged;
     return complete;
   });
 

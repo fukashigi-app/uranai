@@ -34,6 +34,8 @@ export type PaymentAlertInput = {
   amount?: number | null;
   /** 間引いて記録する異常（署名の不正など）：この書き込みでまとめて加算する、観測した件数 */
   observedCount?: number;
+  /** recheck_pending の区別（pending・exhausted・rejected・stalled） */
+  recheckStatus?: "pending" | "exhausted" | "rejected" | "stalled" | null;
 };
 
 export type PaymentAlertStatus = "OPEN" | "RESOLVED";
@@ -63,6 +65,7 @@ export async function recordPaymentAlert(input: PaymentAlertInput, now: Date = n
     errorName: typeof input.errorName === "string" && /^[A-Za-z0-9_]{1,60}$/.test(input.errorName) ? input.errorName : null,
     amount: Number.isSafeInteger(input.amount) ? input.amount : null,
     ...(input.observedCount !== undefined ? { sampled: true } : {}),
+    ...(input.kind === "recheck_pending" ? { recheckStatus: ["pending", "exhausted", "rejected", "stalled"].includes(String(input.recheckStatus)) ? input.recheckStatus : null } : {}),
   };
   const observed = Number.isSafeInteger(input.observedCount) && input.observedCount! > 0 ? input.observedCount! : null;
   try {
@@ -98,6 +101,7 @@ function toAlert(id: string, d: DocumentData): PaymentAlert {
     amount: typeof d.amount === "number" ? d.amount : null,
     sampled: d.sampled === true,
     observedCount: typeof d.observedCount === "number" ? d.observedCount : undefined,
+    recheckStatus: ["pending", "exhausted", "rejected", "stalled"].includes(String(d.recheckStatus)) ? d.recheckStatus : null,
     status: d.status === "RESOLVED" ? "RESOLVED" : "OPEN",
     occurrences: Number(d.occurrences ?? 1),
     firstSeenAt: toDate(d.firstSeenAt),

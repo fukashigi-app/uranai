@@ -372,3 +372,37 @@ export async function runWebhookRecoveryAction(_prev: FormState): Promise<FormSt
   const text = `対象 ${s.candidates}件のうち ${s.attempted}件を処理：処理済み ${r.recovered}件・別の環境 ${r.ignored_other_env}件・失敗 ${r.failed + r.stripe_error}件・取得できない ${r.event_unavailable}件・処理中 ${r.busy}件・処理済みだった ${r.already_processed}件`;
   return s.status === "completed" ? { ok: true, message: `${text}。` } : { message: `${text}。上限・時間の都合で残りがあります（もう一度実行してください）。` };
 }
+
+/**
+ * 決済の確定の後の再確認が終わっていない（recheckState=PENDING の）決済記録を、1件ずつ手動で再確認する（運営のログインが必要）。
+ * 既存の決済の確定の処理を、決済記録がある経路だけで呼ぶ（決済記録・占い権利を作らない。返金済み・チャージバック済みの権利・注文を戻さない）。
+ * 同じ決済記録の手動の再確認・自動の回収が実行中なら始めない。結果と実行者・前後の状態を監査ログ（transaction.recheck）に残す。
+ */
+export async function recheckTransactionAction(transactionId: string, _prev: FormState): Promise<FormState> {
+  const { actor } = await operator();
+  if (!/^stripe_pi_[A-Za-z0-9_]{1,200}$/.test(transactionId)) throw new Error("invalid id");
+  const { isFirestore } = await import("@/lib/data-provider");
+  if (!isFirestore()) return { message: "この機能は Firestore を使うときだけ利用できます。" };
+  const { stripeRuntime } = await import("@/lib/payments/stripe-checkout");
+  const { defaultManualRecheckDeps, manualRecheckTransaction } = await import("@/lib/payments/recheck-recovery");
+  const { MANUAL_RECHECK_BLOCK_LABEL, RECHECK_RECOVERY_RESULT_LABEL } = await import("@/lib/payments/recheck-recovery-rules");
+  let rt;
+  try {
+    rt = stripeRuntime();
+  } catch {
+    return { message: "Stripe の接続が設定されていないため、再確認できません（何もしていません）。" };
+  }
+  let o: Awaited<ReturnType<typeof manualRecheckTransaction>>;
+  try {
+    o = await manualRecheckTransaction(transactionId, actor, await defaultManualRecheckDeps(rt));
+  } catch (e) {
+    console.error("[admin] manual recheck failed", (e as Error)?.name);
+    return { message: "再確認を開始できませんでした（データベースに接続できない可能性）。何も変更していません。" };
+  }
+  revalidatePath("/admin/webhook-events");
+  revalidatePath("/admin/payment-monitor");
+  if (!o.started) return { message: o.reason === "missing" ? "決済記録が見つかりません（何もしていません）。" : MANUAL_RECHECK_BLOCK_LABEL[o.reason] };
+  // 完了した決済記録は一覧から消える（行のボタンの表示も消える）ので、一覧に移動して上部に結果を出す（固定の文言だけ）
+  if (o.result === "done") redirect("/admin/webhook-events?recheck=done#pending-rechecks");
+  return { message: `${RECHECK_RECOVERY_RESULT_LABEL[o.result]}${o.errorName ? `（${o.errorName}）` : ""}` };
+}

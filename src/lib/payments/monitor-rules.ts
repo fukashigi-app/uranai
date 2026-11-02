@@ -18,6 +18,7 @@ export type PaymentAlertKind =
   | "paid_without_entitlement"
   | "stripe_paid_not_confirmed"
   | "settlement_inconsistent"
+  | "recheck_pending"
   | "monitor_check_failed";
 
 export const PAYMENT_ALERT_LABEL: Record<PaymentAlertKind, string> = {
@@ -33,6 +34,7 @@ export const PAYMENT_ALERT_LABEL: Record<PaymentAlertKind, string> = {
   paid_without_entitlement: "決済の記録はあるが、占い権利が無い",
   stripe_paid_not_confirmed: "Stripe では支払い済みなのに、アプリで決済が確定していない",
   settlement_inconsistent: "確定済みの精算の金額と、取引に記録した支払った額が一致しない",
+  recheck_pending: "決済の確定の後の再確認が終わっていない（作成から60分以上。Webhook の復旧の画面で確認・再確認できます）",
   monitor_check_failed: "監視の点検の一部が失敗した",
 };
 
