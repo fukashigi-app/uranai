@@ -377,3 +377,32 @@ Vercel の Preview・Stripe の Sandbox・Firebase の `uranai-preview` で行�
 
 - 返金・チャージバックで止まった占い権利にも「占いの有効期限が切れています。」と表示される（権利が PAID でなければ、すべて同じ表示）。
   利用を止める動作は正しい。表示の文言を分けるかは別に判断する
+
+### 13.6 追加の実測：100円のカード決済と全額返金（2026-11-02・課題2の変更の後）
+
+課題2（返金・異議申し立ての通知が決済確定より先に届いたときの対策）の変更を Preview にデプロイした後に、手動で行った結果です（運営者の報告による）。
+決済・注文などの ID はここに書きません（手元の記録と Stripe・Firestore に残っています）。
+
+| 項目 | 内容 |
+| --- | --- |
+| 環境 | Vercel の Preview（`preview/stripe-verification`）・Stripe の Sandbox・Firebase の `uranai-preview` |
+| 操作 | 100円のカード決済 → Stripe の Dashboard から全額返金（新しい決済・返金はこの1件だけ） |
+| 通知の順番 | **通常の順番として記録する**（決済確定の通知より先に返金の通知が届いたことは確認していない。順序逆転の実績としては扱わない） |
+
+確認した結果（すべて期待どおり）：
+
+| 確認 | 結果 |
+| --- | --- |
+| Stripe | 100円の決済・100円の全額返金が成功。関連する通知は Webhook の送信先の画面ですべて 200 |
+| 決済記録（`transactions`） | `paymentStatus=REFUNDED`・`amountRefunded=100`・`countable=false` |
+| 注文（`checkouts`） | `status=REFUNDED`・`refundReason=refund`・`stripeLivemode=false` |
+| 占い権利（`fortuneSessions`） | `status=EXPIRED`・`suspendedByRefund=true`・`suspendedByDispute=false`・`usedAt=null` |
+| 決済要確認（`paymentReviews`） | 今回の決済の記録は無い。以前からの `transaction_not_found` の記録2件（未確認）はそのまま（削除・確認済みにする操作はしていない） |
+
+未確認の事項：
+
+- 通知の実際の到着順（`webhookEvents` の各通知の記録の時刻と、決済確定の通知の結果を照らし合わせていない）。
+  なお、占い権利に `suspendedByDispute=false` があるのは、決済記録を作った時点で返金がすでにあった場合の書き方（最初から止めた状態で作る）で、
+  決済の確定が返金の後だったことを示す。ただし、返金の通知による確定（順序逆転）か、返金の後に届いた決済確定の通知・戻り先による確定かは区別できていない
+- 返金の通知の再送による重複の確認、異議申し立ての先着、本当の異常（注文が無いなど）の実環境での記録
+  （いずれもローカルの自動テスト `npm run e2e:stripe-early-sync` などで確認済み。実環境では未確認）

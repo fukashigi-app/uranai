@@ -267,6 +267,40 @@ async function main() {
     step(`同時実行（同じ返金の通知×2・別の返金の通知×2・確定の通知×2・戻り先の確定。再送 ${results.slice(0, evs.length).filter((r) => (r as { status: number }).status !== 200).length} 件）：決済記録・権利は1件、返金は1回、決済要確認0件`);
   }
 
+  // ================= 10. 先着の後に決済確定の通知（重複を含む）・戻り先・先着の通知の再送が届いても、権利は戻らない =================
+  {
+    for (const kind of ["refund", "dispute_lost"] as const) {
+      const p = await paidOnly(rt, code);
+      let first: Ev;
+      if (kind === "refund") {
+        await stripe.ctl(`refund/${p.charge}`);
+        first = refundEv(p);
+      } else {
+        first = disputeEv(stripe.addDispute(p.charge, { status: "lost" }), "charge.dispute.closed");
+      }
+      assert.equal((await deliver(rt, first)).status, 200);
+      // 後から届く決済確定の通知（別の通知×2・同じ通知の重複）・戻り先の確定・先着の通知の再送
+      const later = [completedEv(p), completedEv(p)];
+      for (const e of later) assert.equal(outcomeOf(await deliver(rt, e)), "refunded", `${kind}: 後の確定の通知で権利を付与しようとしました`);
+      assert.deepEqual((await deliver(rt, later[0])).body, { received: true, duplicate: true });
+      assert.equal((await confirmStripeCheckout(p.sessionId, rt)).status, "refunded");
+      assert.deepEqual((await deliver(rt, first)).body, { received: true, duplicate: true });
+      const [t, fs, co] = [await txDoc(p), await fsDoc(p), await coDoc(p)];
+      assert.deepEqual(
+        [t?.paymentStatus, t?.countable, fs?.status, fs?.usedAt, co?.status, co?.refundReason],
+        [kind === "refund" ? "REFUNDED" : "CHARGEBACK", false, "EXPIRED", null, "REFUNDED", kind === "refund" ? "refund" : "chargeback"],
+        `${kind}: 後の通知で権利・注文が戻りました`,
+      );
+      assert.equal(await txCountOfCharge(p.charge), 1);
+      assert.equal((await fsdb().collection(C.fortuneSessions).where("transactionId", "==", p.txId).get()).size, 1);
+      assert.deepEqual(await reviewsOfCharge(p.charge), []);
+      // 正常な流れでは決済監視の異常（処理の失敗など）を1件も記録しない（重複したアラートも無い）
+      const alerts = await fsdb().collection(C.paymentAlerts).where("objectId", "in", [first.id, ...later.map((e) => e.id)]).get();
+      assert.equal(alerts.size, 0, `${kind}: 正常な流れで決済監視の異常を記録しました`);
+    }
+    step("先着（返金・敗訴）の後に決済確定の通知×2・同じ通知の重複・戻り先の確定・先着の通知の再送：どれも refunded／重複で、権利は EXPIRED のまま（復活しない）・注文 REFUNDED・決済記録と権利は1件・決済要確認と決済監視の異常は0件");
+  }
+
   console.log("\nSTRIPE EARLY SYNC E2E PASSED");
 }
 
