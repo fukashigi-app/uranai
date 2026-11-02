@@ -327,3 +327,53 @@ Hobby＋Fluid Compute の上限が300秒であることは、作業の環境か�
 - **対象外：** 一度も受信していない通知（webhookEvents に記録が無い）は、今の復旧の仕組みでは見つけられません（Stripe の送信先が止まっていて一度も届かなかった通知など）
 - **インデックス：** 既存の webhookEvents の複合インデックス（provider・processedAt・createdAt・__name__）だけを使います（追加なし）
 
+
+## 13. 実環境テストの結果（2026-11-02）
+
+Vercel の Preview・Stripe の Sandbox・Firebase の `uranai-preview` で行った結果です。本番（Production・本番の Firebase・Stripe の Live）には触れていません。
+決済・異議申し立て・Checkout Session などの ID、URL、秘密情報はここに書きません（Stripe・Firestore 側に残っています）。
+
+### 13.1 環境
+
+| 項目 | 内容 |
+| --- | --- |
+| ブランチ・コミット | `preview/stripe-verification`・`440aaf2`（Preview 専用のブランチ。main には触れていない） |
+| Vercel | Preview のデプロイ。Deployment Protection（Vercel Authentication）は有効のまま。Webhook は保護の回避（§1.6）で受信 |
+| Firebase | `uranai-preview`（`/api/health` で `firestoreTarget=ok`・`database=ok`） |
+| Stripe | Sandbox。Webhook の送信先は1つだけ有効（以前の Preview 用の送信先は無効）。API のバージョンは `2026-10-28.endive`、イベントは §1.4 の16種類 |
+| 公開状態 | `SITE_STATUS=development`（運営アカウントのテスト決済 `/fortune?pay=stripe-test` だけ） |
+
+### 13.2 合格した項目（実環境で確認）
+
+| # | 項目 | 確認した結果 |
+| --- | --- | --- |
+| 1 | 接続先 | `/api/health` で Firestore の接続先の判定と読み取りが ok |
+| 2 | 100円のテスト決済 | Stripe Checkout で成功し、占いの結果を表示できた |
+| 3 | Webhook の受信 | `checkout.session.completed`・`charge.succeeded`・`charge.updated` が 200 |
+| 4 | 集計からの除外 | 決済履歴に「テスト決済」として表示。売上・店舗の取り分・運営の取り分は0円 |
+| 5 | 通知の再送 | `checkout.session.completed` を1回再送すると 200（`received`・`duplicate`）。決済履歴は1件のまま |
+| 6 | 使用前の全額返金 | 占い権利が自動で停止（`status=EXPIRED`・`suspendedByRefund=true`・`usedAt=null`）。注文は `REFUNDED`（理由 `refund`）。画面から占えない。決済履歴は「返金」 |
+| 7 | 異議申し立て（敗訴） | `charge.dispute.closed` が 200（`dispute_lost`）。決済記録は `paymentStatus=CHARGEBACK`・`countable=false`、占い権利は `EXPIRED`。画面から占えない。運営画面は「敗訴（売上から除外）」、決済履歴に「チャージバック」が残る。月次集計は0円 |
+
+### 13.3 表示だけを確認した項目
+
+| 項目 | 確認した範囲 | 確認していないこと |
+| --- | --- | --- |
+| 運営画面「Webhook の復旧」 | 画面が表示され、`webhookEvents` の複合インデックスを使う一覧の検索がエラーにならない（一覧は空） | 再処理・自動の復旧の実際の処理 |
+| 運営画面「決済監視」 | 画面が表示される。未確認の記録は1件（2026-10-28 の意図した不正署名テストのもの） | 「今すぐ点検」の実行 |
+
+### 13.4 未確認の項目
+
+- 異議申し立て（敗訴）の途中の状態（対応中の `disputeStatus=open`・権利 `PAID`）、占い権利の `suspendedByDispute`、注文の `REFUNDED`（理由 `chargeback`）、
+  決済記録・権利・注文が1件ずつであること（最終の状態の主な項目は 13.2 の7で確認済み）
+- 使用後の返金、一部返金、返金の処理中・失敗と運営による権利の復旧
+- 異議申し立ての勝訴
+- 決済の拒否・3Dセキュア・キャンセル・期限切れ（以前の Preview のコードでは確認済み。今のコードでは未確認）
+- 今の送信先での不正な署名の拒否
+- Webhook の再処理・自動の復旧、決済監視の「今すぐ点検」
+- 一般のお客さんの流れ（`SITE_STATUS=open`）、PayPay
+
+### 13.5 見つかった改善候補（未対応）
+
+- 返金・チャージバックで止まった占い権利にも「占いの有効期限が切れています。」と表示される（権利が PAID でなければ、すべて同じ表示）。
+  利用を止める動作は正しい。表示の文言を分けるかは別に判断する
