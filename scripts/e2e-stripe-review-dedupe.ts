@@ -55,9 +55,14 @@ async function paidOnly(rt: StripeRuntime, storeCode: string): Promise<Pay> {
   const p = await stripe.ctl(`pay/${sessionId}`, { fee: 4 });
   return { checkoutId, sessionId, charge: p.charge!, pi: p.paymentIntent!, txId: `stripe_${p.paymentIntent!}` };
 }
-/** 決済確定より先の返金（transaction_not_found の記録になる）を用意する */
+/**
+ * 決済記録の無い返金（transaction_not_found の記録になる）を用意する。
+ * この環境の注文がある決済の先着の返金は、先に決済を確定してから反映する（記録しない。課題2・対策A）ので、
+ * 本当の異常（この Firestore に注文が無い決済）にする：支払いの後で注文を消す
+ */
 async function refundedBeforeConfirm(rt: StripeRuntime, code: string) {
   const p = await paidOnly(rt, code);
+  await fsdb().collection(C.checkouts).doc(p.checkoutId).delete();
   await stripe.ctl(`refund/${p.charge}`);
   return p;
 }
@@ -214,15 +219,28 @@ async function main() {
     step("1件の通知から2種類の決済要確認（2回ずつ記録）：それぞれ1回。通知の文書に両方の ID");
   }
 
-  // 11. 決済確定より先の返金：記録して 200 → 決済確定で正しい状態（記録は変わらない）
+  // 11. 決済確定より先の返金
+  // 11a. 正常な先着（この環境の注文がある）：先に確定して反映。記録しない → 後の決済確定の通知は返金済み。記録は0のまま
+  {
+    const p = await paidOnly(rt, code);
+    await stripe.ctl(`refund/${p.charge}`);
+    const e = refundEv(p);
+    assert.equal(outcomeOf(await deliver(rt, e)), "unchanged");
+    assert.equal(await reviewDoc(tnfId(p)), null, "正常な先着の通知で決済要確認を記録しました");
+    assert.equal((await eventDoc(e.id))?.recordedReviewIds, undefined);
+    assert.equal(outcomeOf(await deliver(rt, ev("checkout.session.completed", { id: p.sessionId, object: "checkout.session" }))), "refunded");
+    const t = (await fsdb().collection(C.transactions).doc(p.txId).get()).data()!;
+    assert.deepEqual([t.paymentStatus, await reviewDoc(tnfId(p))], ["REFUNDED", null]);
+    step("決済確定より先の返金（正常な先着）：先に確定して返金済み・記録しない → 後の決済確定の通知も返金済み。記録は0のまま");
+  }
+  // 11b. 本当の異常（注文が無い）：記録して 200（回数1）。決済確定の通知も確定できない（記録は増えない・決済記録は作らない）
   {
     const p = await refundedBeforeConfirm(rt, code);
     const e = refundEv(p);
     assert.equal(outcomeOf(await deliver(rt, e)), "ignored");
-    assert.equal(outcomeOf(await deliver(rt, ev("checkout.session.completed", { id: p.sessionId, object: "checkout.session" }))), "refunded");
-    const t = (await fsdb().collection(C.transactions).doc(p.txId).get()).data()!;
-    assert.deepEqual([t.paymentStatus, (await reviewDoc(tnfId(p)))?.occurrences], ["REFUNDED", 1]);
-    step("決済確定より先の返金：記録（回数1）→ 後の決済確定で返金済み。記録は増えない");
+    assert.equal(outcomeOf(await deliver(rt, ev("checkout.session.completed", { id: p.sessionId, object: "checkout.session" }))), "rejected"); // 注文が無い（unknown_checkout）
+    assert.deepEqual([(await fsdb().collection(C.transactions).doc(p.txId).get()).exists, (await reviewDoc(tnfId(p)))?.occurrences], [false, 1]);
+    step("決済確定より先の返金（注文が無い）：記録（回数1）。決済確定の通知でも決済記録は作らず、記録は増えない");
   }
 
   assert.equal([...failRecord.values()].reduce((x, n) => x + n, 0), 0, "（前提）用意した記録の失敗がすべて使われていません");

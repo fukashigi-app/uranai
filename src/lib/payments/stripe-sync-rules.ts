@@ -410,3 +410,62 @@ export function recheckFailureOf(outcomes: readonly string[]): string | null {
   const bad = outcomes.find((o) => o === "rejected" || o === "ignored");
   return bad ? `sync_${bad}` : null;
 }
+
+/**
+ * 決済記録が無いときに届いた返金・異議申し立ての通知の扱い（課題2・対策A。決済の確定より先に届いた通知）。
+ * 正常な先着（このアプリの注文があり、Session が紐付いている）なら、先に決済の確定を試みてから反映し直す。
+ * 注文が見つからない・Session が紐付いていないなどは本当の異常として、今までどおり決済要確認（transaction_not_found）に記録する。
+ *  - skip    … このアプリの決済ではない（metadata に注文ID・店舗IDが無い）。何も記録しない（今までどおり）
+ *  - confirm … 注文があり、この環境・このモードの Session が紐付いている。sessionId で決済の確定を試みる
+ *  - review  … 本当の異常（reason は確認のための区別。記録の種類は transaction_not_found のまま）
+ * checkoutIdValid は metadata の注文IDが文書の ID として使える形か（呼び出し側で checkoutIdOf を使う）。
+ */
+export type MissingTransactionReason = "invalid_checkout_id" | "checkout_not_found" | "checkout_not_stripe" | "session_not_linked";
+export type MissingTransactionPlan = { kind: "skip" } | { kind: "confirm"; sessionId: string } | { kind: "review"; reason: MissingTransactionReason };
+
+const CHECKOUT_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+/** PaymentIntent の metadata の注文ID（文書の ID として使える形のときだけ。それ以外は null） */
+export const checkoutIdOf = (pi: Pick<Stripe.PaymentIntent, "metadata">): string | null => {
+  const v = pi.metadata?.checkoutId;
+  return typeof v === "string" && CHECKOUT_ID_RE.test(v) ? v : null;
+};
+
+export function planMissingTransaction(input: {
+  ourPayment: boolean;
+  checkoutId: string | null;
+  checkout: { exists: boolean; provider?: unknown; providerPaymentId?: unknown } | null;
+  /** Session の ID がこのモードの形か（isStripeSessionId） */
+  isSessionId: (v: unknown) => boolean;
+}): MissingTransactionPlan {
+  if (!input.ourPayment) return { kind: "skip" };
+  if (!input.checkoutId) return { kind: "review", reason: "invalid_checkout_id" };
+  if (!input.checkout || !input.checkout.exists) return { kind: "review", reason: "checkout_not_found" };
+  if (input.checkout.provider !== STRIPE_PROVIDER) return { kind: "review", reason: "checkout_not_stripe" };
+  const sid = input.checkout.providerPaymentId;
+  // 注文に Session を紐付けてから決済画面の URL を渡すので、支払いがあるのに紐付いていないのは異常（推測で Session を探さない）
+  if (typeof sid !== "string" || !input.isSessionId(sid)) return { kind: "review", reason: "session_not_linked" };
+  return { kind: "confirm", sessionId: sid };
+}
+
+/**
+ * 先着の通知のために試みた決済の確定の結果から、次に何をするか。
+ *  - retry_sync … 確定できた（確定済み・返金済みを含む）。反映を1回だけやり直す（やり直しでは確定を試みない）
+ *  - retryable  … Stripe 側でまだ確定できない（支払いの確定待ち）。例外にして 500（Stripe の再送でやり直す。200 で握りつぶさない）
+ *  - review     … 確定が拒否された（注文と決済が一致しない・別の環境など）。本当の異常として記録する
+ */
+/**
+ * 先着の通知のために決済を確定するとき、注文に紐付いた Session の PaymentIntent が、通知の対象の PaymentIntent と一致するか。
+ * 期待する値が無ければ（通常の確定）照合しない。Session に PaymentIntent が無い（未払いの Session）も不一致
+ * （通知の対象の決済ではないので確定しない。別の決済を通知のついでに確定しない）。
+ */
+export function sessionPaymentIntentMatches(sessionPaymentIntent: unknown, expectedPaymentIntentId: string | undefined): boolean {
+  if (expectedPaymentIntentId === undefined) return true;
+  return idOfRef(sessionPaymentIntent) === expectedPaymentIntentId;
+}
+
+export type ConfirmForSyncDecision = "retry_sync" | "retryable" | "review";
+export function decideAfterConfirmForSync(status: "confirmed" | "duplicate" | "refunded" | "not_paid" | "rejected"): ConfirmForSyncDecision {
+  if (status === "confirmed" || status === "duplicate" || status === "refunded") return "retry_sync";
+  if (status === "not_paid") return "retryable";
+  return "review";
+}

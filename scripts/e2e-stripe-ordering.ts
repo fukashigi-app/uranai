@@ -199,6 +199,9 @@ async function main() {
         st.want,
         `${p.label}: 最後の状態が Stripe の状態と一致しません`,
       );
+      // 正常な通知の並び（先着の返金・異議申し立てを含む）では、決済要確認（transaction_not_found など）を1件も記録しない（課題2・対策A）
+      const reviews = await fsdb().collection(C.paymentReviews).where("chargeId", "==", p.charge).get();
+      assert.equal(reviews.size, 0, `${p.label}: 正常な通知の並びで決済要確認を記録しました（${reviews.docs.map((d) => d.get("kind")).join(",")}）`);
       if (s.t.get("refundNeedsReview") === true) toDismiss.push(s.t.id);
       combos++;
     }

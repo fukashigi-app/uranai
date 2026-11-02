@@ -221,7 +221,7 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
       return;
     }
     // ---- テスト用の操作（決済画面での支払い・返金・期限切れ・手数料の確定を再現） ----
-    const ctl = JSON.parse(body || "{}") as { fee?: number | null; amount?: number; created?: number; metadataStoreId?: string; uranaiEnv?: string; method?: string; async?: boolean; status?: string; currency?: string };
+    const ctl = JSON.parse(body || "{}") as { fee?: number | null; amount?: number; created?: number; metadataStoreId?: string; metadataCheckoutId?: string; uranaiEnv?: string; method?: string; async?: boolean; status?: string; currency?: string };
     r = m(/^\/__test\/pay\/([^/]+)$/);
     if (r) {
       // 決済画面での支払い。method: card | apple_pay | google_pay | paypay | link | samsung_pay、async: 確定待ち（PayPay の非同期の確定）
@@ -281,7 +281,12 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
       // 照合の確認用：PaymentIntent の店舗を書き換える（記録と一致しない返金・異議申し立てを再現）
       const pi = fake.pis.get(r[1])!;
       // 環境を表す値（uranaiEnv）の指定があれば、それも書き換える（空文字は値を消す＝以前の決済）
-      const md: Record<string, string> = { ...(pi.metadata as Record<string, string>), ...(ctl.metadataStoreId !== undefined ? { storeId: ctl.metadataStoreId } : {}) };
+      const md: Record<string, string> = {
+        ...(pi.metadata as Record<string, string>),
+        ...(ctl.metadataStoreId !== undefined ? { storeId: ctl.metadataStoreId } : {}),
+        // 注文IDの書き換え（PaymentIntent と Checkout Session が一致しない決済の再現）
+        ...(ctl.metadataCheckoutId !== undefined ? { checkoutId: ctl.metadataCheckoutId } : {}),
+      };
       if (typeof ctl.uranaiEnv === "string") {
         if (ctl.uranaiEnv) md.uranaiEnv = ctl.uranaiEnv;
         else delete md.uranaiEnv;

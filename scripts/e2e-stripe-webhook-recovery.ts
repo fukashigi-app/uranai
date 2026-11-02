@@ -215,7 +215,10 @@ async function main() {
 
   // 7. 記録の書き込みの失敗（決済要確認の記録＝Firestore）：処理済みにしない。直れば再処理で記録し、回数は1回だけ
   {
-    const p = await paidOnly(rt, code); // 決済記録の無い返金（記録が無い＝決済要確認）を作るため、確定の通知は送らない
+    // 決済記録の無い返金（記録が無い＝決済要確認）を作る。この環境の注文がある決済の先着の返金は先に確定する（記録しない）ので、
+    // 本当の異常（注文が無い決済）にする：支払いの後で注文を消し、確定の通知は送らない
+    const p = await paidOnly(rt, code);
+    await fsdb().collection(C.checkouts).doc(p.checkoutId).delete();
     await stripe.ctl(`refund/${p.charge}`);
     const e = refundEv(p);
     hooks.failReview = true;

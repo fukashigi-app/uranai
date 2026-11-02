@@ -17,6 +17,8 @@ import { paymentReviewRef, recordPaymentReviewInTx, recordRequiredPaymentReview,
 import type { DisputeState } from "./settlement-rules";
 import {
   chargeMismatches,
+  checkoutIdOf,
+  decideAfterConfirmForSync,
   decideCheckoutAfterSync,
   decideConfirmState,
   decideDisputeSync,
@@ -26,9 +28,11 @@ import {
   disputeKeyOf,
   isOurPayment,
   normalizeRestoreReason,
+  planMissingTransaction,
   RECHECK_DONE,
   RECHECK_PENDING,
   recheckFailureOf,
+  sessionPaymentIntentMatches,
   recheckStateOf,
   refundKeyOf,
   RESTORE_REASON_MAX,
@@ -229,10 +233,20 @@ export class StripeEnvironmentMismatchError extends Error {
   }
 }
 
-export async function confirmStripeCheckout(sessionId: string, rt?: StripeRuntime): Promise<StripeConfirmOutcome> {
+/**
+ * expectedPaymentIntentId … 先着の返金・異議申し立ての通知から確定するとき（confirmBeforeSync）に、通知の対象の PaymentIntent を渡す。
+ * Session の PaymentIntent が違えば、検証・返金と異議申し立ての読み取り・書き込みの前に rejected（payment_intent_mismatch）を返す
+ * （通知の対象ではない別の決済を確定しない。Session が未払いでも「確定待ち」にせず不一致として扱う）。通常の確定では渡さない
+ */
+export async function confirmStripeCheckout(sessionId: string, rt?: StripeRuntime, opts: { expectedPaymentIntentId?: string } = {}): Promise<StripeConfirmOutcome> {
   const r0 = rt ?? stripeRuntime();
   if (!isStripeSessionId(sessionId, r0.mode)) return { status: "rejected", reason: "invalid_session_id" };
-  const v = validateStripeSession(await retrieveStripeSession(sessionId, r0), r0.mode);
+  const session = await retrieveStripeSession(sessionId, r0);
+  if (!sessionPaymentIntentMatches(session.payment_intent, opts.expectedPaymentIntentId)) {
+    console.error("[stripe] payment rejected", { sessionId, reason: "payment_intent_mismatch" });
+    return { status: "rejected", reason: "payment_intent_mismatch" };
+  }
+  const v = validateStripeSession(session, r0.mode);
   if (!v.ok) {
     if (v.status === "rejected") console.error("[stripe] payment rejected", { sessionId, reason: v.reason });
     return v.status === "not_paid" ? { status: "not_paid", reason: v.reason } : { status: "rejected", reason: v.reason };
@@ -395,8 +409,8 @@ async function recheckStripePayment(txId: string, f: RecheckFacts, r0: StripeRun
   try {
     const now = await readStripeChargeAdjustments({ id: f.chargeId, amount: f.amount, livemode: f.livemode }, r0);
     const outcomes: string[] = [];
-    if (now.refunds.state !== "none" && refundKeyOf(now.refunds) !== cur.get("refundKey")) outcomes.push(await syncStripeRefunds(f.chargeId, r0, "confirm_recheck"));
-    if (now.dispute && disputeKeyOf(now.dispute) !== cur.get("disputeKey")) outcomes.push(await syncStripeDispute(now.dispute.id, r0, "confirm_recheck"));
+    if (now.refunds.state !== "none" && refundKeyOf(now.refunds) !== cur.get("refundKey")) outcomes.push(await syncStripeRefunds(f.chargeId, r0, "confirm_recheck", undefined, { confirmFirst: false }));
+    if (now.dispute && disputeKeyOf(now.dispute) !== cur.get("disputeKey")) outcomes.push(await syncStripeDispute(now.dispute.id, r0, "confirm_recheck", undefined, { confirmFirst: false }));
     error = recheckFailureOf(outcomes);
   } catch (e) {
     error = errorNameOf(e);
@@ -468,7 +482,56 @@ export type StripeRefundOutcome = "refund_pending" | "refunded" | "partial" | "r
 
 const idOfRef = (v: unknown): string | null => (typeof v === "string" ? v : v && typeof v === "object" && typeof (v as { id?: unknown }).id === "string" ? (v as { id: string }).id : null);
 
-type TxOutcome<T extends string> = { outcome: T; review?: PaymentReviewInput };
+type TxOutcome<T extends string> = { outcome: T; review?: PaymentReviewInput; /** 決済記録が無かった（先着の通知の可能性） */ missingTransaction?: true };
+
+/**
+ * 返金・異議申し立ての反映の設定。
+ *  confirmFirst … 決済記録が無く、このアプリの注文の決済なら、先に決済の確定を試みてから1回だけ反映し直す（既定 true。課題2・対策A）。
+ *                 決済の確定の中の再確認・運営の権利の復旧・やり直しの反映では false（確定を入れ子にしない。回数を限る）
+ */
+export type StripeSyncOptions = { confirmFirst?: boolean };
+
+/** 先着の通知のために試みた決済の確定が、Stripe 側でまだ進められない（支払いの確定待ち）。Webhook は 500 を返し、Stripe の再送でやり直す */
+export class StripeConfirmNotReadyError extends Error {
+  constructor(readonly reason: string) {
+    super(`stripe payment cannot be confirmed yet (${reason})`);
+    this.name = "StripeConfirmNotReadyError";
+  }
+}
+
+/**
+ * 決済記録が無いときに届いた返金・異議申し立ての通知のために、先に決済の確定を試みる（課題2・対策A）。
+ *  - 注文（PaymentIntent の metadata の注文ID）を読み、紐付いた Session で confirmStripeCheckout を呼ぶ。
+ *    確定は Stripe から返金・異議申し立ての今の状態を読んでから決済記録を作り、作成の後にも再確認するので、
+ *    この通知の返金・異議申し立てもその中で反映される（呼び出し側は反映を1回だけやり直して結果を決める）
+ *  - 確定できた（確定済み・返金済みを含む）… "retry_sync"
+ *  - 注文が無い・Session が紐付いていない・確定が拒否された … "review"（本当の異常。呼び出し側が transaction_not_found を記録する）
+ *  - Stripe 側でまだ確定できない … StripeConfirmNotReadyError（500。200 で握りつぶさない）
+ * Stripe API・Firestore の一時的な失敗は例外のまま返す（Webhook は 500、Stripe の再送でやり直す）。
+ * Firestore のトランザクションの中では呼ばない（注文は通常の読み取り。Stripe API の呼び出しは confirmStripeCheckout がトランザクションの前に行う）。
+ */
+async function confirmBeforeSync(pi: { id: string; metadata: Record<string, string> | null }, r0: StripeRuntime): Promise<"retry_sync" | "review"> {
+  const meta = { metadata: pi.metadata ?? {} };
+  const checkoutId = checkoutIdOf(meta);
+  const co = checkoutId ? await checkoutRef(checkoutId).get() : null;
+  const plan = planMissingTransaction({
+    ourPayment: isOurPayment(meta),
+    checkoutId,
+    checkout: co ? { exists: co.exists, provider: co.get("provider"), providerPaymentId: co.get("providerPaymentId") } : null,
+    isSessionId: (v) => isStripeSessionId(v, r0.mode),
+  });
+  if (plan.kind === "skip") return "review";
+  if (plan.kind === "review") {
+    console.warn("[stripe] refund or dispute arrived without a payment record, and the order cannot be confirmed", { paymentIntentId: pi.id, reason: plan.reason });
+    return "review";
+  }
+  // 通知の対象の PaymentIntent と一致する Session だけを確定する（一致しなければ rejected → 本当の異常として記録。別の決済は確定しない）
+  const r = await confirmStripeCheckout(plan.sessionId, r0, { expectedPaymentIntentId: pi.id });
+  const next = decideAfterConfirmForSync(r.status);
+  if (next === "retryable") throw new StripeConfirmNotReadyError(r.status === "not_paid" ? r.reason : r.status);
+  if (next === "review") console.warn("[stripe] refund or dispute arrived before the payment record, and the confirmation was rejected", { paymentIntentId: pi.id, reason: r.status === "rejected" ? r.reason : r.status });
+  return next;
+}
 
 /**
  * 決済記録に紐付いた注文（確定のときに providerPaymentKey に決済記録の ID を入れた Stripe の注文だけ）。無ければ null。
@@ -498,7 +561,7 @@ function updateCheckoutAfterSync(tx: Transaction, co: DocumentSnapshot | null, a
  *  - 一部・失敗 … refundNeedsReview=true（管理者が確認する。権利の復旧は restoreStripeEntitlement）
  * 記録と照合できないとき（店舗・金額の食い違い、記録が無い）は反映せず「決済要確認」に記録する。
  */
-export async function syncStripeRefunds(chargeId: string, rt?: StripeRuntime, eventType?: string, eventId?: string): Promise<StripeRefundOutcome> {
+export async function syncStripeRefunds(chargeId: string, rt?: StripeRuntime, eventType?: string, eventId?: string, opts: StripeSyncOptions = {}): Promise<StripeRefundOutcome> {
   const r0 = rt ?? stripeRuntime();
   const charge = await retrieveStripeCharge(chargeId, r0);
   if (charge.livemode !== (r0.mode === "live")) return "ignored"; // 別のモードの決済は扱わない
@@ -518,7 +581,7 @@ export async function syncStripeRefunds(chargeId: string, rt?: StripeRuntime, ev
       if (t.exists) throw new StripeEnvironmentMismatchError();
       return { outcome: "ignored_other_env" };
     }
-    if (!t.exists) return { outcome: "ignored", review: isOurPayment(pi) ? { kind: "transaction_not_found", objectType: "charge", objectId: charge.id, storeId: pi.metadata.storeId, ...base } : undefined };
+    if (!t.exists) return { outcome: "ignored", missingTransaction: true, review: isOurPayment(pi) ? { kind: "transaction_not_found", objectType: "charge", objectId: charge.id, storeId: pi.metadata.storeId, ...base } : undefined };
     // 金額・店舗などが記録と一致しない返金は反映しない（売上・精算を動かさない）
     const mism = chargeMismatches(t.data()!, charge, pi);
     if (mism.length) return { outcome: "rejected", review: { kind: "charge_mismatch", objectType: "charge", objectId: charge.id, transactionId: t.id, storeId: String(t.get("storeId")), mismatches: mism, ...base } };
@@ -547,6 +610,11 @@ export async function syncStripeRefunds(chargeId: string, rt?: StripeRuntime, ev
     return { outcome: d.outcome, review };
   });
   await r0.testHooks?.afterSyncCommit?.("refund", txRef.id);
+  // 決済記録が無い（決済の確定より先に届いた通知の可能性）：このアプリの注文の決済なら、先に確定を試みて、反映を1回だけやり直す。
+  // 確定できなければ本当の異常として、下で transaction_not_found を記録する（一時的な失敗は例外で 500）
+  if (res.missingTransaction && res.review && opts.confirmFirst !== false && (await confirmBeforeSync(pi, r0)) === "retry_sync") {
+    return syncStripeRefunds(chargeId, r0, eventType, eventId, { confirmFirst: false });
+  }
   // 反映を伴わない決済要確認の記録（決済記録が無い・照合できない）はトランザクションの後で記録する。記録が必須なので、失敗したら例外
   await recordSyncReview(res.review, r0, eventId);
   const result = res.outcome;
@@ -598,7 +666,7 @@ export type StripeDisputeOutcome = "dispute_open" | "dispute_won" | "dispute_los
  * 同じ状態はもう反映済みとして何もしない（通知の再送・重複でも二重にならない）。結果が出た（勝訴・敗訴）申し立ては
  * 対応中に戻さない（Stripe API が古い状態を返しても巻き戻らない。決済要確認に記録する）。
  */
-export async function syncStripeDispute(disputeId: string, rt?: StripeRuntime, eventType?: string, eventId?: string): Promise<StripeDisputeOutcome> {
+export async function syncStripeDispute(disputeId: string, rt?: StripeRuntime, eventType?: string, eventId?: string, opts: StripeSyncOptions = {}): Promise<StripeDisputeOutcome> {
   const r0 = rt ?? stripeRuntime();
   const dp = await retrieveStripeDispute(disputeId, r0);
   if (dp.livemode !== (r0.mode === "live")) return "ignored";
@@ -627,7 +695,7 @@ export async function syncStripeDispute(disputeId: string, rt?: StripeRuntime, e
       if (t.exists) throw new StripeEnvironmentMismatchError();
       return { outcome: "ignored_other_env" };
     }
-    if (!t.exists) return { outcome: "ignored", review: isOurPayment(pi) ? { kind: "transaction_not_found", objectType: "dispute", objectId: dp.id, storeId: pi.metadata.storeId, ...base } : undefined };
+    if (!t.exists) return { outcome: "ignored", missingTransaction: true, review: isOurPayment(pi) ? { kind: "transaction_not_found", objectType: "dispute", objectId: dp.id, storeId: pi.metadata.storeId, ...base } : undefined };
     const mism = chargeMismatches(t.data()!, charge, pi);
     if (mism.length) return { outcome: "rejected", review: { kind: "charge_mismatch", objectType: "dispute", objectId: dp.id, transactionId: t.id, storeId: String(t.get("storeId")), mismatches: mism, ...base } };
     const d = decideDisputeSync(
@@ -667,6 +735,10 @@ export async function syncStripeDispute(disputeId: string, rt?: StripeRuntime, e
     return { outcome: d.outcome, review, state: d.state };
   });
   await r0.testHooks?.afterSyncCommit?.("dispute", txRef.id);
+  // 決済記録が無い（決済の確定より先に届いた通知の可能性）：返金と同じく、先に確定を試みて、反映を1回だけやり直す
+  if (res.missingTransaction && res.review && opts.confirmFirst !== false && (await confirmBeforeSync(pi, r0)) === "retry_sync") {
+    return syncStripeDispute(disputeId, r0, eventType, eventId, { confirmFirst: false });
+  }
   // 反映を伴わない決済要確認の記録（決済記録が無い・照合できない・複数の申し立て・状態の後戻り）はトランザクションの後で記録する。
   // 記録が必須なので、失敗したら例外
   await recordSyncReview(res.review, r0, eventId);
@@ -763,8 +835,8 @@ export async function restoreStripeEntitlement(transactionId: string, actor: Act
     const adj = await readStripeChargeAdjustments({ id: charge.id, amount: charge.amount, livemode: charge.livemode }, r0);
     verified = { refundKey: adj.refunds.state === "none" ? null : refundKeyOf(adj.refunds), disputeKey: adj.dispute ? disputeKeyOf(adj.dispute) : null, disputeId: adj.dispute?.id ?? null };
     // 最新の状態を決済記録に反映してから判断する（Webhook が遅れていても、Stripe の今の状態で判断する）
-    await syncStripeRefunds(charge.id, r0, "entitlement_restore");
-    if (verified.disputeId) await syncStripeDispute(verified.disputeId, r0, "entitlement_restore");
+    await syncStripeRefunds(charge.id, r0, "entitlement_restore", undefined, { confirmFirst: false });
+    if (verified.disputeId) await syncStripeDispute(verified.disputeId, r0, "entitlement_restore", undefined, { confirmFirst: false });
   } catch (e) {
     if (e instanceof StripeAdjustmentsUnverifiedError) {
       console.error("[stripe] entitlement restore: refunds/disputes could not be verified", { transactionId, reason: e.reason });

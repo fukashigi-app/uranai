@@ -4,7 +4,8 @@
  *  - 記録できたら 200（処理済み）。記録に失敗したら 500 で処理済みにしない → 同じ通知の再送で記録し直す
  *  - 同じ通知の重複・記録の後に処理済みにする前で止まった再送・同時の通知でも、回数は通知ごとに1回
  *  - 確認済みの記録に同じ内容：確認済みのまま。内容が変わったら未確認に戻る
- *  - 返金の通知が決済確定より先に届いても、決済確定で Stripe の今の状態を読むので、最後は正しい状態になる
+ *  - 返金の通知が決済確定より先に届いたとき：この環境の注文の決済なら先に確定してから反映する（決済要確認は記録しない）。
+ *    注文が無いなどの本当の異常だけを transaction_not_found として記録する（この E2E の記録の検証は、注文の無い決済で行う）
  * 本物の Stripe・本番の Firebase には一切接続しない（localhost の模擬 Stripe と Firestore Emulator の demo- プロジェクトだけ。キーは形だけの偽物）。
  *
  *   firebase emulators:start --only firestore --project demo-uranai
@@ -54,6 +55,12 @@ async function paidOnly(rt: StripeRuntime, storeCode: string): Promise<Pay> {
   const p = await stripe.ctl(`pay/${sessionId}`, { fee: 4 });
   return { checkoutId, sessionId, charge: p.charge!, pi: p.paymentIntent!, txId: `stripe_${p.paymentIntent!}` };
 }
+/** 本当の異常（この Firestore に注文が無い決済）：支払いの後で注文を消す。決済記録の無い返金は transaction_not_found として記録される */
+async function paidWithoutOrder(rt: StripeRuntime, storeCode: string): Promise<Pay> {
+  const p = await paidOnly(rt, storeCode);
+  await fsdb().collection(C.checkouts).doc(p.checkoutId).delete();
+  return p;
+}
 const completedEv = (p: Pay) => ev("checkout.session.completed", { id: p.sessionId, object: "checkout.session" });
 const refundEv = (p: Pay) => ev("charge.refunded", { id: p.charge, object: "charge" });
 const disputeEv = (dpId: string) => ev("charge.dispute.updated", { id: dpId, object: "dispute" });
@@ -86,9 +93,34 @@ async function main() {
   const store = await createStore({ name: `要確認必須検証店舗 ${Date.now()}`, contactName: "", postalCode: "", address: "", phone: "", email: "" }, SYSTEM);
   const code = store.storeCode;
 
-  // ================= 1. 決済確定より先の返金（transaction_not_found）：記録して 200 → 決済確定で正しい状態 =================
+  // ================= 1. 決済確定より先の返金 =================
+  // 1a. 正常な先着（この環境の注文があり、Session が紐付いている）：先に決済を確定してから反映。transaction_not_found は記録しない（課題2・対策A）
   {
     const p = await paidOnly(rt, code);
+    await stripe.ctl(`refund/${p.charge}`);
+    const e = refundEv(p);
+    const r = await deliver(rt, e);
+    assert.equal(r.status, 200);
+    // 確定の中で Stripe の今の状態（返金済み）を読んで記録したので、やり直しの反映は「変化なし」
+    assert.equal(outcomeOf(r), "unchanged");
+    assert.equal(await reviewCount(p.charge), 0, "正常な先着の通知で決済要確認を記録しました");
+    assert.equal((await eventDoc(e.id))?.recordedReviewIds, undefined, "正常な先着の通知の文書に決済要確認の ID があります");
+    assert.ok((await eventDoc(e.id))?.processedAt, "処理済みになっていません");
+    const t = (await fsdb().collection(C.transactions).doc(p.txId).get()).data()!;
+    const fs = (await fsdb().collection(C.fortuneSessions).doc(p.txId).get()).data()!;
+    const co = (await fsdb().collection(C.checkouts).doc(p.checkoutId).get()).data()!;
+    assert.deepEqual([t.paymentStatus, t.refundStatus, fs.status, co.status, co.refundReason], ["REFUNDED", "succeeded", "EXPIRED", "REFUNDED", "refund"]);
+    // 後から届く決済確定・返金の通知：確定済み（返金済み）・変化なし。記録も決済記録も増えない
+    assert.equal(outcomeOf(await deliver(rt, completedEv(p))), "refunded");
+    assert.equal(outcomeOf(await deliver(rt, refundEv(p))), "unchanged");
+    assert.equal(await reviewCount(p.charge), 0);
+    assert.equal((await fsdb().collection(C.transactions).where("stripeChargeId", "==", p.charge).get()).size, 1);
+    step("決済確定より先の返金（正常な先着）：先に確定して返金済みとして記録（権利なし・REFUNDED）・200。transaction_not_found は記録しない。後の確定の通知は refunded");
+  }
+
+  // 1b. 本当の異常（この環境に注文が無い決済）：transaction_not_found を記録して 200（処理済み）。決済記録は作らない
+  {
+    const p = await paidWithoutOrder(rt, code);
     await stripe.ctl(`refund/${p.charge}`);
     const e = refundEv(p);
     const r = await deliver(rt, e);
@@ -98,21 +130,18 @@ async function main() {
     assert.deepEqual([rv?.status, rv?.occurrences, rv?.objectType, rv?.chargeId, rv?.paymentIntentId, rv?.eventType, rv?.recentOccurrenceKeys], ["OPEN", 1, "charge", p.charge, p.pi, "charge.refunded", undefined]);
     assert.deepEqual((await eventDoc(e.id))?.recordedReviewIds, [paymentReviewId("transaction_not_found", p.charge)], "通知の文書に記録した決済要確認の ID がありません");
     assert.ok((await eventDoc(e.id))?.processedAt, "記録できたのに処理済みになっていません");
-    // 後から決済確定：Stripe の今の状態（返金済み）を読むので、権利を付与せず REFUNDED
-    assert.equal(outcomeOf(await deliver(rt, completedEv(p))), "refunded");
-    const t = (await fsdb().collection(C.transactions).doc(p.txId).get()).data()!;
-    const fs = (await fsdb().collection(C.fortuneSessions).doc(p.txId).get()).data()!;
-    const co = (await fsdb().collection(C.checkouts).doc(p.checkoutId).get()).data()!;
-    assert.deepEqual([t.paymentStatus, t.refundStatus, fs.status, co.status, co.refundReason], ["REFUNDED", "succeeded", "EXPIRED", "REFUNDED", "refund"]);
-    // その後の返金の通知は「変化なし」（記録は増えない。確認待ちは運営が確認する＝自動では解消しない）
-    assert.equal(outcomeOf(await deliver(rt, refundEv(p))), "unchanged");
+    // 同じ通知の重複は何もしない。別の通知では回数が増える（決済記録は無いまま。運営が確認する）
+    assert.deepEqual((await deliver(rt, e)).body, { received: true, duplicate: true });
     assert.equal((await reviewOf("transaction_not_found", p.charge))?.occurrences, 1);
-    step("決済確定より先の返金：transaction_not_found を記録して 200（処理済み）→ 後の決済確定で返金済みとして記録（権利なし・REFUNDED）");
+    assert.equal(outcomeOf(await deliver(rt, refundEv(p))), "ignored");
+    assert.equal((await reviewOf("transaction_not_found", p.charge))?.occurrences, 2);
+    assert.equal((await fsdb().collection(C.transactions).doc(p.txId).get()).exists, false, "注文の無い決済の決済記録を作りました");
+    step("決済確定より先の返金（注文が無い＝本当の異常）：transaction_not_found を記録して 200（処理済み）。決済記録は作らない。重複は1回、別の通知は回数2");
   }
 
   // ================= 2. 記録の失敗：500・処理済みにしない → 同じ通知の再送で記録 =================
   {
-    const p = await paidOnly(rt, code);
+    const p = await paidWithoutOrder(rt, code);
     await stripe.ctl(`refund/${p.charge}`);
     failRecord.set("transaction_not_found", 1);
     const e = refundEv(p);
@@ -139,7 +168,7 @@ async function main() {
 
   // ================= 3. 同時の通知：記録は1件、回数は通知ごとに1回 =================
   {
-    const p = await paidOnly(rt, code);
+    const p = await paidWithoutOrder(rt, code);
     await stripe.ctl(`refund/${p.charge}`);
     const same = refundEv(p);
     const evs = [same, same, same, refundEv(p), refundEv(p)];
@@ -213,7 +242,7 @@ async function main() {
   {
     // 待ち時間だけを 1ms にした接続（同じ模擬 Stripe・同じ Emulator）。書き込みは止まらずに続く
     const quick = createSimulatedStripeRuntime("live", { apiBase: `http://127.0.0.1:${PORT}`, secretKey: KEY, webhookSecret: "whsec_e2e_review_required_dummy", testHooks: { reviewRecordTimeoutMs: 1 } });
-    const p = await paidOnly(rt, code);
+    const p = await paidWithoutOrder(rt, code);
     await stripe.ctl(`refund/${p.charge}`);
     const e = refundEv(p);
     const r1 = await deliver(quick, e);

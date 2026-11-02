@@ -224,8 +224,10 @@ async function main() {
     assert.deepEqual([newerD!.status, outcomeOf(newerD!), olderD.status], [200, "unchanged", 200]);
     assert.deepEqual([(await txDoc(q.txId)).paymentStatus, (await txDoc(q.txId)).disputeStatus, (await evDoc(de.id))!.state], ["CHARGEBACK", "lost", "PROCESSED"]);
 
-    // 決済要確認（決済確定より先の返金）：古い処理と新しい処理の両方が記録しても回数1
+    // 決済要確認（決済記録の無い返金）：古い処理と新しい処理の両方が記録しても回数1。
+    // この環境の注文がある決済の先着の返金は先に確定する（記録しない）ので、本当の異常（注文が無い決済）で確かめる
     const r = await paidOnly(rt, code);
+    await fsdb().collection(C.checkouts).doc(r.checkoutId).delete();
     await stripe.ctl(`refund/${r.charge}`);
     const re = refundEv(r);
     beforeFinish.set(re.id, async () => {
