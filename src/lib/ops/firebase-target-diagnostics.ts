@@ -14,25 +14,37 @@ import { createHash, timingSafeEqual } from "node:crypto";
 type Env = Record<string, string | undefined>;
 
 // プロジェクトID・サービスアカウントの判定は、データベースの接続の判定（target-guard.ts）と同じものを使う
-import { PREVIEW_FIREBASE_PROJECT_ID, PREVIEW_SERVICE_ACCOUNT_RE, PRODUCTION_FIREBASE_PROJECT_ID } from "@/lib/firestore/target-guard";
+import { isServiceAccountOf, PREVIEW_FIREBASE_PROJECT_ID, PREVIEW_FIREBASE_TARGETS, previewFirebaseTargetOf, PRODUCTION_FIREBASE_PROJECT_ID, type PreviewFirebaseTarget } from "@/lib/firestore/target-guard";
 export { PREVIEW_FIREBASE_PROJECT_ID, PRODUCTION_FIREBASE_PROJECT_ID };
 export const DIAGNOSTICS_TOKEN_MIN_LENGTH = 32;
 
+/**
+ *  projectIdIsPreview               … FIREBASE_PROJECT_ID が、コードで許可した Preview 用のプロジェクトのどれか
+ *  productionProjectIdIsExpected    … PRODUCTION_FIREBASE_PROJECT_ID が本番のプロジェクト
+ *  clientEmailBelongsToPreview      … FIREBASE_CLIENT_EMAIL が、FIREBASE_PROJECT_ID（許可した Preview 用のプロジェクト）のサービスアカウント
+ *  projectIdMatchesStripeTestProject … FIREBASE_PROJECT_ID と STRIPE_TEST_FIREBASE_PROJECT_ID が一致
+ *  stripeAccountIdReady             … STRIPE_ACCOUNT_ID が必要な検証環境なら設定されていて形が正しい（不要な環境では、未設定か形が正しければ true）
+ */
 export type FirebaseTargetDiagnostics = {
   projectIdIsPreview: boolean;
   productionProjectIdIsExpected: boolean;
   clientEmailBelongsToPreview: boolean;
   projectIdMatchesStripeTestProject: boolean;
+  stripeAccountIdReady: boolean;
 };
 
-export function firebaseTargetDiagnostics(e: Env = process.env): FirebaseTargetDiagnostics {
+export function firebaseTargetDiagnostics(e: Env = process.env, targets: readonly PreviewFirebaseTarget[] = PREVIEW_FIREBASE_TARGETS): FirebaseTargetDiagnostics {
   const projectId = e.FIREBASE_PROJECT_ID;
   const stripeTestProject = e.STRIPE_TEST_FIREBASE_PROJECT_ID;
+  const target = previewFirebaseTargetOf(projectId, targets);
+  const account = e.STRIPE_ACCOUNT_ID;
+  const accountOk = typeof account === "string" && /^acct_[A-Za-z0-9]{6,64}$/.test(account);
   return {
-    projectIdIsPreview: projectId === PREVIEW_FIREBASE_PROJECT_ID,
+    projectIdIsPreview: target !== null,
     productionProjectIdIsExpected: e.PRODUCTION_FIREBASE_PROJECT_ID === PRODUCTION_FIREBASE_PROJECT_ID,
-    clientEmailBelongsToPreview: typeof e.FIREBASE_CLIENT_EMAIL === "string" && PREVIEW_SERVICE_ACCOUNT_RE.test(e.FIREBASE_CLIENT_EMAIL),
+    clientEmailBelongsToPreview: target !== null && isServiceAccountOf(e.FIREBASE_CLIENT_EMAIL, target.projectId),
     projectIdMatchesStripeTestProject: typeof projectId === "string" && projectId !== "" && typeof stripeTestProject === "string" && stripeTestProject !== "" && projectId === stripeTestProject,
+    stripeAccountIdReady: target?.requireStripeAccountId ? accountOk : account === undefined || account === "" || accountOk,
   };
 }
 

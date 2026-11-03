@@ -15,7 +15,7 @@ const GOOD = {
   STRIPE_TEST_FIREBASE_PROJECT_ID: "uranai-preview",
   FIREBASE_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nSECRETKEYMATERIAL\n-----END PRIVATE KEY-----\n",
 };
-const ALL_TRUE = { projectIdIsPreview: true, productionProjectIdIsExpected: true, clientEmailBelongsToPreview: true, projectIdMatchesStripeTestProject: true };
+const ALL_TRUE = { projectIdIsPreview: true, productionProjectIdIsExpected: true, clientEmailBelongsToPreview: true, projectIdMatchesStripeTestProject: true, stripeAccountIdReady: true };
 
 describe("Firebase の接続先の判定（true / false だけ）", () => {
   it("正しい Preview の設定ならすべて true", () => {
@@ -60,7 +60,7 @@ describe("Firebase の接続先の判定（true / false だけ）", () => {
     expect(firebaseTargetDiagnostics({ ...GOOD, FIREBASE_PROJECT_ID: "uranai-x", STRIPE_TEST_FIREBASE_PROJECT_ID: "uranai-x" })).toMatchObject({ projectIdIsPreview: false, projectIdMatchesStripeTestProject: true });
   });
 
-  it("結果は4つの真偽値だけ（値・長さなどを含まない）", () => {
+  it("結果は5つの真偽値だけ（値・長さなどを含まない）", () => {
     const r = firebaseTargetDiagnostics({ ...GOOD, FIREBASE_PROJECT_ID: "uranai-b6edf" });
     expect(Object.keys(r).sort()).toEqual(Object.keys(ALL_TRUE).sort());
     expect(Object.values(r).every((v) => typeof v === "boolean")).toBe(true);
@@ -102,7 +102,7 @@ describe("診断 API（/api/ops/firebase-target）", () => {
     return GET(new Request("https://preview.example/api/ops/firebase-target", { headers: authorization ? { authorization } : {} }));
   };
 
-  it("正しいトークン：4項目の真偽値だけを返す。秘密情報・トークンを含まない。no-store", async () => {
+  it("正しいトークン：5項目の真偽値だけを返す。秘密情報・トークンを含まない。no-store", async () => {
     const r = await call(GOOD, `Bearer ${TOKEN}`);
     expect(r.status).toBe(200);
     expect(r.headers.get("cache-control")).toBe("no-store");
@@ -116,7 +116,7 @@ describe("診断 API（/api/ops/firebase-target）", () => {
   it("設定が誤っていても値は返さず false だけ", async () => {
     const r = await call({ ...GOOD, FIREBASE_PROJECT_ID: "uranai-b6edf", FIREBASE_CLIENT_EMAIL: "firebase-adminsdk-zz99y@uranai-b6edf.iam.gserviceaccount.com" }, `Bearer ${TOKEN}`);
     const text = await r.text();
-    expect(JSON.parse(text).firebaseTarget).toEqual({ projectIdIsPreview: false, productionProjectIdIsExpected: true, clientEmailBelongsToPreview: false, projectIdMatchesStripeTestProject: false });
+    expect(JSON.parse(text).firebaseTarget).toEqual({ projectIdIsPreview: false, productionProjectIdIsExpected: true, clientEmailBelongsToPreview: false, projectIdMatchesStripeTestProject: false, stripeAccountIdReady: true });
     expect(text).not.toContain("b6edf");
     expect(text).not.toContain("zz99y");
   });

@@ -35,7 +35,7 @@ export type StripeRuntime = {
   readonly allowHttpOrigin: boolean;
   /** この環境（Firestore のプロジェクト）を表す値（stripeEnvTag）。Session の metadata に入れ、別の環境の決済を見分ける */
   readonly envTag: string;
-  /** 本番の接続だけ：キーの持ち主であるべき Stripe のアカウント（acct_）。ensureStripeAccount で確かめる */
+  /** キーの持ち主であるべき Stripe のアカウント（acct_）。ensureStripeAccount で確かめる（本番は必須。テストは新しい検証環境で必須・それ以外は設定されていれば） */
   readonly accountId?: string;
   /** 本番の接続だけ：誰の決済を受け付けるか（operator … 運営アカウントだけの本番決済テスト・public … 一般のお客さん） */
   readonly liveAudience?: StripeLiveAudience;
@@ -121,9 +121,17 @@ export function stripeRuntime(): StripeRuntime {
     cached = { key, runtime };
     return runtime;
   }
-  const key = `test|${cfg.secretKey}|${cfg.webhookSecret}|${cfg.apiBase ? `${cfg.apiBase.protocol}://${cfg.apiBase.host}:${cfg.apiBase.port}` : ""}|${envTag}`;
+  const key = `test|${cfg.secretKey}|${cfg.webhookSecret}|${cfg.apiBase ? `${cfg.apiBase.protocol}://${cfg.apiBase.host}:${cfg.apiBase.port}` : ""}|${cfg.accountId ?? ""}|${envTag}`;
   if (cached?.key === key) return cached.runtime;
-  const runtime: StripeRuntime = { mode: "test", client: newClient(cfg.secretKey, cfg.apiBase), webhookSecret: cfg.webhookSecret, allowHttpOrigin: cfg.runtime === "local", envTag };
+  // テストの接続も、STRIPE_ACCOUNT_ID があればキーのアカウントを確かめる（新しい検証環境では必須。別の Sandbox のキーの混入を防ぐ）
+  const runtime: StripeRuntime = {
+    mode: "test",
+    client: newClient(cfg.secretKey, cfg.apiBase),
+    webhookSecret: cfg.webhookSecret,
+    allowHttpOrigin: cfg.runtime === "local",
+    envTag,
+    ...(cfg.accountId ? { accountId: cfg.accountId } : {}),
+  };
   cached = { key, runtime };
   return runtime;
 }
@@ -139,9 +147,9 @@ export class StripeAccountMismatchError extends Error {
 const verifiedAccounts = new WeakMap<Stripe, Promise<void>>();
 
 /**
- * 本番の接続のキーが、設定した Stripe のアカウント（STRIPE_ACCOUNT_ID）のものかを Stripe API（GET /v1/account）で確かめる。
+ * 接続のキーが、設定した Stripe のアカウント（STRIPE_ACCOUNT_ID）のものかを Stripe API（GET /v1/account）で確かめる（本番・新しい検証環境）。
  * 違えば StripeAccountMismatchError（別のアカウントで決済を受けない・別のアカウントの通知を処理しない）。取得できなければ Stripe の例外。
- * accountId の無い接続（テスト・Sandbox）は何もしない。同じ接続では最初の成功の後は確かめ直さない
+ * accountId の無い接続（以前からの Preview・ローカルの自動テスト）は何もしない。同じ接続では最初の成功の後は確かめ直さない
  */
 export async function ensureStripeAccount(rt: Pick<StripeRuntime, "client" | "accountId">): Promise<void> {
   if (rt.accountId === undefined) return;

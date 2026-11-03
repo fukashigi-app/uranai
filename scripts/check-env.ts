@@ -5,6 +5,7 @@
  *   2) npm run check:env                       … 形式だけを確認（ネットワーク接続なし）
  *      npm run check:env -- --ping             … さらに本番 Firestore に「読み取りだけ」で接続できるか確認
  *      npm run check:env -- path/to/file       … 別のファイルを確認
+ *      npm run check:env -- --preview path/to/file … Preview（検証環境）の環境変数として確認（vercel env pull --environment=preview --git-branch=<ブランチ>。接続確認はしない）
  *   3) 終わったら .env.production.check を削除する
  *
  * 表示するのは変数名と判定・説明だけ。秘密鍵・パスワードなどの値は表示しない。
@@ -12,7 +13,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { parse } from "dotenv";
-import { checkProductionEnv, summarize, type CheckResult } from "../src/lib/ops/env-check";
+import { checkPreviewEnv, checkProductionEnv, summarize, type CheckResult } from "../src/lib/ops/env-check";
 
 const MARK: Record<CheckResult["level"], string> = { ok: "✔", warn: "⚠", error: "✘", unknown: "？" };
 
@@ -50,9 +51,10 @@ async function ping(env: Record<string, string>): Promise<string> {
 
 async function main() {
   const args = process.argv.slice(2);
-  const file = args.find((a) => !a.startsWith("--")) ?? ".env.production.check";
+  const preview = args.includes("--preview");
+  const file = args.find((a) => !a.startsWith("--")) ?? (preview ? ".env.preview.check" : ".env.production.check");
   if (!existsSync(file)) {
-    console.error(`ファイルが見つかりません: ${file}\n先に「vercel env pull ${file} --environment=production」を実行してください。`);
+    console.error(`ファイルが見つかりません: ${file}\n先に「vercel env pull ${file} --environment=${preview ? "preview --git-branch=<ブランチ>" : "production"}」を実行してください。`);
     process.exit(2);
   }
   if (!isGitIgnored(file)) {
@@ -60,12 +62,12 @@ async function main() {
     process.exit(2);
   }
   const env = parse(readFileSync(file));
-  const results = checkProductionEnv(env);
-  console.log(`本番の環境変数の確認（${Object.keys(env).length}件の変数を読み込みました。値は表示しません）\n`);
+  const results = preview ? checkPreviewEnv(env) : checkProductionEnv(env);
+  console.log(`${preview ? "Preview（検証環境）" : "本番"}の環境変数の確認（${Object.keys(env).length}件の変数を読み込みました。値は表示しません）\n`);
   for (const x of results) console.log(`${MARK[x.level]} ${x.key}: ${x.message}`);
   const s = summarize(results);
   console.log(`\n結果: 正常 ${s.ok}・注意 ${s.warn}・エラー ${s.error}・確認できない ${s.unknown}`);
-  if (args.includes("--ping")) {
+  if (args.includes("--ping") && !preview) {
     if (s.error && results.some((x) => x.key.startsWith("FIREBASE_") && x.level === "error")) console.log("\nFirebase の設定にエラーがあるため、接続確認は行いません。");
     else console.log(`\n${await ping(env)}`);
   }

@@ -28,7 +28,14 @@
  * どちらも Sandbox の決済（livemode=false）なので、売上・店舗の取り分・月次精算には含めない（payments/kind.ts）。
  * next.config やスクリプト・テストからも読み込めるよう、server-only に依存しない。
  */
-import { checkFirestoreTarget, PREVIEW_FIREBASE_PROJECT_ID as PREVIEW_PROJECT, PRODUCTION_FIREBASE_PROJECT_ID as PRODUCTION_PROJECT } from "@/lib/firestore/target-guard";
+import {
+  checkFirestoreTarget,
+  PREVIEW_FIREBASE_PROJECT_ID as PREVIEW_PROJECT,
+  PREVIEW_FIREBASE_TARGETS,
+  previewFirebaseTargetOf,
+  PRODUCTION_FIREBASE_PROJECT_ID as PRODUCTION_PROJECT,
+  type PreviewFirebaseTarget,
+} from "@/lib/firestore/target-guard";
 import { isDevModeLiveKeyConflict, livePaymentKeyNames, siteStatus } from "@/lib/env-rules";
 
 type Env = Record<string, string | undefined>;
@@ -54,7 +61,8 @@ export type StripeTestDenyReason =
   | "production_project"
   | "api_base_not_allowed"
   | "preview_project_mismatch"
-  | "live_flag_in_test";
+  | "live_flag_in_test"
+  | "test_account_id_missing";
 
 /** 本番（Live）の判定で拒否する理由（テストの理由と同じものは共有する） */
 export type StripeLiveDenyReason =
@@ -85,7 +93,15 @@ export type StripeLiveConfig =
   | { ok: false; reason: StripeLiveDenyReason };
 
 export type StripeTestConfig =
-  | { ok: true; mode: "preview" | "local"; secretKey: string; webhookSecret: string; apiBase: { host: string; port: number; protocol: "http" | "https" } | null }
+  | {
+      ok: true;
+      mode: "preview" | "local";
+      secretKey: string;
+      webhookSecret: string;
+      apiBase: { host: string; port: number; protocol: "http" | "https" } | null;
+      /** キーの持ち主であるべき Stripe のアカウント（acct_）。設定されていれば Stripe API で確かめる（新しい検証環境では必須） */
+      accountId?: string;
+    }
   | { ok: false; reason: StripeTestDenyReason };
 
 const norm = (v: string | undefined) => (v ?? "").trim().toLowerCase();
@@ -106,7 +122,7 @@ function isLocalEmulator(e: Env): boolean {
   }
 }
 
-export function stripeTestConfig(e: Env = process.env): StripeTestConfig {
+export function stripeTestConfig(e: Env = process.env, targets: readonly PreviewFirebaseTarget[] = PREVIEW_FIREBASE_TARGETS): StripeTestConfig {
   if (norm(e.STRIPE_TEST_CHECKOUT) !== "on") return { ok: false, reason: "not_enabled" };
   if (e.VERCEL_ENV === "production") return { ok: false, reason: "production" };
 
@@ -116,20 +132,22 @@ export function stripeTestConfig(e: Env = process.env): StripeTestConfig {
   }
 
   let mode: "preview" | "local";
+  let previewTarget: PreviewFirebaseTarget | null = null;
   if (e.VERCEL_ENV === "preview") {
     mode = "preview";
     const testProject = norm(e.STRIPE_TEST_FIREBASE_PROJECT_ID);
     if (!testProject) return { ok: false, reason: "test_project_not_set" };
     if (!target || target !== testProject) return { ok: false, reason: "test_project_mismatch" };
-    // Preview のテスト決済は uranai-preview だけ（テスト用の値の登録ミスで、別のプロジェクトに書き込まないように）
-    if (target !== PREVIEW_FIREBASE_PROJECT_ID) return { ok: false, reason: "preview_project_mismatch" };
+    // Preview のテスト決済は、コードに固定した Preview 用のプロジェクトだけ（テスト用の値の登録ミスで、別のプロジェクトに書き込まないように）
+    previewTarget = previewFirebaseTargetOf(e.FIREBASE_PROJECT_ID, targets);
+    if (!previewTarget) return { ok: false, reason: "preview_project_mismatch" };
     if (e.FIRESTORE_EMULATOR_HOST) return { ok: false, reason: "unsupported_environment" };
   } else if (!e.VERCEL_ENV && isLocalEmulator(e) && target.startsWith("demo-")) {
     mode = "local";
   } else {
     return { ok: false, reason: "unsupported_environment" };
   }
-  if (!checkFirestoreTarget(e).ok) return { ok: false, reason: "firestore_target_blocked" };
+  if (!checkFirestoreTarget(e, targets).ok) return { ok: false, reason: "firestore_target_blocked" };
   // 本番決済のスイッチがテストの環境にある（登録先の取り違え）
   if (norm(e.STRIPE_LIVE_CHECKOUT) || norm(e.STRIPE_LIVE_OPERATOR_TEST)) return { ok: false, reason: "live_flag_in_test" };
 
@@ -158,7 +176,11 @@ export function stripeTestConfig(e: Env = process.env): StripeTestConfig {
     if (!LOCAL_HOSTS.has(u.hostname) || !["http:", "https:"].includes(u.protocol)) return { ok: false, reason: "api_base_not_allowed" };
     apiBase = { host: u.hostname, port: Number(u.port || (u.protocol === "https:" ? 443 : 80)), protocol: u.protocol === "https:" ? "https" : "http" };
   }
-  return { ok: true, mode, secretKey, webhookSecret, apiBase };
+  // キーの持ち主の Stripe のアカウント：新しい検証環境（requireStripeAccountId）では必須。それ以外でも、設定されていれば形を確かめて使う
+  const accountRaw = (e.STRIPE_ACCOUNT_ID ?? "").trim();
+  if (accountRaw && !STRIPE_ACCOUNT_ID_RE.test(accountRaw)) return { ok: false, reason: "test_account_id_missing" };
+  if (previewTarget?.requireStripeAccountId && !accountRaw) return { ok: false, reason: "test_account_id_missing" };
+  return { ok: true, mode, secretKey, webhookSecret, apiBase, ...(accountRaw ? { accountId: accountRaw } : {}) };
 }
 
 const TEST_KEY_RE = /^(sk|pk|rk)_test_/;
@@ -209,7 +231,7 @@ export function stripeLiveConfig(e: Env = process.env): StripeLiveConfig {
 }
 
 export type StripeConfig =
-  | { ok: true; mode: "test"; runtime: "preview" | "local"; secretKey: string; webhookSecret: string; apiBase: { host: string; port: number; protocol: "http" | "https" } | null }
+  | { ok: true; mode: "test"; runtime: "preview" | "local"; secretKey: string; webhookSecret: string; apiBase: { host: string; port: number; protocol: "http" | "https" } | null; accountId?: string }
   | Extract<StripeLiveConfig, { ok: true }>
   | { ok: false; mode: "test" | "live" | "none"; reason: StripeTestDenyReason | StripeLiveDenyReason };
 
@@ -225,7 +247,7 @@ export function stripeConfig(e: Env = process.env): StripeConfig {
   if (e.VERCEL_ENV && e.VERCEL_ENV !== "preview") return { ok: false, mode: "none", reason: "unsupported_environment" };
   const test = stripeTestConfig(e);
   return test.ok
-    ? { ok: true, mode: "test", runtime: test.mode, secretKey: test.secretKey, webhookSecret: test.webhookSecret, apiBase: test.apiBase }
+    ? { ok: true, mode: "test", runtime: test.mode, secretKey: test.secretKey, webhookSecret: test.webhookSecret, apiBase: test.apiBase, ...(test.accountId ? { accountId: test.accountId } : {}) }
     : { ok: false, mode: "test", reason: test.reason };
 }
 
@@ -244,7 +266,8 @@ export const STRIPE_TEST_DENY_MESSAGE: Record<StripeTestDenyReason, string> = {
   test_project_mismatch: "Firebase の接続先がテスト用プロジェクトと一致しません",
   production_project: "本番の Firebase プロジェクトに接続する設定です",
   api_base_not_allowed: "STRIPE_API_BASE はローカルの自動テストでだけ使えます",
-  preview_project_mismatch: "Preview のテスト決済は Firebase の uranai-preview だけで使えます",
+  preview_project_mismatch: "Preview のテスト決済は、コードで許可した Preview 用の Firebase プロジェクトだけで使えます",
+  test_account_id_missing: "この検証環境では STRIPE_ACCOUNT_ID（テストに使う Stripe のアカウントの acct_）が必要です。未設定か、形が正しくありません",
   live_flag_in_test: "本番決済のスイッチ（STRIPE_LIVE_CHECKOUT・STRIPE_LIVE_OPERATOR_TEST）がテストの環境にあります",
 };
 

@@ -9,7 +9,8 @@ import { createPrivateKey } from "node:crypto";
 import { readOperatorInfo } from "../../config/operator";
 import { normalizePrivateKey } from "../firestore/private-key";
 import { isSessionSecretStrong, livePaymentKeyNames } from "../env-rules";
-import { STRIPE_LIVE_DENY_MESSAGE, stripeLiveConfig } from "../payments/stripe-guard";
+import { STRIPE_LIVE_DENY_MESSAGE, stripeLiveConfig, STRIPE_TEST_DENY_MESSAGE, stripeTestConfig } from "../payments/stripe-guard";
+import { checkFirestoreTarget, FIRESTORE_TARGET_MESSAGE, PREVIEW_FIREBASE_TARGETS, previewFirebaseTargetOf, PRODUCTION_FIREBASE_PROJECT_ID, type PreviewFirebaseTarget } from "../firestore/target-guard";
 
 export type CheckLevel = "ok" | "warn" | "error" | "unknown";
 export type CheckResult = { key: string; level: CheckLevel; message: string };
@@ -155,6 +156,9 @@ export function checkProductionEnv(env: Env): CheckResult[] {
     else add("STRIPE_LIVE_CHECKOUT", "error", `Stripe の本番決済の設定に問題があります：${STRIPE_LIVE_DENY_MESSAGE[live.reason]}`);
   }
 
+  // ---- 本番の接続先が Preview 用のプロジェクトになっていないか ----
+  if (previewFirebaseTargetOf(env.FIREBASE_PROJECT_ID)) add("FIREBASE_PROJECT_ID", "error", "本番の FIREBASE_PROJECT_ID が Preview（検証環境）用の Firebase プロジェクトになっています。本番のプロジェクトにしてください。");
+
   // ---- Preview 専用の診断（本番では常に無効。値が残っていれば削除を促す） ----
   if (has(env.OPS_DIAGNOSTICS_TOKEN)) add("OPS_DIAGNOSTICS_TOKEN", "warn", "Preview 専用の診断トークンが本番にあります（本番では使われません）。Preview だけに設定し、本番からは削除してください。");
 
@@ -183,4 +187,31 @@ export function summarize(results: CheckResult[]): Record<CheckLevel, number> {
   const s: Record<CheckLevel, number> = { ok: 0, warn: 0, error: 0, unknown: 0 };
   for (const x of results) s[x.level] += 1;
   return s;
+}
+
+/**
+ * Preview（検証環境）の環境変数の「形式」を確かめる（npm run check:env -- --preview から使う。値は結果に含めない・ネットワークに接続しない）。
+ * アプリの判定（target-guard.ts の Firestore の接続先・stripe-guard.ts の Stripe のテスト決済）を、VERCEL_ENV=preview として呼ぶ。
+ * 新しい検証環境（requireStripeAccountId のプロジェクト）では STRIPE_ACCOUNT_ID が必須。キーが本当にそのアカウントのものかは、
+ * デプロイの後にアプリが Stripe API で確かめる（ここでは確かめられない）。
+ */
+export function checkPreviewEnv(env: Env, targets: readonly PreviewFirebaseTarget[] = PREVIEW_FIREBASE_TARGETS): CheckResult[] {
+  const r: CheckResult[] = [];
+  const add = (key: string, level: CheckLevel, message: string) => r.push({ key, level, message });
+  const e = { ...env, VERCEL_ENV: "preview" };
+  const target = previewFirebaseTargetOf(env.FIREBASE_PROJECT_ID, targets);
+  if (env.FIREBASE_PROJECT_ID === PRODUCTION_FIREBASE_PROJECT_ID) add("FIREBASE_PROJECT_ID", "error", "本番の Firebase プロジェクトです。Preview では使えません。");
+  else if (!target) add("FIREBASE_PROJECT_ID", "error", "コードで許可した Preview 用の Firebase プロジェクトではありません（src/lib/firestore/target-guard.ts の PREVIEW_FIREBASE_TARGETS）。");
+  else add("FIREBASE_PROJECT_ID", "ok", target.requireStripeAccountId ? "許可した検証環境のプロジェクトです（STRIPE_ACCOUNT_ID が必須）。" : "以前からの Preview のプロジェクトです。");
+  const fs = checkFirestoreTarget(e, targets);
+  add("FIRESTORE_TARGET", fs.ok ? "ok" : "error", fs.ok ? "Firestore の接続先の安全確認を満たしています。" : FIRESTORE_TARGET_MESSAGE[fs.reason]);
+  const pk = checkFirebasePrivateKey(env.FIREBASE_PRIVATE_KEY);
+  add(pk.key, pk.level, pk.message);
+  const st = stripeTestConfig(e, targets);
+  if (st.ok) add("STRIPE_TEST_CHECKOUT", "ok", st.accountId ? "Stripe のテスト決済の条件を満たしています（キーのアカウントは、デプロイの後にアプリが Stripe API で確かめます）。" : "Stripe のテスト決済の条件を満たしています（STRIPE_ACCOUNT_ID なし：キーのアカウントは確かめません）。");
+  else add("STRIPE_TEST_CHECKOUT", has(env.STRIPE_TEST_CHECKOUT) ? "error" : "warn", `Stripe のテスト決済を使えません：${STRIPE_TEST_DENY_MESSAGE[st.reason]}`);
+  if (!isSessionSecretStrong(env)) add("SESSION_SECRET", "error", "32文字以上の推測しにくい値が必要です。検証環境ごとに別の値にしてください。");
+  if (!has(env.CRON_SECRET)) add("CRON_SECRET", "warn", "未設定です（定期処理を手で呼んで確かめるときに必要。検証環境ごとに別の値にしてください）。");
+  for (const k of ["STRIPE_LIVE_CHECKOUT", "STRIPE_LIVE_OPERATOR_TEST"]) if (has(env[k])) add(k, "error", "本番決済のスイッチが Preview にあります。削除してください。");
+  return r;
 }

@@ -20,9 +20,11 @@ export async function POST(req: Request) {
   if (!access.ok) return jsonError(404, "not_found", "ただいまお支払いを受け付けていません。");
   const blocked = await guardPost(req, "stripe-session", 10, 60);
   if (blocked) return blocked;
+  let alertMode: "live" | "test" | "unknown" = "unknown";
   try {
     // 戻り先の http は、ローカルの自動テストの接続（allowHttpOrigin）だけ。Preview・本番は https だけ
     const rt = stripeRuntime();
+    alertMode = rt.mode;
     const returnOrigin = stripeReturnOrigin(req.headers.get("origin"), env().APP_URL, rt.allowHttpOrigin ? "local" : "preview");
     const r = await startStripeCheckout(await getAccessToken(), returnOrigin, rt);
     // pending … Stripe 側で支払いの確定待ち（PayPay など）。新しい決済画面には移動させず、確認中の画面へ
@@ -34,7 +36,7 @@ export async function POST(req: Request) {
     if (e instanceof StripeAccountMismatchError) {
       const { recordPaymentAlert } = await import("@/lib/firestore/payment-alerts");
       const { hourBucket } = await import("@/lib/payments/monitor-rules");
-      await recordPaymentAlert({ kind: "stripe_account_mismatch", objectType: "api", objectId: `stripe_session:${hourBucket(new Date())}`, mode: "live", route: "stripe_session", errorName: e.name });
+      await recordPaymentAlert({ kind: "stripe_account_mismatch", objectType: "api", objectId: `stripe_session:${hourBucket(new Date())}`, mode: alertMode, route: "stripe_session", errorName: e.name });
     }
     await notePaymentApiError("stripe_session", 502, (e as Error)?.name);
     return jsonError(502, "stripe_unavailable", "決済画面を開けませんでした。少し時間をおいてから、もう一度お試しください。");
