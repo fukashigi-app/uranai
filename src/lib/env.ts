@@ -72,9 +72,9 @@ export const isProduction = () => process.env.NODE_ENV === "production";
 
 type RawProcessEnv = Record<string, string | undefined>;
 
-import { isDevModeLiveKeyConflict, livePaymentKeyNames, siteStatus } from "./env-rules";
+import { isDevModeLiveKeyConflict, isLiveOperatorTestRequested, livePaymentKeyNames, siteStatus } from "./env-rules";
 import { STRIPE_LIVE_DENY_MESSAGE, stripeLiveConfig } from "./payments/stripe-guard";
-export { isDevModeLiveKeyConflict, isSessionSecretStrong, livePaymentKeyNames, siteStatus, type SiteStatus } from "./env-rules";
+export { isDevModeLiveKeyConflict, isLiveOperatorTestRequested, isSessionSecretStrong, livePaymentKeyNames, siteStatus, type SiteStatus } from "./env-rules";
 
 /**
  * Vercel の本番環境（Production デプロイ）か。
@@ -106,6 +106,8 @@ export function isTestPaymentEnabled(e: RawProcessEnv = process.env): boolean {
  */
 export function isPaidFlowBlocked(e: RawProcessEnv = process.env): boolean {
   if (isDevModeLiveKeyConflict(e)) return true;
+  // 運営だけの本番決済テストを求めているのに、本番の条件がそろっていない（設定の誤り）：受付全体を止める
+  if (isLiveOperatorTestRequested(e) && !stripeLiveConfig(e).ok) return true;
   return isProductionDeployment(e) && (isTestPaymentConfigured(e) || e.PAYMENT_PROVIDER === "mock");
 }
 
@@ -114,17 +116,20 @@ export function isPaidFlowBlocked(e: RawProcessEnv = process.env): boolean {
  *  test_payment_in_production … 本番で ENABLE_TEST_PAYMENT=true（無料テストの設定）
  *  mock_in_production         … 本番で PAYMENT_PROVIDER=mock（疑似決済）
  *  live_key_in_development    … 開発モードで本番用の決済キーが設定されている（keys に変数名）
+ *  live_operator_test_invalid … 運営だけの本番決済テスト（STRIPE_LIVE_OPERATOR_TEST=on）の条件がそろっていない
  */
 export type DangerousConfigReason =
   | { kind: "test_payment_in_production" }
   | { kind: "mock_in_production" }
-  | { kind: "live_key_in_development"; keys: string[] };
+  | { kind: "live_key_in_development"; keys: string[] }
+  | { kind: "live_operator_test_invalid" };
 
 export function dangerousConfigReasons(e: RawProcessEnv = process.env): DangerousConfigReason[] {
   const out: DangerousConfigReason[] = [];
   if (isProductionDeployment(e) && isTestPaymentConfigured(e)) out.push({ kind: "test_payment_in_production" });
   if (isProductionDeployment(e) && e.PAYMENT_PROVIDER === "mock") out.push({ kind: "mock_in_production" });
   if (isDevModeLiveKeyConflict(e)) out.push({ kind: "live_key_in_development", keys: livePaymentKeyNames(e) });
+  if (isLiveOperatorTestRequested(e) && !stripeLiveConfig(e).ok) out.push({ kind: "live_operator_test_invalid" });
   return out;
 }
 
@@ -135,7 +140,9 @@ export function pausedMessage(reasons: DangerousConfigReason[]): string {
       ? "本番で無料テストの設定（ENABLE_TEST_PAYMENT=true）が有効になっている"
       : r.kind === "mock_in_production"
         ? "本番で疑似決済（PAYMENT_PROVIDER=mock）が設定されている"
-        : `開発モードで本番用の決済キー（${r.keys.join("・")}）が設定されている`,
+        : r.kind === "live_operator_test_invalid"
+          ? "運営だけの本番決済テスト（STRIPE_LIVE_OPERATOR_TEST=on）の条件がそろっていない"
+          : `開発モードで本番用の決済キー（${r.keys.join("・")}）が設定されている`,
   );
   return `paused (${parts.length ? `${parts.join("・")}ため` : "危険な設定のため"}、占いの受付を停止中)`;
 }
@@ -248,7 +255,14 @@ export function productionConfigIssues(e: RawProcessEnv = process.env): Producti
     const live = stripeLiveConfig({ ...e, VERCEL_ENV: "production" });
     issues.push(
       live.ok
-        ? { level: "warning", key: "STRIPE_LIVE_CHECKOUT", message: "Stripe の本番決済の設定はそろっていますが、本番決済はまだ実装されていません（使われません）。" }
+        ? {
+            level: "warning",
+            key: "STRIPE_LIVE_CHECKOUT",
+            message:
+              live.audience === "operator"
+                ? "Stripe の本番決済が有効です（運営アカウントだけの本番決済テスト。実際に請求されます）。確認が終わったら、返金してから STRIPE_LIVE_OPERATOR_TEST を削除してください。"
+                : "Stripe の本番決済が有効です（一般のお客さんの決済を受け付けています）。",
+          }
         : { level: "error", key: "STRIPE_LIVE_CHECKOUT", message: `Stripe の本番決済の設定に問題があります：${STRIPE_LIVE_DENY_MESSAGE[live.reason]}` },
     );
   }

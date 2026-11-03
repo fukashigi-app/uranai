@@ -13,7 +13,7 @@ export const maxDuration = 300;
 const MAX_BODY = 256 * 1024;
 
 /**
- * Stripe の Webhook。Stripe との接続は stripeRuntime()（今はテスト＝Sandbox だけ。本番決済は未実装・無効）。
+ * Stripe の Webhook。Stripe との接続は stripeRuntime()（Preview はテスト＝Sandbox、Production は本番。本番の条件がそろわなければ使えない）。
  * 使える設定がそろっていなければ 404（安全側。Stripe は再送する）。処理の中身は lib/payments/stripe-webhook.ts
  * （署名の確認・通知のモードの照合・重複の排除・Stripe API での取り直し）。
  */

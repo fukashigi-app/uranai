@@ -42,6 +42,7 @@ import { recordPaymentAlert } from "@/lib/firestore/payment-alerts";
 import { alertModeOf } from "./monitor-rules";
 import {
   createStripeCheckoutSession,
+  ensureStripeAccount,
   feeOf,
   isOtherStripeEnv,
   isStripeSessionId,
@@ -77,7 +78,7 @@ import {
  * 成功で決済記録を REFUNDED にする。失敗したら refundNeedsReview=true にして、管理者が確認・権利の復旧をできるようにする。
  *
  * モード（テスト／本番）は Stripe との接続（StripeRuntime）で決まる。各関数の最後の引数で渡せるが、アプリからは渡さず
- * stripeRuntime()（今はテストだけ）を使う。本番モードは自動テストで模擬 Stripe API に対してだけ使う。
+ * stripeRuntime()（Preview はテスト、Production は本番）を使う。ローカルの自動テストは模擬 Stripe API の接続を渡す。
  * livemode は Stripe から取得してモードとの一致を確かめた値を記録する。テスト決済（false）は売上・店舗の売上画面・月次精算に
  * 含めず、本番の決済（true）だけが含まれる（lib/payments/kind.ts。salesKeys の countable）。
  * 店舗の取り分・運営の取り分は記録する（100円 → 30円・70円）。手数料は Stripe の確定値。未確定なら推定値で feeEstimated=true にして、後で確定値に直す。
@@ -132,6 +133,8 @@ export type StripeStartResult = { status: "redirect"; url: string } | { status: 
 
 export async function startStripeCheckout(token: string | null, origin: string, rt?: StripeRuntime): Promise<StripeStartResult> {
   const r0 = rt ?? stripeRuntime();
+  // 本番：キーが設定した Stripe のアカウントのものか（違えば決済画面を作らない。例外は呼び出し側で 502）
+  await ensureStripeAccount(r0);
   const found = await stripeCheckoutByToken(token);
   if (!found) throw new CheckoutError("not_found", "お支払い情報が見つかりません。占いの選択からやり直してください。", 404);
   const d = found.data;
@@ -247,6 +250,7 @@ export async function confirmStripeCheckout(
 ): Promise<StripeConfirmOutcome> {
   const r0 = rt ?? stripeRuntime();
   if (!isStripeSessionId(sessionId, r0.mode)) return { status: "rejected", reason: "invalid_session_id" };
+  await ensureStripeAccount(r0); // 本番：別のアカウントのキーなら確定しない（例外。Webhook は 500 で再送）
   const session = await retrieveStripeSession(sessionId, r0);
   if (!sessionPaymentIntentMatches(session.payment_intent, opts.expectedPaymentIntentId)) {
     console.error("[stripe] payment rejected", { sessionId, reason: "payment_intent_mismatch" });
@@ -883,7 +887,7 @@ export async function restoreStripeEntitlement(transactionId: string, actor: Act
       {
         actorUserId: actor.userId,
         actorRole: actor.role,
-        action: "stripe_test.entitlement_restored",
+        action: stripeAuditAction(t.get("livemode"), "entitlement_restored"),
         targetType: "transaction",
         targetId: transactionId,
         storeId: String(t.get("storeId")),
@@ -907,6 +911,12 @@ export async function restoreStripeEntitlement(transactionId: string, actor: Act
   });
 }
 
+/**
+ * 監査ログのイベント名：本番の決済（livemode=true）は stripe.*、それ以外（Sandbox のテスト決済・判定できない記録）は stripe_test.*
+ * （以前の記録の名前は stripe_test.* のまま。監査ログの画面・検索では両方の名前を扱う）
+ */
+const stripeAuditAction = (livemode: unknown, name: "entitlement_restored" | "refund_review_dismissed") => (livemode === true ? `stripe.${name}` : `stripe_test.${name}`);
+
 /** 返金の確認を終える（権利は戻さない。監査ログに残す） */
 export async function dismissStripeRefundReview(transactionId: string, actor: Actor): Promise<boolean> {
   if (!/^stripe_[A-Za-z0-9_]{1,200}$/.test(transactionId)) return false;
@@ -916,7 +926,7 @@ export async function dismissStripeRefundReview(transactionId: string, actor: Ac
     if (!t.exists || t.get("paymentProvider") !== STRIPE_PROVIDER || t.get("refundNeedsReview") !== true) return false;
     tx.update(txRef, { refundNeedsReview: false, refundReviewedAt: new Date(), refundReviewResult: "dismissed", updatedAt: FieldValue.serverTimestamp() });
     await writeAudit(
-      { actorUserId: actor.userId, actorRole: actor.role, action: "stripe_test.refund_review_dismissed", targetType: "transaction", targetId: transactionId, storeId: String(t.get("storeId")), before: { refundStatus: t.get("refundStatus") }, after: null },
+      { actorUserId: actor.userId, actorRole: actor.role, action: stripeAuditAction(t.get("livemode"), "refund_review_dismissed"), targetType: "transaction", targetId: transactionId, storeId: String(t.get("storeId")), before: { refundStatus: t.get("refundStatus") }, after: null },
       tx,
     );
     return true;

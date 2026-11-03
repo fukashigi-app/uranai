@@ -1,5 +1,6 @@
 import { Card, PageHeader } from "@/components/console/shell";
 import { isStripeProviderSelected, stripePublicCheckoutAccess } from "@/lib/payments/stripe-access";
+import { stripeLiveConfig } from "@/lib/payments/stripe-guard";
 import { PasswordForm } from "@/components/console/store-forms";
 import { requireOperator } from "@/lib/auth/session";
 import { env, isDevModeLiveKeyConflict, isPaidFlowBlocked, siteStatus } from "@/lib/env";
@@ -14,10 +15,14 @@ export default async function AdminSettingsPage() {
   const user = await requireOperator();
   const e = env();
   const status = siteStatus().status;
+  const live = stripeLiveConfig();
+  const liveAudience = live.ok ? live.audience : null;
   const mode = isDevModeLiveKeyConflict()
     ? "開発モードなのに本番用の決済キーが設定されているため、占いの受付を停止中（開発モードの無料占いも利用不可）"
     : isPaidFlowBlocked()
-    ? "本番で危険な設定（ENABLE_TEST_PAYMENT=true または PAYMENT_PROVIDER=mock）のため、占いの受付を停止中（運営・店舗アカウントも利用不可）"
+    ? "危険な設定（本番の ENABLE_TEST_PAYMENT=true・PAYMENT_PROVIDER=mock、または運営だけの本番決済テストの条件の不足）のため、占いの受付を停止中（運営・店舗アカウントも利用不可）"
+    : liveAudience === "operator"
+    ? "開発モードの、運営アカウントだけの Stripe 本番決済テスト（STRIPE_LIVE_OPERATOR_TEST=on）：実際に請求され、売上・精算に含まれます。一般の方の決済は受け付けていません。確認の後は返金し、公開の前にこの設定を削除してください"
     : status === "development"
     ? "開発モード（SITE_STATUS=development）：決済は誰に対しても受け付けていません。運営アカウントだけ、テスト店舗（/s/test）と稼働中の登録店舗の QR で無料の占いを確認できます（売上・取り分は0円。店舗の無料テスト利用件数に記録）"
     : status === "coming_soon"
@@ -26,8 +31,10 @@ export default async function AdminSettingsPage() {
     ? "テストモード（ENABLE_TEST_PAYMENT=true・無料で占える・売上には記録しない）"
     : isStripeProviderSelected()
     ? stripePublicCheckoutAccess().ok
-      ? "Stripe のテスト決済（Sandbox）：一般のお客さんも利用可能。実際の請求は発生せず、売上・店舗の精算には含めない"
-      : "Stripe（PAYMENT_PROVIDER=stripe）：決済を受け付けていません（本番決済は未実装、または設定の不足）"
+      ? (stripePublicCheckoutAccess() as { mode?: string }).mode === "live"
+        ? "Stripe の本番決済：一般のお客さんの決済を受け付けています（売上・店舗の精算の対象）"
+        : "Stripe のテスト決済（Sandbox）：一般のお客さんも利用可能。実際の請求は発生せず、売上・店舗の精算には含めない"
+      : "Stripe（PAYMENT_PROVIDER=stripe）：決済を受け付けていません（設定の不足。/api/health・運営ダッシュボードの設定の問題を確認してください）"
     : e.PAYMENT_PROVIDER === "mock"
       ? "自動テスト用の疑似決済（PAYMENT_PROVIDER=mock）"
       : "未設定（決済を受け付けていません。決済は Stripe だけです）";

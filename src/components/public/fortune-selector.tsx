@@ -12,9 +12,10 @@ import { Spinner } from "@/components/ui/spinner";
 /**
  * @param testMode ENABLE_TEST_PAYMENT=true のとき true（サーバーで判定して渡す）。決済をスキップして無料で占える
  * @param stripeTest Stripe のテスト決済の専用の入口（/fortune?pay=stripe-test。サーバーで運営アカウントだと確かめたときだけ true）。
+ * @param stripeLive 上の入口が本番の決済（Production の運営だけの本番決済テスト。実際に請求される）のとき true（表示の文言だけ）。
  *   有料の注文（/api/checkout）を作って支払い画面へ進む。testMode より優先する
  */
-export function FortuneSelector({ testMode: testModeProp = false, stripeTest = false }: { testMode?: boolean; stripeTest?: boolean }) {
+export function FortuneSelector({ testMode: testModeProp = false, stripeTest = false, stripeLive = false }: { testMode?: boolean; stripeTest?: boolean; stripeLive?: boolean }) {
   const testMode = testModeProp && !stripeTest;
   const router = useRouter();
   const [selected, setSelected] = useState<FortuneTypeValue | null>(null);
@@ -130,7 +131,7 @@ export function FortuneSelector({ testMode: testModeProp = false, stripeTest = f
                 <Spinner /> 準備しています…
               </>
             ) : stripeTest ? (
-              `この占いを${DISPLAY_PRICE_JPY}円で始める（Stripeテスト決済）`
+              stripeLive ? `この占いを${DISPLAY_PRICE_JPY}円で始める（本番の決済・運営の確認用）` : `この占いを${DISPLAY_PRICE_JPY}円で始める（Stripeテスト決済）`
             ) : testMode ? (
               "テストモード：無料で占う"
             ) : (
@@ -138,7 +139,11 @@ export function FortuneSelector({ testMode: testModeProp = false, stripeTest = f
             )}
           </button>
           {stripeTest ? (
-            <p className="mt-2 text-center text-[11px] leading-relaxed text-sky-200">Stripe Sandbox のテスト決済です（運営アカウントのみ）。実際の請求は発生しません。</p>
+            stripeLive ? (
+              <p className="mt-2 text-center text-[11px] leading-relaxed text-danger">本番の決済です（運営アカウントのみ）。実際に請求されます。確認の後は返金してください。</p>
+            ) : (
+              <p className="mt-2 text-center text-[11px] leading-relaxed text-sky-200">Stripe Sandbox のテスト決済です（運営アカウントのみ）。実際の請求は発生しません。</p>
+            )
           ) : null}
           {testMode ? (
             <p className="mt-2 text-center text-[11px] leading-relaxed text-violet-300">

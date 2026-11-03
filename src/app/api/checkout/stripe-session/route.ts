@@ -4,8 +4,7 @@ import { getAccessToken } from "@/lib/cookies";
 import { CheckoutError } from "@/lib/errors";
 import { stripeCheckoutAccess } from "@/lib/payments/stripe-access";
 import { startStripeCheckout } from "@/lib/payments/stripe-confirm";
-import { stripeErrorSummary } from "@/lib/payments/stripe-checkout";
-import { stripeTestConfig } from "@/lib/payments/stripe-guard";
+import { StripeAccountMismatchError, stripeErrorSummary, stripeRuntime } from "@/lib/payments/stripe-checkout";
 import { stripeReturnOrigin } from "@/lib/payments/stripe-return-origin";
 import { notePaymentApiError } from "@/lib/services/payment-monitor";
 
@@ -22,15 +21,21 @@ export async function POST(req: Request) {
   const blocked = await guardPost(req, "stripe-session", 10, 60);
   if (blocked) return blocked;
   try {
-    const cfg = stripeTestConfig();
-    const returnOrigin = stripeReturnOrigin(req.headers.get("origin"), env().APP_URL, cfg.ok ? cfg.mode : "preview");
-    const r = await startStripeCheckout(await getAccessToken(), returnOrigin);
+    // 戻り先の http は、ローカルの自動テストの接続（allowHttpOrigin）だけ。Preview・本番は https だけ
+    const rt = stripeRuntime();
+    const returnOrigin = stripeReturnOrigin(req.headers.get("origin"), env().APP_URL, rt.allowHttpOrigin ? "local" : "preview");
+    const r = await startStripeCheckout(await getAccessToken(), returnOrigin, rt);
     // pending … Stripe 側で支払いの確定待ち（PayPay など）。新しい決済画面には移動させず、確認中の画面へ
     return jsonOk(r.status === "succeeded" ? { status: "succeeded" } : r.status === "pending" ? { status: "pending", url: r.returnUrl } : { status: "redirect", url: r.url });
   } catch (e) {
     if (e instanceof CheckoutError) return jsonError(e.httpStatus, e.code, e.userMessage);
     // Stripe のエラーは種類・コード・項目名・リクエストID だけを残す（エラー文・秘密情報は出さない。Stripe のログで照合できる）
     console.error("[api/checkout/stripe-session] failed", stripeErrorSummary(e));
+    if (e instanceof StripeAccountMismatchError) {
+      const { recordPaymentAlert } = await import("@/lib/firestore/payment-alerts");
+      const { hourBucket } = await import("@/lib/payments/monitor-rules");
+      await recordPaymentAlert({ kind: "stripe_account_mismatch", objectType: "api", objectId: `stripe_session:${hourBucket(new Date())}`, mode: "live", route: "stripe_session", errorName: e.name });
+    }
     await notePaymentApiError("stripe_session", 502, (e as Error)?.name);
     return jsonError(502, "stripe_unavailable", "決済画面を開けませんでした。少し時間をおいてから、もう一度お試しください。");
   }

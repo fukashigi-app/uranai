@@ -7,8 +7,8 @@
  *  - それ以外（Vercel の Development など）    … どちらも使えない
  * stripeConfig はこの振り分けをまとめたもの。キー・スイッチ・Firebase の接続先が環境と合わなければ、決済を受け付けない。
  *
- * 本番（Live）の判定は用意しただけで、まだどこからも使っていない（本番決済は未実装・無効）。
- * 決済の処理（stripe-checkout.ts・Webhook など）は stripeTestConfig だけを見るので、本番では今までどおり使えない。
+ * 決済の処理（stripe-checkout.ts の stripeRuntime・Webhook・定期処理・運営画面）は stripeConfig で接続を決める
+ * （Production では本番の条件がすべてそろったときだけ本番の接続。そろわなければ決済を受け付けない）。
  *
  * ---- テスト（Sandbox）----
  *
@@ -69,17 +69,19 @@ export type StripeLiveDenyReason =
   | "webhook_secret_missing"
   | "test_key_present"
   | "dangerous_config"
-  | "live_not_open";
+  | "live_not_open"
+  | "account_id_missing"
+  | "operator_test_while_open";
 
 /**
- * 本番決済を誰に出すか（将来の段階的な公開のため。今はどこからも使っていない）。
+ * 本番決済を誰に出すか（段階的な公開。stripe-access.ts で利用者を確かめる）。
  *  operator … 開発モード（SITE_STATUS=development）のまま、運営アカウントだけが本番決済を試す（STRIPE_LIVE_OPERATOR_TEST=on が必要）
  *  public   … 公開中（SITE_STATUS=open）。一般のお客さん
  */
 export type StripeLiveAudience = "operator" | "public";
 
 export type StripeLiveConfig =
-  | { ok: true; mode: "live"; audience: StripeLiveAudience; secretKey: string; webhookSecret: string }
+  | { ok: true; mode: "live"; audience: StripeLiveAudience; secretKey: string; webhookSecret: string; accountId: string }
   | { ok: false; reason: StripeLiveDenyReason };
 
 export type StripeTestConfig =
@@ -160,18 +162,23 @@ export function stripeTestConfig(e: Env = process.env): StripeTestConfig {
 }
 
 const TEST_KEY_RE = /^(sk|pk|rk)_test_/;
+/** Stripe のアカウントの ID（acct_ と英数字） */
+export const STRIPE_ACCOUNT_ID_RE = /^acct_[A-Za-z0-9]{6,64}$/;
 
 /**
- * ---- 本番（Live）----（判定だけ。まだどこからも使っていない）
+ * ---- 本番（Live）----
  * 次のすべてを満たすときだけ有効。1つでも欠けたら決済を受け付けない（安全側）。
  *  - Vercel の Production（VERCEL_ENV=production）
  *  - STRIPE_LIVE_CHECKOUT=on を明示している。テストのスイッチ（STRIPE_TEST_CHECKOUT）・接続先の差し替え（STRIPE_API_BASE）・Emulator が無い
  *  - Firebase の接続先が本番（FIREBASE_PROJECT_ID と PRODUCTION_FIREBASE_PROJECT_ID がどちらも uranai-b6edf）
  *  - STRIPE_SECRET_KEY が sk_live_、STRIPE_WEBHOOK_SECRET が whsec_ で始まる。テスト用のキー（sk_/pk_/rk_test_）が1つも無い
+ *  - STRIPE_ACCOUNT_ID（acct_。本番に使う Stripe のアカウント）が設定されている。キーがこのアカウントのものかは、
+ *    決済画面の作成・Webhook の処理の前に Stripe API で確かめる（stripe-checkout.ts の ensureStripeAccount。別のアカウントのキーなら受け付けない）
  *  - 疑似決済・無料テストの設定が無い
- *  - 公開中（SITE_STATUS=open → 一般のお客さん）、または開発モードで STRIPE_LIVE_OPERATOR_TEST=on（運営だけ）
- *    ※ 開発モードで本番用キーを登録すると、今は env-rules.ts の isDevModeLiveKeyConflict で受付全体を止める。
- *      運営だけの本番決済テストを実装するときに、STRIPE_LIVE_OPERATOR_TEST=on の場合の扱いをそこで合わせる
+ *  - 公開中（SITE_STATUS=open → 一般のお客さん）、または開発モードで STRIPE_LIVE_OPERATOR_TEST=on（運営アカウントだけ。一般の方は開発モードなので決済できない）
+ *    公開中に STRIPE_LIVE_OPERATOR_TEST が残っていたら、設定の誤りとして受け付けない（公開の前に削除する）
+ *    開発モードで本番用キーがあるときは、STRIPE_LIVE_OPERATOR_TEST=on のときだけ受付を止めない（env-rules.ts の isDevModeLiveKeyConflict）。
+ *    そのときに本番の条件がそろっていなければ、受付全体を止める（env.ts の isPaidFlowBlocked）
  */
 export function stripeLiveConfig(e: Env = process.env): StripeLiveConfig {
   if (e.VERCEL_ENV !== "production") return { ok: false, reason: "not_production" };
@@ -187,15 +194,18 @@ export function stripeLiveConfig(e: Env = process.env): StripeLiveConfig {
   if (!secretKey.startsWith("sk_live_")) return { ok: false, reason: "secret_key_not_live" };
   const webhookSecret = (e.STRIPE_WEBHOOK_SECRET ?? "").trim();
   if (!webhookSecret.startsWith("whsec_")) return { ok: false, reason: "webhook_secret_missing" };
+  const accountId = (e.STRIPE_ACCOUNT_ID ?? "").trim();
+  if (!STRIPE_ACCOUNT_ID_RE.test(accountId)) return { ok: false, reason: "account_id_missing" };
   if (["STRIPE_PUBLISHABLE_KEY", "NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY", "STRIPE_RESTRICTED_KEY"].some((k) => TEST_KEY_RE.test((e[k] ?? "").trim()))) {
     return { ok: false, reason: "test_key_present" };
   }
   if (e.PAYMENT_PROVIDER === "mock" || e.ALLOW_MOCK_PAYMENTS_IN_PRODUCTION === "true" || norm(e.ENABLE_TEST_PAYMENT) === "true") return { ok: false, reason: "dangerous_config" };
   const site = siteStatus(e);
+  if (site.status === "open" && !site.unknown && norm(e.STRIPE_LIVE_OPERATOR_TEST)) return { ok: false, reason: "operator_test_while_open" };
   const audience: StripeLiveAudience | null =
     site.status === "open" && !site.unknown ? "public" : site.status === "development" && norm(e.STRIPE_LIVE_OPERATOR_TEST) === "on" ? "operator" : null;
   if (!audience) return { ok: false, reason: "live_not_open" };
-  return { ok: true, mode: "live", audience, secretKey, webhookSecret };
+  return { ok: true, mode: "live", audience, secretKey, webhookSecret, accountId };
 }
 
 export type StripeConfig =
@@ -205,7 +215,7 @@ export type StripeConfig =
 
 /**
  * 実行環境に合ったモードの判定（Production → 本番だけ、Preview・ローカル → テストだけ、それ以外 → 使えない）。
- * 本番決済を実装するときは、決済の処理をこの関数に切り替える（今は stripeTestConfig だけを使っている）。
+ * 決済の処理が使う接続（stripe-checkout.ts の stripeRuntime）は、この関数で決める。
  */
 export function stripeConfig(e: Env = process.env): StripeConfig {
   if (e.VERCEL_ENV === "production") {
@@ -252,4 +262,6 @@ export const STRIPE_LIVE_DENY_MESSAGE: Record<StripeLiveDenyReason, string> = {
   test_key_present: "本番にテスト用の Stripe のキーがあります",
   dangerous_config: "疑似決済・無料テストの設定が残っています",
   live_not_open: "公開中（SITE_STATUS=open）ではなく、運営だけの本番決済テスト（STRIPE_LIVE_OPERATOR_TEST=on）も有効ではありません",
+  account_id_missing: "STRIPE_ACCOUNT_ID（本番に使う Stripe のアカウントの acct_）が設定されていないか、形が正しくありません",
+  operator_test_while_open: "公開中（SITE_STATUS=open）なのに、運営だけの本番決済テストのスイッチ（STRIPE_LIVE_OPERATOR_TEST）が残っています。削除してください",
 };

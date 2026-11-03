@@ -7,8 +7,10 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 
 export type FakeStripeMode = "test" | "live";
 
-export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; apiKey: string }) {
+export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; apiKey: string; accountId?: string }) {
   const { port, mode, apiKey } = opts;
+  /** このキーの持ち主のアカウント（GET /v1/account で返す。本番の接続のアカウントの確認用） */
+  const accountId = opts.accountId ?? `acct_fake${mode}account`;
   const LIVE = mode === "live";
   type FakeSession = Record<string, unknown> & { id: string; metadata: Record<string, string> };
   const fake = {
@@ -118,6 +120,7 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
       }
     }
     const m = (re: RegExp) => re.exec(url.pathname);
+    if (req.method === "GET" && url.pathname === "/v1/account") return send(res, 200, { id: accountId, object: "account" });
     const evm = m(/^\/v1\/events\/([^/]+)$/);
     if (req.method === "GET" && evm) {
       const ev = fake.events.get(evm[1]);

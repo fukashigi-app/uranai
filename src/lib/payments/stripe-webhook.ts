@@ -1,6 +1,6 @@
 import "server-only";
 import type Stripe from "stripe";
-import type { StripeRuntime } from "./stripe-checkout";
+import { ensureStripeAccount, type StripeRuntime } from "./stripe-checkout";
 import { closeStripeCheckout, confirmStripeCheckout, refreshStripeFee, syncStripeDispute, syncStripeRefunds } from "./stripe-confirm";
 import { acquireWebhookEventLease, finishWebhookEventWithLease, recordWebhookEventFailure } from "@/lib/firestore/payments";
 import { stripeEventMeta, webhookErrorNameOf } from "./webhook-event-state";
@@ -9,7 +9,8 @@ import { recordPaymentAlert } from "@/lib/firestore/payment-alerts";
 import { alertKindForWebhookEvent, alertModeOf, hourBucket, newThrottleState, throttleTick } from "./monitor-rules";
 
 /**
- * Stripe の Webhook の処理（モードは Stripe との接続 rt で決まる。アプリの route からは stripeRuntime()＝今はテストだけを渡す）。
+ * Stripe の Webhook の処理（モードは Stripe との接続 rt で決まる。アプリの route からは stripeRuntime()＝Preview はテスト・Production は本番を渡す）。
+ *  0) 本番の接続では、キーが設定した Stripe のアカウント（STRIPE_ACCOUNT_ID）のものかを確かめる（確かめられなければ 503。処理済みにしない。Stripe が再送する）
  *  1) 生の本文で署名を確認（Stripe 公式 SDK。5分以内の通知だけ）。署名の値はモードごとに別（本番と Sandbox の送信先は別）
  *  2) 通知の livemode がモードと一致しなければ拒否（テストの環境に本番の通知、本番の環境にテストの通知を受け付けない）。
  *     署名が正しい通知だけ、運営が気付けるよう決済要確認に記録する。署名が不正な通知は何も記録しない
@@ -64,6 +65,16 @@ export async function processStripeEvent(event: Stripe.Event, rt: StripeRuntime)
     const objId = (event.data?.object as { id?: unknown } | undefined)?.id;
     await recordPaymentReview({ kind: "mode_mismatch", objectType: "event", objectId: typeof objId === "string" ? objId : event.id, eventType: event.type, livemode: event.livemode });
     return { status: 400, body: rt.mode === "live" ? "Test events are not accepted" : "Live events are not accepted" };
+  }
+
+  // 本番：キーが設定した Stripe のアカウントのものか（別のアカウントの決済を、このアカウントの通知として処理しない）
+  try {
+    await ensureStripeAccount(rt);
+  } catch (e) {
+    const errorName = webhookErrorNameOf(e);
+    console.error("[stripe-webhook] Stripe account check failed", { eventId: event.id, error: errorName });
+    await recordPaymentAlert({ kind: "stripe_account_mismatch", objectType: "webhook", objectId: `stripe_account:${hourBucket(new Date())}`, mode: alertModeOf(rt.mode === "live"), errorName });
+    return { status: 503, body: "Stripe account could not be verified", errorName };
   }
 
   // 処理権の取得に失敗したら例外（今までどおり。route が 500 を返し、Stripe が再送する）

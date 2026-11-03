@@ -110,7 +110,9 @@ async function checkPayment(p: Pay, when: string) {
   }
   // REFUNDED から SUCCEEDED に戻るのは、運営の復旧の操作だけ
   if (co.status === "SUCCEEDED" && p.wasRefunded) assert.ok(p.restores > 0, `${at}: 復旧の操作なしに REFUNDED から SUCCEEDED に戻りました`);
-  const audits = await fsdb().collection(C.auditLogs).where("targetId", "==", t.id).where("action", "==", "stripe_test.entitlement_restored").get();
+  // 監査ログの名前：本番の決済は stripe.*、テストの決済は stripe_test.*
+  const restoreAction = t.get("livemode") === true ? "stripe.entitlement_restored" : "stripe_test.entitlement_restored";
+  const audits = await fsdb().collection(C.auditLogs).where("targetId", "==", t.id).where("action", "==", restoreAction).get();
   assert.equal(audits.size, p.restores, `${at}: 復旧の監査ログが${audits.size}件（復旧の成功は${p.restores}回）`);
   // 売上・手数料の集計のキー
   const live = t.get("livemode") === true;

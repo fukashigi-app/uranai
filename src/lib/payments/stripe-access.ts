@@ -3,7 +3,7 @@ import { cache } from "react";
 import { isFirestore } from "@/lib/data-provider";
 import { isSessionSecretStrong, isTestPaymentConfigured, serviceStopReason } from "@/lib/env";
 import type { SessionUser } from "@/lib/auth/session";
-import { stripeTestConfig, type StripeTestDenyReason } from "./stripe-guard";
+import { stripeLiveConfig, stripeTestConfig, type StripeLiveDenyReason, type StripeTestDenyReason } from "./stripe-guard";
 import { stripeRuntime, type StripeMode } from "./stripe-checkout";
 import { stripePublicDecision, type StripePublicDecision } from "./stripe-public";
 
@@ -34,13 +34,57 @@ export const stripeTestAccess = cache(async (): Promise<StripeTestAccess> => {
 });
 
 /**
+ * 運営アカウントだけの本番決済テスト（Production・開発モード・STRIPE_LIVE_OPERATOR_TEST=on・本番の条件がすべてそろっている）を使ってよい利用者か。
+ * 実際に請求される本番の決済（livemode=true）なので、売上・精算に数える。確認が終わったら返金する（返金した決済は売上・精算から外れる）。
+ *  - 本番の条件（stripe-guard.ts の stripeLiveConfig）で、受け付ける相手が operator（運営だけ）
+ *  - Firestore・安全な SESSION_SECRET・運営アカウント（OPERATOR）でログイン中（一般の方・店舗アカウントは使えない）
+ */
+export type StripeLiveOperatorAccess = { ok: true; user: SessionUser } | { ok: false; reason: StripeLiveDenyReason | "not_operator_audience" | "not_firestore" | "weak_secret" | "not_logged_in" | "not_operator" | "unavailable" };
+
+export const stripeLiveOperatorAccess = cache(async (): Promise<StripeLiveOperatorAccess> => {
+  const cfg = stripeLiveConfig();
+  if (!cfg.ok) return { ok: false, reason: cfg.reason };
+  if (cfg.audience !== "operator") return { ok: false, reason: "not_operator_audience" };
+  if (!isFirestore()) return { ok: false, reason: "not_firestore" };
+  if (!isSessionSecretStrong()) return { ok: false, reason: "weak_secret" };
+  try {
+    const { getSessionUser } = await import("@/lib/auth/session");
+    const user = await getSessionUser();
+    if (!user) return { ok: false, reason: "not_logged_in" };
+    if (user.role !== "OPERATOR") return { ok: false, reason: "not_operator" };
+    return { ok: true, user };
+  } catch (e) {
+    console.error("[stripe] live operator access check failed", (e as Error).name);
+    return { ok: false, reason: "unavailable" };
+  }
+});
+
+/**
+ * 運営アカウントだけの Stripe の決済（/fortune?pay=stripe-test の入口）を使ってよいか。
+ *  - Preview・ローカル … Sandbox のテスト決済（stripeTestAccess）
+ *  - Production         … 運営だけの本番決済テスト（stripeLiveOperatorAccess）。実際に請求される
+ */
+export type StripeOperatorAccess = { ok: true; user: SessionUser; mode: StripeMode } | { ok: false };
+
+export const stripeOperatorAccess = cache(async (): Promise<StripeOperatorAccess> => {
+  const t = await stripeTestAccess();
+  if (t.ok) return { ok: true, user: t.user, mode: "test" };
+  const l = await stripeLiveOperatorAccess();
+  if (l.ok) return { ok: true, user: l.user, mode: "live" };
+  return { ok: false };
+});
+
+/**
  * 一般のお客さん（ログイン不要）の Stripe Checkout の決済を受け付けるか（判定は stripe-public.ts）。
- * Stripe との接続は stripeRuntime()（今はテスト＝Sandbox だけ）。本番では使えないため受け付けない。
+ * Stripe との接続は stripeRuntime()（Preview はテスト、Production は本番）。本番の接続は、受け付ける相手が一般（public。公開中）のときだけ使う
+ * （運営だけの本番決済テストの設定では、一般の方の決済を受け付けない）。
  */
 export const stripePublicCheckoutAccess = cache((): StripePublicDecision => {
   let runtimeMode: StripeMode | null = null;
   try {
-    runtimeMode = stripeRuntime().mode;
+    const rt = stripeRuntime();
+    // 本番の接続は、一般のお客さんを受け付ける設定（公開中）のときだけ。運営だけの本番決済テストでは使わない
+    runtimeMode = rt.mode === "live" && rt.liveAudience !== "public" ? null : rt.mode;
   } catch {
     runtimeMode = null;
   }
@@ -56,14 +100,16 @@ export const stripePublicCheckoutAccess = cache((): StripePublicDecision => {
 
 /**
  * この利用者の注文を Stripe Checkout で受け付けるか（運営アカウントのテスト決済、または一般のお客さんの決済）。
- *  - operator_test … 運営アカウントだけのテスト決済（stripeTestAccess。開発モード・準備中でも使える）
+ *  - operator_test … 運営アカウントだけの決済（stripeOperatorAccess。Preview は Sandbox のテスト決済で開発モード・準備中でも使える。
+ *                    Production は開発モードの本番決済テスト（実際に請求される。mode=live））
  *  - public        … 一般のお客さん（stripePublicCheckoutAccess。公開中で PAYMENT_PROVIDER=stripe のときだけ）
  * どちらも使えなければ ok: false（ほかの決済へ自動で切り替えない）。
  */
 export type StripeCheckoutAccess = { ok: true; audience: "operator_test" | "public"; mode: StripeMode } | { ok: false };
 
 export const stripeCheckoutAccess = cache(async (): Promise<StripeCheckoutAccess> => {
-  if ((await stripeTestAccess()).ok) return { ok: true, audience: "operator_test", mode: "test" };
+  const op = await stripeOperatorAccess();
+  if (op.ok) return { ok: true, audience: "operator_test", mode: op.mode };
   const pub = stripePublicCheckoutAccess();
   if (pub.ok) return { ok: true, audience: "public", mode: pub.mode };
   return { ok: false };

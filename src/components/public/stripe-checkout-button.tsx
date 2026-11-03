@@ -8,13 +8,15 @@ import { PAY_BUTTON_LABEL, STRIPE_TEST_PAY_BUTTON_LABEL } from "@/lib/legal/labe
 /**
  * Stripe Checkout へ移動するボタン。URL はサーバーが注文と紐付けてから返す（/api/checkout/stripe-session）。
  * 使える人・表示はサーバーで判定して渡す（ページ側とサーバー側の両方で確認している）。
- *  - operator_test … 運営アカウントだけのテスト決済
+ *  - operator_test … 運営アカウントだけのテスト決済（Sandbox）
+ *  - operator_live … 運営アカウントだけの本番決済テスト（Production の開発モード。実際に請求される）
  *  - public_test   … 一般のお客さん向けの画面のテスト（Stripe Sandbox。実際の請求は発生しない）
- *  - live          … 本番決済（未実装。今はサーバーが渡さない）
+ *  - live          … 本番決済（一般のお客さん）
  */
-export type StripeCheckoutVariant = "operator_test" | "public_test" | "live";
+export type StripeCheckoutVariant = "operator_test" | "operator_live" | "public_test" | "live";
 
 const NOTICE: Record<Exclude<StripeCheckoutVariant, "live">, string> = {
+  operator_live: "本番の決済です（運営アカウントだけの確認用）。実際に請求され、売上・店舗の精算に含まれます。確認が終わったら、Stripe のダッシュボードから返金してください（返金した決済は売上・精算から外れます）。テスト用のカード番号は使えません。",
   operator_test: "Stripe のテスト決済です（運営アカウントのみ）。実際の請求は発生しません。決済画面ではクレジットカード（Apple Pay・Google Pay を含む）または PayPay を選べます。Stripe のテスト用の支払い情報を使ってください。",
   public_test: "テスト環境です。実際の請求は発生しません。決済画面に表示されるお支払い方法（クレジットカードなど）から選べます。Stripe のテスト用の支払い情報を使ってください。",
 };
@@ -54,6 +56,10 @@ export function StripeCheckoutButton({ canceled, variant }: { canceled: boolean;
     <div className="glass rounded-3xl p-5">
       {variant === "live" ? (
         <p className="text-[12px] leading-relaxed text-ink-muted">決済画面に表示されるお支払い方法（クレジットカードなど）から選べます。</p>
+      ) : variant === "operator_live" ? (
+        <p data-live-operator-notice="" className="rounded-xl border border-danger/40 bg-danger/10 px-3 py-2.5 text-[12px] leading-relaxed text-danger">
+          {NOTICE.operator_live}
+        </p>
       ) : (
         <p className="rounded-xl border border-sky-400/30 bg-sky-500/10 px-3 py-2.5 text-[12px] leading-relaxed text-sky-200">{NOTICE[variant]}</p>
       )}
@@ -73,7 +79,7 @@ export function StripeCheckoutButton({ canceled, variant }: { canceled: boolean;
             <Spinner /> 決済画面を開いています…
           </>
         ) : (
-          variant === "live" ? PAY_BUTTON_LABEL : STRIPE_TEST_PAY_BUTTON_LABEL
+          variant === "live" || variant === "operator_live" ? PAY_BUTTON_LABEL : STRIPE_TEST_PAY_BUTTON_LABEL
         )}
       </button>
     </div>

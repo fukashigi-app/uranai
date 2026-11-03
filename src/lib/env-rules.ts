@@ -32,11 +32,22 @@ export function livePaymentKeyNames(e: RawProcessEnv = process.env): string[] {
 }
 
 /**
+ * 開発モード（SITE_STATUS=development）で、運営アカウントだけの本番決済テスト（STRIPE_LIVE_OPERATOR_TEST=on）を求めているか。
+ * 求めているだけで、使えるかは stripe-guard.ts の stripeLiveConfig（Production・STRIPE_LIVE_CHECKOUT=on・本番の Firebase・sk_live_ など）で決まる。
+ * 条件がそろわなければ、受付全体を止める（env.ts の isPaidFlowBlocked）
+ */
+export function isLiveOperatorTestRequested(e: RawProcessEnv = process.env): boolean {
+  return siteStatus(e).status === "development" && (e.STRIPE_LIVE_OPERATOR_TEST ?? "").trim().toLowerCase() === "on";
+}
+
+/**
  * 開発モード（SITE_STATUS=development）なのに本番用の決済キーが設定されている。
  * 開発モードのつもりで実際の課金ができる状態にしないよう、占いの受付（無料・有料とも）を止める。
+ * ただし、運営アカウントだけの本番決済テスト（STRIPE_LIVE_OPERATOR_TEST=on）を明示しているときは除く
+ * （一般の方は開発モードなので決済できない。本番の条件がそろわなければ isPaidFlowBlocked が受付全体を止める）。
  */
 export function isDevModeLiveKeyConflict(e: RawProcessEnv = process.env): boolean {
-  return siteStatus(e).status === "development" && livePaymentKeyNames(e).length > 0;
+  return siteStatus(e).status === "development" && livePaymentKeyNames(e).length > 0 && !isLiveOperatorTestRequested(e);
 }
 
 /**

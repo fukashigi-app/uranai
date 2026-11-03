@@ -110,7 +110,9 @@ export function checkProductionEnv(env: Env): CheckResult[] {
   else if (site === "coming_soon") add("SITE_STATUS", "ok", "coming_soon（準備中）です。");
   else if (site === "development") {
     const live = livePaymentKeyNames(env);
-    if (live.length) add("SITE_STATUS", "error", `development（開発モード）なのに本番用の決済キー（${live.join("・")}）が登録されています。アプリは占いの受付を全部停止します。開発モード中は本番用の決済キーを削除してください。`);
+    const operatorLive = (env.STRIPE_LIVE_OPERATOR_TEST ?? "").trim().toLowerCase() === "on";
+    if (live.length && operatorLive) add("SITE_STATUS", "warn", `development（開発モード）で、運営アカウントだけの本番決済テスト（STRIPE_LIVE_OPERATOR_TEST=on）です。本番用の決済キー（${live.join("・")}）で実際に請求されます。一般の方の決済は受け付けません。確認の後は返金し、公開の前に STRIPE_LIVE_OPERATOR_TEST を削除してください。`);
+    else if (live.length) add("SITE_STATUS", "error", `development（開発モード）なのに本番用の決済キー（${live.join("・")}）が登録されています。アプリは占いの受付を全部停止します。開発モード中は本番用の決済キーを削除してください。`);
     else add("SITE_STATUS", "ok", "development（開発モード）です。一般の方には準備中を表示し、決済は受け付けません。無料の占いは運営アカウントだけ（テスト店舗 /s/test と、稼働中の登録店舗の QR）で使えます。");
     if (!isSessionSecretStrong(env)) add("SESSION_SECRET", "warn", "開発モードの無料占いには、安全な SESSION_SECRET（32文字以上・推測しにくい値）が必要です。今の値では無料の占いを提供しません。");
   } else add("SITE_STATUS", "error", "open・coming_soon・development 以外の値です（準備中として扱われます）。");
@@ -121,7 +123,7 @@ export function checkProductionEnv(env: Env): CheckResult[] {
     add("ENABLE_TEST_PAYMENT", "warn", "true / false 以外の値です（無効として扱われます）。");
   }
   if (env.PAYMENT_PROVIDER === "mock") add("PAYMENT_PROVIDER", "error", "mock（疑似決済）は本番では使えません。");
-  else if (env.PAYMENT_PROVIDER === "stripe") add("PAYMENT_PROVIDER", "warn", "stripe です。Stripe の本番決済はまだ実装されていないため、本番では決済を受け付けません。");
+  else if (env.PAYMENT_PROVIDER === "stripe") add("PAYMENT_PROVIDER", has(env.STRIPE_LIVE_CHECKOUT) ? "ok" : "warn", has(env.STRIPE_LIVE_CHECKOUT) ? "stripe です（本番決済の条件は下の STRIPE_LIVE_CHECKOUT の確認を見てください）。" : "stripe です。STRIPE_LIVE_CHECKOUT=on などの本番決済の設定が無いため、本番では決済を受け付けません。");
   else if (env.PAYMENT_PROVIDER === "payjp") add("PAYMENT_PROVIDER", "warn", "payjp は廃止しました（PAY.JP は使っていません。決済は受け付けません）。削除するか、stripe にしてください。");
   else if (has(env.PAYMENT_PROVIDER)) add("PAYMENT_PROVIDER", "error", "対応していない値です（アプリが起動時にエラーになります）。");
   if (env.ALLOW_MOCK_PAYMENTS_IN_PRODUCTION === "true") add("ALLOW_MOCK_PAYMENTS_IN_PRODUCTION", "error", "本番では削除してください。");
@@ -133,13 +135,23 @@ export function checkProductionEnv(env: Env): CheckResult[] {
   // ---- Stripe（テスト決済は Preview だけ。本番では使わない） ----
   if (has(env.STRIPE_TEST_CHECKOUT)) add("STRIPE_TEST_CHECKOUT", "error", "Stripe のテスト決済の設定が本番にあります（本番では常に無効）。Preview だけに設定し、本番からは削除してください。");
   if (has(env.STRIPE_API_BASE)) add("STRIPE_API_BASE", "error", "ローカルの自動テスト用の設定です。本番から削除してください。");
-  for (const k of ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_TEST_FIREBASE_PROJECT_ID"]) {
-    if (has(env[k])) add(k, "warn", "Stripe の設定が本番にあります。Stripe の本番決済は未実装です。テスト用の値なら Preview だけに設定してください。");
+  if (has(env.STRIPE_TEST_FIREBASE_PROJECT_ID)) add("STRIPE_TEST_FIREBASE_PROJECT_ID", "warn", "Preview のテスト決済用の設定が本番にあります（本番では使いません）。Preview だけに設定してください。");
+  if (!has(env.STRIPE_LIVE_CHECKOUT) && !has(env.STRIPE_LIVE_OPERATOR_TEST)) {
+    for (const k of ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET"]) {
+      if (has(env[k])) add(k, "warn", "Stripe の設定が本番にありますが、本番決済のスイッチ（STRIPE_LIVE_CHECKOUT=on）がありません（使われません）。テスト用の値なら Preview だけに設定してください。");
+    }
   }
   // 本番決済のスイッチがあれば、本番の条件（sk_live_・Firebase の接続先など）がそろっているか確かめる（値は出さない）
   if (has(env.STRIPE_LIVE_CHECKOUT) || has(env.STRIPE_LIVE_OPERATOR_TEST)) {
     const live = stripeLiveConfig({ ...env, VERCEL_ENV: "production" });
-    if (live.ok) add("STRIPE_LIVE_CHECKOUT", "warn", "Stripe の本番決済の設定はそろっていますが、本番決済はまだ実装されていません（使われません）。");
+    if (live.ok)
+      add(
+        "STRIPE_LIVE_CHECKOUT",
+        live.audience === "operator" ? "warn" : "ok",
+        live.audience === "operator"
+          ? "Stripe の本番決済の設定がそろっています（運営アカウントだけの本番決済テスト。実際に請求されます）。キーが STRIPE_ACCOUNT_ID のアカウントのものかは、アプリが Stripe API で確かめます。"
+          : "Stripe の本番決済の設定がそろっています（一般のお客さんの決済）。キーが STRIPE_ACCOUNT_ID のアカウントのものかは、アプリが Stripe API で確かめます。",
+      );
     else add("STRIPE_LIVE_CHECKOUT", "error", `Stripe の本番決済の設定に問題があります：${STRIPE_LIVE_DENY_MESSAGE[live.reason]}`);
   }
 

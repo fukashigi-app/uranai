@@ -4,8 +4,8 @@
  *  - Stripe は、このスクリプトが起動する localhost の模擬サーバー（本番として振る舞う：cs_live_・livemode=true）だけ
  *  - Firebase は Firestore Emulator の demo- プロジェクトだけ
  *  - キーは形だけの偽物（環境変数には入れず、模擬の接続を作るときだけ使う）
- * アプリの決済の処理（画面・API）は今もテストモードだけなので、ここでは決済のライブラリを直接呼び、
- * 模擬の本番モードの接続（createSimulatedStripeRuntime）を渡して確かめる。
+ * アプリの画面・API の本番の接続は Production でしか作れない（stripe-guard.ts）ため、ここでは決済のライブラリを直接呼び、
+ * 模擬の本番モードの接続（createSimulatedStripeRuntime）を渡して確かめる（運用の流れは e2e-stripe-live-ops.ts）。
  *
  *   firebase emulators:start --only firestore --project demo-uranai
  *   （別ターミナル）FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 FIREBASE_PROJECT_ID=demo-uranai-live DB_PROVIDER=firestore npm run e2e:stripe-live

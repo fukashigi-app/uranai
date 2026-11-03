@@ -4,6 +4,12 @@ import { dataProvider } from "@/lib/data-provider";
 import { readOperatorInfo } from "@/config/operator";
 import { dangerousConfigReasons, isPaidFlowBlocked, isTestPaymentConfigured, pausedMessage, productionConfigIssues, siteStatus } from "@/lib/env";
 import { checkFirestoreTarget } from "@/lib/firestore/target-guard";
+import { stripeLiveConfig } from "@/lib/payments/stripe-guard";
+
+const stripeLiveOperatorAudience = () => {
+  const c = stripeLiveConfig();
+  return c.ok && c.audience === "operator";
+};
 import { getMaintenanceStatus } from "@/lib/services/maintenance-status";
 
 export const dynamic = "force-dynamic";
@@ -23,15 +29,19 @@ export async function GET() {
     paymentMode: isPaidFlowBlocked()
       ? pausedMessage(dangerousConfigReasons())
       : siteStatus().status === "development"
-        ? "development (開発モード：決済は受け付けていません。無料の占いは運営アカウントのみ)"
+        ? stripeLiveOperatorAudience()
+          ? "development + live operator test (開発モード：運営アカウントだけの本番決済テスト。一般の方の決済は受け付けていません)"
+          : "development (開発モード：決済は受け付けていません。無料の占いは運営アカウントのみ)"
       : siteStatus().status === "coming_soon"
         ? "coming_soon (準備中：無料テスト・決済とも受け付けていません)"
         : isTestPaymentConfigured()
         ? "test (ENABLE_TEST_PAYMENT=true)"
         : isStripeProviderSelected()
           ? stripePublicCheckoutAccess().ok
-            ? "stripe (test: Sandbox。売上・精算には含めない)"
-            : "stripe (決済を受け付けていません：本番決済は未実装、または設定が不足しています)"
+            ? (stripePublicCheckoutAccess() as { mode?: string }).mode === "live"
+              ? "stripe (live: 本番決済。売上・精算の対象)"
+              : "stripe (test: Sandbox。売上・精算には含めない)"
+            : "stripe (決済を受け付けていません：設定が不足しています)"
           : "none (決済未設定。決済は Stripe だけ：PAYMENT_PROVIDER=stripe)",
     CRON_SECRET: process.env.CRON_SECRET ? "set" : "missing (定期処理が実行されません)",
   };

@@ -2,15 +2,16 @@ import "server-only";
 import { createHash } from "node:crypto";
 import Stripe from "stripe";
 import { CURRENCY, PRICE_JPY } from "@/config/pricing";
-import { isLocalEmulatorTarget, stripeTestConfig, STRIPE_TEST_DENY_MESSAGE } from "./stripe-guard";
+import { isLocalEmulatorTarget, STRIPE_ACCOUNT_ID_RE, stripeConfig, STRIPE_LIVE_DENY_MESSAGE, STRIPE_TEST_DENY_MESSAGE, type StripeLiveAudience, type StripeLiveDenyReason, type StripeTestDenyReason } from "./stripe-guard";
 import { disputeAmountProblem } from "./stripe-sync-rules";
 
 /**
  * Stripe Checkout（Stripe の決済画面へ移動する方式）。Stripe 公式 SDK を使う。
  *  - Stripe との接続は「モード」（test＝Sandbox / live＝本番）を持つ StripeRuntime で表す。照合・記録はモードに合わせて行う
  *    （Session の ID が cs_test_ / cs_live_、Session・PaymentIntent・Charge・通知の livemode がモードと一致すること）
- *  - アプリの決済の処理が使う接続は stripeRuntime() だけで、今はテスト（sk_test_）しか返さない。本番決済は未実装・無効
- *    （条件は stripe-guard.ts。欠けていたら例外＝決済を受け付けない）
+ *  - アプリの決済の処理が使う接続は stripeRuntime() だけ。実行環境で決まる：Preview・ローカルの自動テストはテスト（sk_test_）、
+ *    Production は本番（sk_live_。条件がすべてそろったときだけ）。条件は stripe-guard.ts の stripeConfig。欠けていたら例外＝決済を受け付けない
+ *  - 本番の接続は、キーが設定した Stripe のアカウント（STRIPE_ACCOUNT_ID）のものかを、決済画面の作成・Webhook の処理の前に確かめる（ensureStripeAccount）
  *  - 本番モードの処理は、自動テストで createSimulatedStripeRuntime（localhost の模擬 Stripe API と Firestore Emulator だけ）で確かめる
  *  - 決済の確定は、Webhook や戻り先の URL の内容を信用せず、必ず Stripe API から取り直して検証する（stripe-confirm.ts）
  *  - 支払い方法は、カード（Apple Pay・Google Pay を含む）と PayPay だけ。Session の作成時に絞り込み、確定時にも Charge で確認する
@@ -34,6 +35,10 @@ export type StripeRuntime = {
   readonly allowHttpOrigin: boolean;
   /** この環境（Firestore のプロジェクト）を表す値（stripeEnvTag）。Session の metadata に入れ、別の環境の決済を見分ける */
   readonly envTag: string;
+  /** 本番の接続だけ：キーの持ち主であるべき Stripe のアカウント（acct_）。ensureStripeAccount で確かめる */
+  readonly accountId?: string;
+  /** 本番の接続だけ：誰の決済を受け付けるか（operator … 運営アカウントだけの本番決済テスト・public … 一般のお客さん） */
+  readonly liveAudience?: StripeLiveAudience;
   /** 自動テスト専用（createSimulatedStripeRuntime だけが設定する）：処理の途中の停止を再現する */
   readonly testHooks?: StripeTestHooks;
 };
@@ -97,18 +102,60 @@ function envTagOrThrow(e: Record<string, string | undefined>): string {
 let cached: { key: string; runtime: StripeRuntime } | null = null;
 
 /**
- * アプリの決済の処理が使う Stripe との接続。今はテスト（Sandbox）だけを返す（本番決済は未実装・無効。段階を分けて有効にする）。
- * 使えない設定のときは例外（安全側）。
+ * アプリの決済の処理が使う Stripe との接続（stripe-guard.ts の stripeConfig で決める）。
+ *  - Preview・ローカルの自動テスト … テスト（Sandbox）
+ *  - Production                     … 本番（STRIPE_LIVE_CHECKOUT=on・sk_live_・本番の Firebase・STRIPE_ACCOUNT_ID などがそろったときだけ）
+ * 使えない設定のときは例外（安全側。決済画面の作成・Webhook・定期処理・運営画面の操作を受け付けない）。
  */
 export function stripeRuntime(): StripeRuntime {
-  const cfg = stripeTestConfig();
-  if (!cfg.ok) throw new StripeUnavailableError(STRIPE_TEST_DENY_MESSAGE[cfg.reason]);
+  const cfg = stripeConfig();
+  if (!cfg.ok) {
+    const msg = cfg.mode === "live" ? STRIPE_LIVE_DENY_MESSAGE[cfg.reason as StripeLiveDenyReason] : STRIPE_TEST_DENY_MESSAGE[cfg.reason as StripeTestDenyReason];
+    throw new StripeUnavailableError(msg ?? cfg.reason);
+  }
   const envTag = envTagOrThrow(process.env);
+  if (cfg.mode === "live") {
+    const key = `live|${cfg.secretKey}|${cfg.webhookSecret}|${cfg.accountId}|${cfg.audience}|${envTag}`;
+    if (cached?.key === key) return cached.runtime;
+    const runtime: StripeRuntime = { mode: "live", client: newClient(cfg.secretKey, null), webhookSecret: cfg.webhookSecret, allowHttpOrigin: false, envTag, accountId: cfg.accountId, liveAudience: cfg.audience };
+    cached = { key, runtime };
+    return runtime;
+  }
   const key = `test|${cfg.secretKey}|${cfg.webhookSecret}|${cfg.apiBase ? `${cfg.apiBase.protocol}://${cfg.apiBase.host}:${cfg.apiBase.port}` : ""}|${envTag}`;
   if (cached?.key === key) return cached.runtime;
-  const runtime: StripeRuntime = { mode: "test", client: newClient(cfg.secretKey, cfg.apiBase), webhookSecret: cfg.webhookSecret, allowHttpOrigin: cfg.mode === "local", envTag };
+  const runtime: StripeRuntime = { mode: "test", client: newClient(cfg.secretKey, cfg.apiBase), webhookSecret: cfg.webhookSecret, allowHttpOrigin: cfg.runtime === "local", envTag };
   cached = { key, runtime };
   return runtime;
+}
+
+export class StripeAccountMismatchError extends Error {
+  constructor() {
+    super("The Stripe API key does not belong to the configured Stripe account");
+    this.name = "StripeAccountMismatchError";
+  }
+}
+
+/** 確かめたアカウント（接続ごと。成功したときだけ覚える。失敗・不一致は毎回確かめ直す） */
+const verifiedAccounts = new WeakMap<Stripe, Promise<void>>();
+
+/**
+ * 本番の接続のキーが、設定した Stripe のアカウント（STRIPE_ACCOUNT_ID）のものかを Stripe API（GET /v1/account）で確かめる。
+ * 違えば StripeAccountMismatchError（別のアカウントで決済を受けない・別のアカウントの通知を処理しない）。取得できなければ Stripe の例外。
+ * accountId の無い接続（テスト・Sandbox）は何もしない。同じ接続では最初の成功の後は確かめ直さない
+ */
+export async function ensureStripeAccount(rt: Pick<StripeRuntime, "client" | "accountId">): Promise<void> {
+  if (rt.accountId === undefined) return;
+  const expected = rt.accountId;
+  if (!STRIPE_ACCOUNT_ID_RE.test(expected)) throw new StripeAccountMismatchError();
+  let p = verifiedAccounts.get(rt.client);
+  if (!p) {
+    p = rt.client.accounts.retrieveCurrent().then((a) => {
+      if (a.id !== expected) throw new StripeAccountMismatchError();
+    });
+    verifiedAccounts.set(rt.client, p);
+    p.catch(() => verifiedAccounts.delete(rt.client));
+  }
+  return p;
 }
 
 const LOOPBACK = new Set(["localhost", "127.0.0.1"]);
@@ -123,7 +170,7 @@ const LOOPBACK = new Set(["localhost", "127.0.0.1"]);
  */
 export function createSimulatedStripeRuntime(
   mode: StripeMode,
-  opts: { apiBase: string; secretKey: string; webhookSecret: string; testHooks?: StripeTestHooks; envTag?: string },
+  opts: { apiBase: string; secretKey: string; webhookSecret: string; testHooks?: StripeTestHooks; envTag?: string; accountId?: string; liveAudience?: StripeLiveAudience },
   e: Record<string, string | undefined> = process.env,
 ): StripeRuntime {
   if (e.VERCEL_ENV) throw new StripeUnavailableError("simulated runtime is for local automated tests only");
@@ -135,7 +182,16 @@ export function createSimulatedStripeRuntime(
   const apiBase = { host: u.hostname, port: Number(u.port || (protocol === "https" ? 443 : 80)), protocol } as const;
   // envTag の指定は、別の環境（同じ Sandbox を使う別の Firestore）を再現する自動テストだけ
   const envTag = opts.envTag ?? envTagOrThrow(e);
-  return { mode, client: newClient(opts.secretKey, apiBase), webhookSecret: opts.webhookSecret, allowHttpOrigin: true, envTag, ...(opts.testHooks ? { testHooks: opts.testHooks } : {}) };
+  return {
+    mode,
+    client: newClient(opts.secretKey, apiBase),
+    webhookSecret: opts.webhookSecret,
+    allowHttpOrigin: true,
+    envTag,
+    ...(opts.accountId !== undefined ? { accountId: opts.accountId } : {}),
+    ...(opts.liveAudience ? { liveAudience: opts.liveAudience } : {}),
+    ...(opts.testHooks ? { testHooks: opts.testHooks } : {}),
+  };
 }
 
 /** Stripe の Checkout Session の有効期限（Stripe の下限は作成から30分）。注文の有効期限もこれに合わせる */

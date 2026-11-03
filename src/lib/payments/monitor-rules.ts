@@ -19,7 +19,8 @@ export type PaymentAlertKind =
   | "stripe_paid_not_confirmed"
   | "settlement_inconsistent"
   | "recheck_pending"
-  | "monitor_check_failed";
+  | "monitor_check_failed"
+  | "stripe_account_mismatch";
 
 export const PAYMENT_ALERT_LABEL: Record<PaymentAlertKind, string> = {
   webhook_signature_invalid: "Stripe の Webhook の署名を確認できない通知が届いた（受け付けていません）",
@@ -36,6 +37,7 @@ export const PAYMENT_ALERT_LABEL: Record<PaymentAlertKind, string> = {
   settlement_inconsistent: "確定済みの精算の金額と、取引に記録した支払った額が一致しない",
   recheck_pending: "決済の確定の後の再確認が終わっていない（作成から60分以上。Webhook の復旧の画面で確認・再確認できます）",
   monitor_check_failed: "監視の点検の一部が失敗した",
+  stripe_account_mismatch: "Stripe のキーが設定したアカウント（STRIPE_ACCOUNT_ID）のものか確認できない（決済画面の作成・Webhook の処理を止めています）",
 };
 
 /** モード：テスト（Sandbox）・本番（Live）・不明（署名を確認できない通知など） */

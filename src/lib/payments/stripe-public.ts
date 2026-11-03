@@ -5,7 +5,7 @@
  *  - PAYMENT_PROVIDER=stripe を明示している（疑似決済とは併用しない）
  *  - 公開中（SITE_STATUS=open）で、危険な設定が無い（開発モード・準備中では一般の方の決済を受け付けない）
  *  - 無料テスト（ENABLE_TEST_PAYMENT=true）が有効ではない（無料か有料か曖昧にしない）
- *  - Stripe との接続が使える。今はテスト（Sandbox）だけ（stripeRuntime）。本番決済は未実装のため、本番では常に受け付けない
+ *  - Stripe との接続が使える（stripeRuntime。Preview はテスト、Production は本番。本番は受け付ける相手が一般＝公開中のときだけ）
  *  - Firestore を使っている・安全な SESSION_SECRET がある
  * 運営アカウントだけの Stripe のテスト決済（/fortune?pay=stripe-test）は別の判定（stripeTestAccess）で、これとは独立している。
  */
