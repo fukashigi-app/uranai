@@ -9,8 +9,12 @@
  *      ・PRODUCTION_FIREBASE_PROJECT_ID が本番のプロジェクト（uranai-b6edf）と完全に一致する（登録の誤り・入れ違いを検出する）
  *      ・FIREBASE_CLIENT_EMAIL が、接続先と同じプロジェクトのサービスアカウント（…@<FIREBASE_PROJECT_ID>.iam.gserviceaccount.com）
  *        （別の Preview 用のプロジェクトのサービスアカウントも拒否する。ブランチごとの環境変数の上書きの漏れを検出する）
+ *      ・Vercel が渡すブランチの名前（VERCEL_GIT_COMMIT_REF。System Environment Variables）が、そのプロジェクトに固定したブランチと完全に一致する
+ *        （ブランチ専用の環境変数の登録漏れで、別の検証環境の Firestore に接続しない。名前が渡らない・空・想定外なら停止）
  *      Preview では Firestore Emulator の設定があっても、この判定を省略しない
  *  - Firestore Emulator（FIRESTORE_EMULATOR_HOST）… 本番には接続しないので許可（Preview を除く）
+ *  - Preview 用のプロジェクト（一覧のプロジェクト）は、Vercel の Preview の外（Production・Development・ローカル・VERCEL_ENV が渡らない状態）では
+ *    使えない（Emulator を除く）。System Environment Variables が渡らない設定でも、Preview 用のプロジェクトには接続しない
  *  - Vercel の Development … PRODUCTION_FIREBASE_PROJECT_ID が必須。接続先（FIREBASE_PROJECT_ID）と一致したら停止。どちらかが未設定でも停止
  *  - Vercel の Production … 本番のプロジェクトに接続するので許可（不一致は /api/health で警告）
  *  - ローカル（VERCEL_ENV なし）… PRODUCTION_FIREBASE_PROJECT_ID が設定されていて一致したら停止。未設定なら許可
@@ -30,17 +34,23 @@ export const SANDBOX_V2_FIREBASE_PROJECT_ID = "uranai-stripe-sandbox-v2" as cons
 /**
  * Vercel の Preview で使ってよい Firebase プロジェクト（コードに固定した一覧。これ以外は拒否）。
  *  projectId               … Firebase のプロジェクト ID（完全一致）
+ *  allowedBranches         … このプロジェクトに接続してよい Git のブランチ（VERCEL_GIT_COMMIT_REF と完全一致。1つのブランチは1つのプロジェクトだけ）
  *  requireStripeAccountId  … Stripe のテスト決済で STRIPE_ACCOUNT_ID（acct_）を必須にし、キーのアカウントを Stripe API で確かめる
  *                            （別の Stripe のアカウントの Sandbox のキーの混入を防ぐ。以前からの uranai-preview は今までどおり任意）
  * 検証環境を増やすときは、ここに1件追加する（新しい環境は requireStripeAccountId: true。docs/sandbox-v2-setup.md）。
  * 環境変数で一覧を広げることはできない。
  */
-export type PreviewFirebaseTarget = { readonly projectId: string; readonly requireStripeAccountId: boolean };
+export type PreviewFirebaseTarget = { readonly projectId: string; readonly allowedBranches: readonly string[]; readonly requireStripeAccountId: boolean };
 export const PREVIEW_FIREBASE_TARGETS: readonly PreviewFirebaseTarget[] = Object.freeze([
-  { projectId: PREVIEW_FIREBASE_PROJECT_ID, requireStripeAccountId: false },
+  // 以前からの Preview（旧 Stripe Sandbox）
+  Object.freeze({ projectId: PREVIEW_FIREBASE_PROJECT_ID, allowedBranches: Object.freeze(["preview/stripe-verification"]), requireStripeAccountId: false }),
   // 個人事業主の Stripe の Sandbox 用の検証環境（Firestore：asia-northeast1。専用のブランチの Preview だけで使う。docs/sandbox-v2-setup.md）
-  { projectId: SANDBOX_V2_FIREBASE_PROJECT_ID, requireStripeAccountId: true },
+  Object.freeze({ projectId: SANDBOX_V2_FIREBASE_PROJECT_ID, allowedBranches: Object.freeze(["preview/stripe-sandbox-v2"]), requireStripeAccountId: true }),
 ]);
+
+/** Git のブランチの名前の形（一覧に書いてよい名前。本番のブランチの main・master は書けない） */
+const BRANCH_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
+const PRODUCTION_BRANCHES = new Set(["main", "master"]);
 
 /** Firebase のプロジェクト ID の形（小文字・数字・ハイフン。6〜30文字。先頭は英字、末尾はハイフン以外） */
 const PROJECT_ID_RE = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
@@ -48,11 +58,19 @@ const PROJECT_ID_RE = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 /** 一覧の内容の確認（コードの誤りで本番・形の不正な ID・重複を許可しない。読み込みのときに例外） */
 export function validatePreviewTargets(targets: readonly PreviewFirebaseTarget[]): readonly PreviewFirebaseTarget[] {
   const seen = new Set<string>();
+  const branches = new Set<string>();
   for (const t of targets) {
     if (!PROJECT_ID_RE.test(t.projectId)) throw new Error("invalid preview Firebase project id in PREVIEW_FIREBASE_TARGETS");
     if (t.projectId === PRODUCTION_FIREBASE_PROJECT_ID) throw new Error("the production Firebase project must not be a preview target");
     if (seen.has(t.projectId)) throw new Error("duplicate preview Firebase project id in PREVIEW_FIREBASE_TARGETS");
     seen.add(t.projectId);
+    if (!Array.isArray(t.allowedBranches) || t.allowedBranches.length === 0) throw new Error("a preview target needs at least one allowed branch");
+    for (const b of t.allowedBranches) {
+      if (typeof b !== "string" || !BRANCH_RE.test(b) || b.includes("..") || b.endsWith("/")) throw new Error("invalid branch name in PREVIEW_FIREBASE_TARGETS");
+      if (PRODUCTION_BRANCHES.has(b)) throw new Error("the production branch must not be a preview branch");
+      if (branches.has(b)) throw new Error("a branch must belong to only one preview Firebase project");
+      branches.add(b);
+    }
   }
   return targets;
 }
@@ -80,7 +98,9 @@ export type FirestoreTargetBlockReason =
   | "project_id_not_set"
   | "preview_project_not_allowed"
   | "preview_production_project_id_unexpected"
-  | "preview_service_account_mismatch";
+  | "preview_service_account_mismatch"
+  | "preview_branch_not_allowed"
+  | "preview_project_outside_preview";
 
 export type FirestoreTargetCheck = { ok: true } | { ok: false; reason: FirestoreTargetBlockReason };
 
@@ -91,6 +111,9 @@ export function checkFirestoreTarget(e: Env = process.env, targets: readonly Pre
   if (env === "preview") return checkPreviewTarget(e, targets);
   if (e.FIRESTORE_EMULATOR_HOST) return { ok: true };
   const target = norm(e.FIREBASE_PROJECT_ID);
+  // Preview 用のプロジェクトは Vercel の Preview でだけ使う（Production・Development・ローカル・VERCEL_ENV が渡らない状態では使わない）。
+  // 比較は前後の空白・大文字を無視した値で行う（形の違う値で、この確認をすり抜けない）
+  if (target && targets.some((t) => t.projectId === target)) return { ok: false, reason: "preview_project_outside_preview" };
   const production = norm(e.PRODUCTION_FIREBASE_PROJECT_ID);
   if (env === "production") return { ok: true };
   if (env === "development") {
@@ -114,6 +137,9 @@ function checkPreviewTarget(e: Env, targets: readonly PreviewFirebaseTarget[]): 
   if (!t) return { ok: false, reason: "preview_project_not_allowed" };
   if (e.PRODUCTION_FIREBASE_PROJECT_ID !== PRODUCTION_FIREBASE_PROJECT_ID) return { ok: false, reason: "preview_production_project_id_unexpected" };
   if (!isServiceAccountOf(e.FIREBASE_CLIENT_EMAIL, t.projectId)) return { ok: false, reason: "preview_service_account_mismatch" };
+  // ブランチとプロジェクトの組み合わせ（Vercel が渡すブランチの名前。渡らない・空・想定外なら停止。値は加工しない）
+  const ref = e.VERCEL_GIT_COMMIT_REF;
+  if (typeof ref !== "string" || !t.allowedBranches.includes(ref)) return { ok: false, reason: "preview_branch_not_allowed" };
   return { ok: true };
 }
 
@@ -124,6 +150,9 @@ export const FIRESTORE_TARGET_MESSAGE: Record<FirestoreTargetBlockReason, string
   preview_project_not_allowed: "Preview では Preview 用の Firebase プロジェクトにだけ接続できます。FIREBASE_PROJECT_ID が Preview 用のプロジェクトではないため、データベースへのアクセスを停止しました。",
   preview_production_project_id_unexpected: "PRODUCTION_FIREBASE_PROJECT_ID が本番のプロジェクトIDと一致しないため（登録の誤りの可能性）、安全のためデータベースへのアクセスを停止しました。",
   preview_service_account_mismatch: "FIREBASE_CLIENT_EMAIL が Preview 用のプロジェクトのサービスアカウントではないため、データベースへのアクセスを停止しました。",
+  preview_branch_not_allowed:
+    "この Git のブランチ（VERCEL_GIT_COMMIT_REF）は、FIREBASE_PROJECT_ID の Firebase プロジェクトに接続できないため（ブランチ専用の環境変数の登録漏れ・Vercel の System Environment Variables の無効の可能性）、データベースへのアクセスを停止しました。",
+  preview_project_outside_preview: "Preview 用の Firebase プロジェクトは Vercel の Preview でだけ使えます（VERCEL_ENV が preview ではない）。データベースへのアクセスを停止しました。",
 };
 
 export class FirestoreTargetBlockedError extends Error {

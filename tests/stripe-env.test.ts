@@ -4,7 +4,7 @@ import { createSimulatedStripeRuntime, isOtherStripeEnv, stripeEnvTag, stripeRun
 
 // 決済の環境の識別（同じ Sandbox を使う別の Firestore の決済を見分ける）。Stripe API・Firestore には接続しない
 const LOCAL = { STRIPE_TEST_CHECKOUT: "on", STRIPE_SECRET_KEY: "sk_test_unit", STRIPE_WEBHOOK_SECRET: "whsec_unit_secret", FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080", FIREBASE_PROJECT_ID: "demo-env-unit" };
-const PREVIEW = { STRIPE_TEST_CHECKOUT: "on", STRIPE_SECRET_KEY: "sk_test_unit", STRIPE_WEBHOOK_SECRET: "whsec_unit_secret", VERCEL_ENV: "preview", FIREBASE_PROJECT_ID: "uranai-preview", STRIPE_TEST_FIREBASE_PROJECT_ID: "uranai-preview", PRODUCTION_FIREBASE_PROJECT_ID: "uranai-b6edf", FIREBASE_CLIENT_EMAIL: "stripe-test@uranai-preview.iam.gserviceaccount.com" };
+const PREVIEW = { STRIPE_TEST_CHECKOUT: "on", STRIPE_SECRET_KEY: "sk_test_unit", STRIPE_WEBHOOK_SECRET: "whsec_unit_secret", VERCEL_ENV: "preview", VERCEL_GIT_COMMIT_REF: "preview/stripe-verification", FIREBASE_PROJECT_ID: "uranai-preview", STRIPE_TEST_FIREBASE_PROJECT_ID: "uranai-preview", PRODUCTION_FIREBASE_PROJECT_ID: "uranai-b6edf", FIREBASE_CLIENT_EMAIL: "stripe-test@uranai-preview.iam.gserviceaccount.com" };
 
 describe("環境を表す値（stripeEnvTag）", () => {
   it("Firestore のプロジェクトごとに決まり、同じプロジェクトなら同じ値。プロジェクト ID そのものは含まない", () => {

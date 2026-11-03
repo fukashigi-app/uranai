@@ -24,6 +24,7 @@ export const DIAGNOSTICS_TOKEN_MIN_LENGTH = 32;
  *  clientEmailBelongsToPreview      … FIREBASE_CLIENT_EMAIL が、FIREBASE_PROJECT_ID（許可した Preview 用のプロジェクト）のサービスアカウント
  *  projectIdMatchesStripeTestProject … FIREBASE_PROJECT_ID と STRIPE_TEST_FIREBASE_PROJECT_ID が一致
  *  stripeAccountIdReady             … STRIPE_ACCOUNT_ID が必要な検証環境なら設定されていて形が正しい（不要な環境では、未設定か形が正しければ true）
+ *  gitBranchAllowed                 … Vercel が渡すブランチの名前（VERCEL_GIT_COMMIT_REF）が、FIREBASE_PROJECT_ID のプロジェクトに固定したブランチと一致
  */
 export type FirebaseTargetDiagnostics = {
   projectIdIsPreview: boolean;
@@ -31,6 +32,7 @@ export type FirebaseTargetDiagnostics = {
   clientEmailBelongsToPreview: boolean;
   projectIdMatchesStripeTestProject: boolean;
   stripeAccountIdReady: boolean;
+  gitBranchAllowed: boolean;
 };
 
 export function firebaseTargetDiagnostics(e: Env = process.env, targets: readonly PreviewFirebaseTarget[] = PREVIEW_FIREBASE_TARGETS): FirebaseTargetDiagnostics {
@@ -45,6 +47,7 @@ export function firebaseTargetDiagnostics(e: Env = process.env, targets: readonl
     clientEmailBelongsToPreview: target !== null && isServiceAccountOf(e.FIREBASE_CLIENT_EMAIL, target.projectId),
     projectIdMatchesStripeTestProject: typeof projectId === "string" && projectId !== "" && typeof stripeTestProject === "string" && stripeTestProject !== "" && projectId === stripeTestProject,
     stripeAccountIdReady: target?.requireStripeAccountId ? accountOk : account === undefined || account === "" || accountOk,
+    gitBranchAllowed: target !== null && typeof e.VERCEL_GIT_COMMIT_REF === "string" && target.allowedBranches.includes(e.VERCEL_GIT_COMMIT_REF),
   };
 }
 

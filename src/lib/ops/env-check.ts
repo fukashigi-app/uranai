@@ -198,11 +198,18 @@ export function summarize(results: CheckResult[]): Record<CheckLevel, number> {
 export function checkPreviewEnv(env: Env, targets: readonly PreviewFirebaseTarget[] = PREVIEW_FIREBASE_TARGETS): CheckResult[] {
   const r: CheckResult[] = [];
   const add = (key: string, level: CheckLevel, message: string) => r.push({ key, level, message });
-  const e = { ...env, VERCEL_ENV: "preview" };
   const target = previewFirebaseTargetOf(env.FIREBASE_PROJECT_ID, targets);
+  // ブランチの名前（VERCEL_GIT_COMMIT_REF）は実行時に Vercel が渡す値。取り出したファイルに無ければ、プロジェクトに固定したブランチとして確かめる
+  const ref = env.VERCEL_GIT_COMMIT_REF;
+  const e = { ...env, VERCEL_ENV: "preview", VERCEL_GIT_COMMIT_REF: ref ?? target?.allowedBranches[0] };
   if (env.FIREBASE_PROJECT_ID === PRODUCTION_FIREBASE_PROJECT_ID) add("FIREBASE_PROJECT_ID", "error", "本番の Firebase プロジェクトです。Preview では使えません。");
   else if (!target) add("FIREBASE_PROJECT_ID", "error", "コードで許可した Preview 用の Firebase プロジェクトではありません（src/lib/firestore/target-guard.ts の PREVIEW_FIREBASE_TARGETS）。");
   else add("FIREBASE_PROJECT_ID", "ok", target.requireStripeAccountId ? "許可した検証環境のプロジェクトです（STRIPE_ACCOUNT_ID が必須）。" : "以前からの Preview のプロジェクトです。");
+  if (target) {
+    if (ref === undefined) add("VERCEL_GIT_COMMIT_REF", "unknown", `ファイルにありません。実行時に Vercel が渡すブランチの名前が、このプロジェクトに固定したブランチ（${target.allowedBranches.join("・")}）と一致しないと接続を止めます（Vercel の System Environment Variables を有効にしてください）。`);
+    else if (target.allowedBranches.includes(ref)) add("VERCEL_GIT_COMMIT_REF", "ok", "このプロジェクトに固定したブランチです。");
+    else add("VERCEL_GIT_COMMIT_REF", "error", `このプロジェクトに接続できるブランチは ${target.allowedBranches.join("・")} だけです（環境変数の登録先のブランチを確かめてください）。`);
+  }
   const fs = checkFirestoreTarget(e, targets);
   add("FIRESTORE_TARGET", fs.ok ? "ok" : "error", fs.ok ? "Firestore の接続先の安全確認を満たしています。" : FIRESTORE_TARGET_MESSAGE[fs.reason]);
   const pk = checkFirebasePrivateKey(env.FIREBASE_PRIVATE_KEY);

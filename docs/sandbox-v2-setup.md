@@ -21,6 +21,10 @@
 - Preview で使える Firebase のプロジェクトは、**コードに固定した一覧**（`src/lib/firestore/target-guard.ts` の `PREVIEW_FIREBASE_TARGETS`）だけ。環境変数では広げられない
 - 本番の Firebase プロジェクトは、一覧・環境変数の値に関係なく Preview から必ず拒否する
 - `FIREBASE_CLIENT_EMAIL` は、接続先と**同じプロジェクト**のサービスアカウントだけ（別の Preview 用のプロジェクトのものも拒否）
+- **Firebase のプロジェクトと Git のブランチの組み合わせをコードで固定**：`uranai-stripe-sandbox-v2` は `preview/stripe-sandbox-v2` だけ、
+  `uranai-preview` は `preview/stripe-verification` だけ。Vercel が渡すブランチの名前（`VERCEL_GIT_COMMIT_REF`）が違う・渡らない・空なら接続しない
+  （ブランチ専用の環境変数の登録漏れで、旧 Preview の値が引き継がれても `uranai-preview` に書き込まない）
+- Preview 用のプロジェクトは、Vercel の Preview の外（Production・Development・ローカル・`VERCEL_ENV` が渡らない状態）では使えない
 - 新しい検証環境では `STRIPE_ACCOUNT_ID` が必須。決済画面の作成・確定・Webhook の処理の前に、キーの持ち主のアカウントを Stripe API で確かめる。
   違えば受け付けない（旧 Sandbox のキーが残っていても、新しい環境で決済・記録をしない）
 - どれか1つでも合わなければ、データベースへの接続・決済を止める（fail-closed）
@@ -48,6 +52,9 @@
   （本番環境モードの初期の rules はすべて拒否。アプリはサーバーの Admin SDK だけで読み書きするので rules の影響は受けないが、リポジトリの rules に合わせる）
 
 ### 2.2 Vercel（Preview・**専用のブランチだけ**に登録）
+
+**前提：** プロジェクトの設定で「System Environment Variables を自動で公開する」（Automatically expose System Environment Variables）が**有効**であること。
+無効だと `VERCEL_ENV`・`VERCEL_GIT_COMMIT_REF` がアプリに渡らず、Preview 用のプロジェクトへの接続を止めます（安全側。データベースに接続できない）。
 
 「Preview」の環境で、**ブランチを指定**して登録します。「Preview 全体」「All Environments」「Production」には登録しません。
 変数を変えたら Redeploy が必要です。
@@ -99,8 +106,9 @@
 ## 4. 確認項目（読み取りだけ）
 
 - `/api/health`：Firebase の接続先の確認が ok、`paymentMode` が development
-- 診断（`/api/ops/firebase-target`。診断用のトークンが必要）：5つの真偽値がすべて true
-  （`projectIdIsPreview`・`productionProjectIdIsExpected`・`clientEmailBelongsToPreview`・`projectIdMatchesStripeTestProject`・`stripeAccountIdReady`）
+- 診断（`/api/ops/firebase-target`。診断用のトークンが必要）：6つの真偽値がすべて true
+  （`projectIdIsPreview`・`productionProjectIdIsExpected`・`clientEmailBelongsToPreview`・`projectIdMatchesStripeTestProject`・`stripeAccountIdReady`・`gitBranchAllowed`）
+- Vercel のビルドのログに `[firestore-target]` の警告が無いこと（あれば、Firebase の変数・ブランチの組み合わせが誤っている）
 - 運営画面の「設定」：決済モード・Webhook の URL
 - 最初のテスト決済の決済画面が開けること（開けない・決済監視に「Stripe のキーが設定したアカウントのものか確認できない」が出たら、
   キーと `STRIPE_ACCOUNT_ID` の組み合わせを確かめる）

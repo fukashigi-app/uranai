@@ -17,7 +17,7 @@ describe("Firebase の接続先：Preview から本番プロジェクトに接�
   // Preview は uranai-preview と、そのサービスアカウントだけ。本番は uranai-b6edf（コードに固定）
   const REAL_PROD = "uranai-b6edf";
   const PREVIEW_SA = "stripe-test@uranai-preview.iam.gserviceaccount.com";
-  const OK_PREVIEW = { VERCEL_ENV: "preview", FIREBASE_PROJECT_ID: PREVIEW_ID, PRODUCTION_FIREBASE_PROJECT_ID: REAL_PROD, FIREBASE_CLIENT_EMAIL: PREVIEW_SA };
+  const OK_PREVIEW = { VERCEL_ENV: "preview", VERCEL_GIT_COMMIT_REF: "preview/stripe-verification", FIREBASE_PROJECT_ID: PREVIEW_ID, PRODUCTION_FIREBASE_PROJECT_ID: REAL_PROD, FIREBASE_CLIENT_EMAIL: PREVIEW_SA };
 
   it("Preview：正しい設定（uranai-preview・本番のID・uranai-preview のサービスアカウント）なら接続できる", () => {
     expect(checkFirestoreTarget(OK_PREVIEW)).toEqual({ ok: true });
@@ -75,8 +75,10 @@ describe("Firebase の接続先：Preview から本番プロジェクトに接�
   it("Development：以前どおり（本番のIDの指定が必須。接続先と一致したら停止）", () => {
     expect(checkFirestoreTarget({ VERCEL_ENV: "development", FIREBASE_PROJECT_ID: PROD_ID, PRODUCTION_FIREBASE_PROJECT_ID: PROD_ID })).toEqual({ ok: false, reason: "preview_uses_production_project" });
     expect(checkFirestoreTarget({ VERCEL_ENV: "development", FIREBASE_PROJECT_ID: " URANAI-PROD ", PRODUCTION_FIREBASE_PROJECT_ID: PROD_ID }).ok).toBe(false);
-    expect(checkFirestoreTarget({ VERCEL_ENV: "development", FIREBASE_PROJECT_ID: PREVIEW_ID, PRODUCTION_FIREBASE_PROJECT_ID: PROD_ID })).toEqual({ ok: true });
-    expect(checkFirestoreTarget({ VERCEL_ENV: "development", FIREBASE_PROJECT_ID: PREVIEW_ID })).toEqual({ ok: false, reason: "production_project_id_not_set" });
+    // Preview 用のプロジェクトは Vercel の Preview でだけ使う（Development では使わない）。Preview 用でないプロジェクトは今までどおり
+    expect(checkFirestoreTarget({ VERCEL_ENV: "development", FIREBASE_PROJECT_ID: PREVIEW_ID, PRODUCTION_FIREBASE_PROJECT_ID: PROD_ID })).toEqual({ ok: false, reason: "preview_project_outside_preview" });
+    expect(checkFirestoreTarget({ VERCEL_ENV: "development", FIREBASE_PROJECT_ID: "uranai-dev-local", PRODUCTION_FIREBASE_PROJECT_ID: PROD_ID })).toEqual({ ok: true });
+    expect(checkFirestoreTarget({ VERCEL_ENV: "development", FIREBASE_PROJECT_ID: "uranai-dev-local" })).toEqual({ ok: false, reason: "production_project_id_not_set" });
     expect(checkFirestoreTarget({ VERCEL_ENV: "development", FIREBASE_PROJECT_ID: "", PRODUCTION_FIREBASE_PROJECT_ID: PROD_ID })).toEqual({ ok: false, reason: "project_id_not_set" });
     expect(checkFirestoreTarget({ VERCEL_ENV: "development", PRODUCTION_FIREBASE_PROJECT_ID: "  ", FIREBASE_PROJECT_ID: PREVIEW_ID }).ok).toBe(false);
   });
@@ -86,7 +88,10 @@ describe("Firebase の接続先：Preview から本番プロジェクトに接�
     expect(checkFirestoreTarget({ VERCEL_ENV: "production", FIREBASE_PROJECT_ID: PROD_ID }).ok).toBe(true);
     expect(checkFirestoreTarget({ VERCEL_ENV: "production", FIREBASE_PROJECT_ID: REAL_PROD, PRODUCTION_FIREBASE_PROJECT_ID: REAL_PROD, FIREBASE_CLIENT_EMAIL: "firebase-adminsdk-abc12@uranai-b6edf.iam.gserviceaccount.com" }).ok).toBe(true);
     expect(checkFirestoreTarget({ FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080", FIREBASE_PROJECT_ID: "demo-uranai" }).ok).toBe(true);
-    expect(checkFirestoreTarget({ FIREBASE_PROJECT_ID: PREVIEW_ID }).ok).toBe(true); // ローカルで本番IDの指定なし
+    expect(checkFirestoreTarget({ FIREBASE_PROJECT_ID: "uranai-dev-local" }).ok).toBe(true); // ローカルで本番IDの指定なし（Preview 用でないプロジェクト）
+    // Preview 用のプロジェクトは、ローカル・VERCEL_ENV が渡らない状態では使わない（Emulator は除く）
+    expect(checkFirestoreTarget({ FIREBASE_PROJECT_ID: PREVIEW_ID })).toEqual({ ok: false, reason: "preview_project_outside_preview" });
+    expect(checkFirestoreTarget({ FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080", FIREBASE_PROJECT_ID: PREVIEW_ID }).ok).toBe(true);
     // ローカルでも、本番のプロジェクトIDを指定していて一致した場合は止める
     expect(checkFirestoreTarget({ FIREBASE_PROJECT_ID: PROD_ID, PRODUCTION_FIREBASE_PROJECT_ID: PROD_ID }).ok).toBe(false);
   });

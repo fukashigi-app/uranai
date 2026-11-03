@@ -28,6 +28,9 @@ function isGitIgnored(path: string): boolean {
 
 /** 本番 Firestore に読み取りだけで接続できるか（コレクション一覧を取得するだけ。書き込みはしない） */
 async function ping(env: Record<string, string>): Promise<string> {
+  // 本番の確認だけ。Preview（検証環境）用の Firebase プロジェクトには接続しない（読み取りでも、接続先の取り違えを防ぐ）
+  const { previewFirebaseTargetOf } = await import("../src/lib/firestore/target-guard");
+  if (previewFirebaseTargetOf((env.FIREBASE_PROJECT_ID ?? "").trim().toLowerCase())) return "✘ FIREBASE_PROJECT_ID が Preview（検証環境）用のプロジェクトのため、接続確認は行いません。";
   const { cert, initializeApp, deleteApp } = await import("firebase-admin/app");
   const { getFirestore } = await import("firebase-admin/firestore");
   const { normalizePrivateKey } = await import("../src/lib/firestore/private-key");

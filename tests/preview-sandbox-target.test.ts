@@ -22,12 +22,15 @@ import { checkPreviewEnv } from "@/lib/ops/env-check";
 type E = Record<string, string | undefined>;
 const LEGACY = "uranai-preview";
 const NEW = "uranai-sbx-unit";
+const LEGACY_BRANCH = "preview/stripe-verification";
+const NEW_BRANCH = "preview/sbx-unit";
 const TARGETS: readonly PreviewFirebaseTarget[] = [
-  { projectId: LEGACY, requireStripeAccountId: false },
-  { projectId: NEW, requireStripeAccountId: true },
+  { projectId: LEGACY, allowedBranches: [LEGACY_BRANCH], requireStripeAccountId: false },
+  { projectId: NEW, allowedBranches: [NEW_BRANCH], requireStripeAccountId: true },
 ];
 const LEGACY_ENV: E = {
   VERCEL_ENV: "preview",
+  VERCEL_GIT_COMMIT_REF: LEGACY_BRANCH,
   FIREBASE_PROJECT_ID: LEGACY,
   PRODUCTION_FIREBASE_PROJECT_ID: PRODUCTION_FIREBASE_PROJECT_ID,
   FIREBASE_CLIENT_EMAIL: "stripe-test@uranai-preview.iam.gserviceaccount.com",
@@ -38,6 +41,7 @@ const LEGACY_ENV: E = {
 };
 const NEW_ENV: E = {
   ...LEGACY_ENV,
+  VERCEL_GIT_COMMIT_REF: NEW_BRANCH,
   FIREBASE_PROJECT_ID: NEW,
   FIREBASE_CLIENT_EMAIL: "sandbox-sa@uranai-sbx-unit.iam.gserviceaccount.com",
   STRIPE_TEST_FIREBASE_PROJECT_ID: NEW,
@@ -50,18 +54,19 @@ describe("Preview 用の Firebase プロジェクトの一覧（コードに固�
   it("アプリの一覧は uranai-preview（STRIPE_ACCOUNT_ID は任意のまま）と uranai-stripe-sandbox-v2（STRIPE_ACCOUNT_ID が必須）の2件だけ", () => {
     expect(SANDBOX_V2_FIREBASE_PROJECT_ID).toBe("uranai-stripe-sandbox-v2");
     expect(PREVIEW_FIREBASE_TARGETS).toEqual([
-      { projectId: LEGACY, requireStripeAccountId: false },
-      { projectId: "uranai-stripe-sandbox-v2", requireStripeAccountId: true },
+      { projectId: LEGACY, allowedBranches: ["preview/stripe-verification"], requireStripeAccountId: false },
+      { projectId: "uranai-stripe-sandbox-v2", allowedBranches: ["preview/stripe-sandbox-v2"], requireStripeAccountId: true },
     ]);
+    for (const t of PREVIEW_FIREBASE_TARGETS) expect(Object.isFrozen(t) && Object.isFrozen(t.allowedBranches)).toBe(true);
     expect(Object.isFrozen(PREVIEW_FIREBASE_TARGETS)).toBe(true);
     expect(PREVIEW_FIREBASE_TARGETS.some((t) => t.projectId === PRODUCTION_FIREBASE_PROJECT_ID)).toBe(false);
     expect(validatePreviewTargets(PREVIEW_FIREBASE_TARGETS)).toBe(PREVIEW_FIREBASE_TARGETS);
   });
 
   it("一覧に本番のプロジェクト・形の不正な ID・重複は入れられない（読み込みのときに例外）", () => {
-    expect(() => validatePreviewTargets([{ projectId: PRODUCTION_FIREBASE_PROJECT_ID, requireStripeAccountId: true }])).toThrow(/production/);
+    expect(() => validatePreviewTargets([{ projectId: PRODUCTION_FIREBASE_PROJECT_ID, allowedBranches: ["preview/x"], requireStripeAccountId: true }])).toThrow(/production/);
     for (const bad of ["", "Uranai-Preview", "a", "uranai_preview", "uranai-preview-", "-uranai", "x".repeat(31)]) {
-      expect(() => validatePreviewTargets([{ projectId: bad, requireStripeAccountId: true }]), bad).toThrow(/invalid/);
+      expect(() => validatePreviewTargets([{ projectId: bad, allowedBranches: ["preview/x"], requireStripeAccountId: true }]), bad).toThrow(/invalid/);
     }
     expect(() => validatePreviewTargets([TARGETS[1], TARGETS[1]])).toThrow(/duplicate/);
     expect(validatePreviewTargets(TARGETS)).toBe(TARGETS);
@@ -189,7 +194,7 @@ describe("決済の処理の接続（環境変数から）：テストの接続�
 
 describe("診断・環境の確認（値は返さない）", () => {
   it("診断：新しい検証環境の正しい設定はすべて true。アカウントの ID が無ければ stripeAccountIdReady=false", () => {
-    expect(firebaseTargetDiagnostics(NEW_ENV, TARGETS)).toEqual({ projectIdIsPreview: true, productionProjectIdIsExpected: true, clientEmailBelongsToPreview: true, projectIdMatchesStripeTestProject: true, stripeAccountIdReady: true });
+    expect(firebaseTargetDiagnostics(NEW_ENV, TARGETS)).toEqual({ projectIdIsPreview: true, productionProjectIdIsExpected: true, clientEmailBelongsToPreview: true, projectIdMatchesStripeTestProject: true, stripeAccountIdReady: true, gitBranchAllowed: true });
     expect(firebaseTargetDiagnostics({ ...NEW_ENV, STRIPE_ACCOUNT_ID: undefined }, TARGETS).stripeAccountIdReady).toBe(false);
     expect(firebaseTargetDiagnostics({ ...NEW_ENV, FIREBASE_CLIENT_EMAIL: LEGACY_ENV.FIREBASE_CLIENT_EMAIL }, TARGETS).clientEmailBelongsToPreview).toBe(false);
     expect(firebaseTargetDiagnostics(NEW_ENV).projectIdIsPreview).toBe(false); // アプリの一覧に無い
@@ -212,6 +217,7 @@ describe("確定した検証環境 uranai-stripe-sandbox-v2（アプリの一覧
   const V2 = "uranai-stripe-sandbox-v2";
   const V2_ENV: E = {
     ...NEW_ENV,
+    VERCEL_GIT_COMMIT_REF: "preview/stripe-sandbox-v2",
     FIREBASE_PROJECT_ID: V2,
     FIREBASE_CLIENT_EMAIL: "sandbox-v2-sa@uranai-stripe-sandbox-v2.iam.gserviceaccount.com",
     STRIPE_TEST_FIREBASE_PROJECT_ID: V2,
@@ -259,10 +265,93 @@ describe("確定した検証環境 uranai-stripe-sandbox-v2（アプリの一覧
   });
 
   it("診断・環境の確認：正しい設定ならすべて問題なし（値は返さない）", () => {
-    expect(firebaseTargetDiagnostics(V2_ENV)).toEqual({ projectIdIsPreview: true, productionProjectIdIsExpected: true, clientEmailBelongsToPreview: true, projectIdMatchesStripeTestProject: true, stripeAccountIdReady: true });
+    expect(firebaseTargetDiagnostics(V2_ENV)).toEqual({ projectIdIsPreview: true, productionProjectIdIsExpected: true, clientEmailBelongsToPreview: true, projectIdMatchesStripeTestProject: true, stripeAccountIdReady: true, gitBranchAllowed: true });
     expect(firebaseTargetDiagnostics({ ...V2_ENV, STRIPE_ACCOUNT_ID: undefined }).stripeAccountIdReady).toBe(false);
     const r = checkPreviewEnv({ ...V2_ENV, SESSION_SECRET: "unit-Xq7#mP2$vL9@wR4!nT6&kB8*hJ3%", CRON_SECRET: "c".repeat(32) });
     expect(r.filter((x) => x.level === "error").map((x) => x.key)).toEqual(["FIREBASE_PRIVATE_KEY"]); // 鍵はテストでは入れない
     expect(r.find((x) => x.key === "FIREBASE_PROJECT_ID")?.message).toMatch(/STRIPE_ACCOUNT_ID が必須/);
+  });
+});
+
+describe("Firebase のプロジェクトと Git のブランチの組み合わせ（方法B）", () => {
+  const V2 = "uranai-stripe-sandbox-v2";
+  const V2_BRANCH = "preview/stripe-sandbox-v2";
+  const V2_SA = "sandbox-v2-sa@uranai-stripe-sandbox-v2.iam.gserviceaccount.com";
+  const V2_ENV: E = { ...NEW_ENV, VERCEL_GIT_COMMIT_REF: V2_BRANCH, FIREBASE_PROJECT_ID: V2, FIREBASE_CLIENT_EMAIL: V2_SA, STRIPE_TEST_FIREBASE_PROJECT_ID: V2 };
+
+  it("正しい組み合わせだけ許可：preview/stripe-sandbox-v2 → uranai-stripe-sandbox-v2、preview/stripe-verification → uranai-preview", () => {
+    expect(checkFirestoreTarget(V2_ENV)).toEqual({ ok: true });
+    expect(checkFirestoreTarget(LEGACY_ENV)).toEqual({ ok: true });
+  });
+
+  it("新しい検証環境のブランチで、旧 Preview のプロジェクトの値が引き継がれても接続しない（登録漏れ）", () => {
+    // Preview 全体の旧 Preview の Firebase の値のまま、新しいブランチでデプロイされた
+    expect(checkFirestoreTarget({ ...LEGACY_ENV, VERCEL_GIT_COMMIT_REF: V2_BRANCH })).toEqual({ ok: false, reason: "preview_branch_not_allowed" });
+    // Stripe の値だけ新しい Sandbox に上書きし、Firebase は旧 Preview のまま（以前は通ってしまった組み合わせ）
+    const leaked = { ...LEGACY_ENV, VERCEL_GIT_COMMIT_REF: V2_BRANCH, STRIPE_SECRET_KEY: "sk_test_unit_new_sandbox", STRIPE_ACCOUNT_ID: "acct_unitNewSandbox1" };
+    expect(checkFirestoreTarget(leaked)).toEqual({ ok: false, reason: "preview_branch_not_allowed" });
+    expect(stripeTestConfig(leaked)).toEqual({ ok: false, reason: "firestore_target_blocked" });
+  });
+
+  it("旧 Preview のブランチで新しい検証環境のプロジェクトにも接続しない（逆の取り違え）", () => {
+    expect(checkFirestoreTarget({ ...V2_ENV, VERCEL_GIT_COMMIT_REF: LEGACY_BRANCH })).toEqual({ ok: false, reason: "preview_branch_not_allowed" });
+  });
+
+  it("ブランチの名前が渡らない（System Environment Variables が無効）・空・想定外なら、どちらのプロジェクトにも接続しない", () => {
+    for (const ref of [undefined, "", " preview/stripe-sandbox-v2", "preview/stripe-sandbox-v2 ", "Preview/Stripe-Sandbox-V2", "preview/stripe-sandbox-v2/x", "main", "master", "feature/other"]) {
+      expect(checkFirestoreTarget({ ...V2_ENV, VERCEL_GIT_COMMIT_REF: ref }), String(ref)).toEqual({ ok: false, reason: "preview_branch_not_allowed" });
+      expect(checkFirestoreTarget({ ...LEGACY_ENV, VERCEL_GIT_COMMIT_REF: ref }).ok, String(ref)).toBe(ref === LEGACY_BRANCH);
+    }
+  });
+
+  it("VERCEL_ENV が preview でなければ、Preview 用のプロジェクトには接続しない（System Environment Variables が無効でも停止）", () => {
+    for (const env of [undefined, "", "development", "production", "Preview"]) {
+      for (const base of [V2_ENV, LEGACY_ENV]) {
+        expect(checkFirestoreTarget({ ...base, VERCEL_ENV: env }), `${env}/${base.FIREBASE_PROJECT_ID}`).toEqual({ ok: false, reason: "preview_project_outside_preview" });
+      }
+    }
+    // 形の違う値（空白・大文字）でも、この確認をすり抜けない
+    expect(checkFirestoreTarget({ FIREBASE_PROJECT_ID: " URANAI-STRIPE-SANDBOX-V2 " })).toEqual({ ok: false, reason: "preview_project_outside_preview" });
+    // ローカルの Firestore Emulator は接続先が手元なので、今までどおり（自動テスト用）
+    expect(checkFirestoreTarget({ FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080", FIREBASE_PROJECT_ID: V2 }).ok).toBe(true);
+  });
+
+  it("本番（Production の main）は今までどおり。本番の接続先に Preview 用のプロジェクトを入れた誤りだけ止める", () => {
+    expect(checkFirestoreTarget({ VERCEL_ENV: "production", VERCEL_GIT_COMMIT_REF: "main", FIREBASE_PROJECT_ID: PRODUCTION_FIREBASE_PROJECT_ID, PRODUCTION_FIREBASE_PROJECT_ID: PRODUCTION_FIREBASE_PROJECT_ID })).toEqual({ ok: true });
+    expect(checkFirestoreTarget({ VERCEL_ENV: "production", FIREBASE_PROJECT_ID: PRODUCTION_FIREBASE_PROJECT_ID })).toEqual({ ok: true }); // ブランチの名前に関係しない
+    expect(checkFirestoreTarget({ VERCEL_ENV: "production", VERCEL_GIT_COMMIT_REF: "main", FIREBASE_PROJECT_ID: V2 })).toEqual({ ok: false, reason: "preview_project_outside_preview" });
+    // Preview から本番へは、ブランチに関係なく拒否
+    expect(checkFirestoreTarget({ ...V2_ENV, FIREBASE_PROJECT_ID: PRODUCTION_FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL: "sa-prod-01@uranai-b6edf.iam.gserviceaccount.com" })).toEqual({ ok: false, reason: "preview_uses_production_project" });
+  });
+
+  it("一覧の検証：ブランチが無い・形が不正・本番のブランチ・2つのプロジェクトで同じブランチは不可", () => {
+    const t = (allowedBranches: string[], projectId = "uranai-sbx-a") => ({ projectId, allowedBranches, requireStripeAccountId: true });
+    expect(() => validatePreviewTargets([t([])])).toThrow(/at least one/);
+    for (const b of ["main", "master"]) expect(() => validatePreviewTargets([t([b])]), b).toThrow(/production branch/);
+    for (const b of ["", " x", "a b", "x/", "a..b", "-x", "x".repeat(201)]) expect(() => validatePreviewTargets([t([b])]), b).toThrow(/invalid branch/);
+    expect(() => validatePreviewTargets([t(["preview/a"]), t(["preview/a"], "uranai-sbx-b")])).toThrow(/only one/);
+  });
+
+  it("Stripe のテスト決済も、ブランチとプロジェクトの組み合わせが合わなければ使えない", () => {
+    expect(stripeTestConfig(V2_ENV)).toMatchObject({ ok: true, accountId: "acct_unitNewSandbox1" });
+    expect(stripeTestConfig({ ...V2_ENV, VERCEL_GIT_COMMIT_REF: undefined })).toEqual({ ok: false, reason: "firestore_target_blocked" });
+    expect(stripeTestConfig({ ...LEGACY_ENV, VERCEL_GIT_COMMIT_REF: V2_BRANCH })).toEqual({ ok: false, reason: "firestore_target_blocked" });
+  });
+
+  it("診断・環境の確認：ブランチの一致を真偽値・変数名だけで返す（値を含まない）", () => {
+    expect(firebaseTargetDiagnostics(V2_ENV).gitBranchAllowed).toBe(true);
+    expect(firebaseTargetDiagnostics({ ...V2_ENV, VERCEL_GIT_COMMIT_REF: undefined }).gitBranchAllowed).toBe(false);
+    expect(firebaseTargetDiagnostics({ ...LEGACY_ENV, VERCEL_GIT_COMMIT_REF: V2_BRANCH }).gitBranchAllowed).toBe(false);
+    const missing = checkPreviewEnv({ ...V2_ENV, VERCEL_GIT_COMMIT_REF: undefined });
+    expect(missing.find((r) => r.key === "VERCEL_GIT_COMMIT_REF")?.level).toBe("unknown");
+    const wrong = checkPreviewEnv({ ...V2_ENV, VERCEL_GIT_COMMIT_REF: LEGACY_BRANCH });
+    expect(wrong.find((r) => r.key === "VERCEL_GIT_COMMIT_REF")?.level).toBe("error");
+    expect(wrong.find((r) => r.key === "FIRESTORE_TARGET")?.level).toBe("error");
+    expect(JSON.stringify([missing, wrong])).not.toMatch(/sk_test_unit|acct_unit|sandbox-v2-sa@/);
+  });
+
+  it("エラーの説明に、プロジェクトの ID・ブランチの名前・メールアドレスの値を含めない", async () => {
+    const { FIRESTORE_TARGET_MESSAGE } = await import("@/lib/firestore/target-guard");
+    for (const m of Object.values(FIRESTORE_TARGET_MESSAGE)) expect(m).not.toMatch(/uranai-|preview\/|@|acct_|sk_/);
   });
 });

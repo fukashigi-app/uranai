@@ -19,6 +19,7 @@ const LIVE: E = {
 };
 const PREVIEW: E = {
   VERCEL_ENV: "preview",
+  VERCEL_GIT_COMMIT_REF: "preview/stripe-verification",
   STRIPE_TEST_CHECKOUT: "on",
   STRIPE_SECRET_KEY: "sk_test_unit",
   STRIPE_WEBHOOK_SECRET: "whsec_unit_secret",

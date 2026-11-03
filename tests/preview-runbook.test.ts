@@ -13,6 +13,7 @@ import { MONITOR_LOCK_TTL_MS } from "@/lib/payments/monitor-rules";
 type E = Record<string, string | undefined>;
 const PREVIEW: E = {
   VERCEL_ENV: "preview",
+  VERCEL_GIT_COMMIT_REF: "preview/stripe-verification",
   VERCEL_BRANCH_URL: "uranai-git-feature-stripe-checkout-team.vercel.app",
   VERCEL_URL: "uranai-abc123-team.vercel.app",
   VERCEL_PROJECT_PRODUCTION_URL: "uranai.example.jp",

@@ -34,6 +34,7 @@ const KEYS = [
   "DB_PROVIDER",
   "SESSION_SECRET",
   "FIREBASE_CLIENT_EMAIL",
+  "VERCEL_GIT_COMMIT_REF",
 ] as const;
 const LIVE_PUBLIC: Record<string, string> = {
   VERCEL_ENV: "production",
@@ -51,6 +52,7 @@ const LIVE_PUBLIC: Record<string, string> = {
 const LIVE_OPERATOR = { ...LIVE_PUBLIC, SITE_STATUS: "development", STRIPE_LIVE_OPERATOR_TEST: "on" };
 const PREVIEW: Record<string, string> = {
   VERCEL_ENV: "preview",
+  VERCEL_GIT_COMMIT_REF: "preview/stripe-verification",
   SITE_STATUS: "open",
   PAYMENT_PROVIDER: "stripe",
   STRIPE_TEST_CHECKOUT: "on",
