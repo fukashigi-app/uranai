@@ -193,6 +193,14 @@ async function main() {
     assert.doesNotMatch(page, /認証を求める応答を確認|保護済み/);
   }
   step("運営の管理画面：開発モードの案内と Vercel Authentication「未確認」を表示");
+  // Stripe アカウントの照合の診断は Sandbox v2 の Preview 専用（ローカルでは画面に出さず、API も拒否）
+  assert.doesNotMatch(await op.text("/admin/settings"), /Stripe アカウントの照合の診断/);
+  r = await op.req("/api/admin/stripe-account-diagnostics", { method: "POST" });
+  assert.equal(r.status, 404);
+  assert.deepEqual(await r.json(), { error: "environment_not_allowed", environment: "other" });
+  r = await fetch(`${BASE}/api/admin/stripe-account-diagnostics`, { method: "POST", headers: { origin: BASE } });
+  assert.equal(r.status, 404); // ログインしていない
+  step("Stripe アカウントの照合の診断：ローカルでは表示せず、API も拒否（運営・未ログインとも 404）");
 
   // ---- 4. 登録済み・稼働中の実店舗の QR（運営だけ）----
   html = await op.text(`/s/${store.storeCode}`); // qr_store Cookie が実店舗になる
