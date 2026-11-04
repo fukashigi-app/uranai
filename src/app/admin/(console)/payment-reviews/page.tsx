@@ -20,6 +20,7 @@ const MISMATCH_LABEL: Record<string, string> = {
   currency: "通貨",
   amount: "金額",
   store: "店舗",
+  payment_method: "支払い方法",
 };
 
 /**
@@ -94,6 +95,11 @@ export default async function PaymentReviewsPage(props: PageProps<"/admin/paymen
                 <span className="block truncate" title={r.objectId}>{`${r.objectType}: ${r.objectId}`}</span>
                 {r.transactionId ? <span className="block truncate" title={r.transactionId}>{`取引: ${r.transactionId}`}</span> : null}
                 {r.chargeId && r.objectId !== r.chargeId ? <span className="block truncate">{`Charge: ${r.chargeId}`}</span> : null}
+                {r.paymentIntentId && r.kind === "paid_payment_method_not_allowed" ? <span className="block truncate" title={r.paymentIntentId}>{`PaymentIntent: ${r.paymentIntentId}`}</span> : null}
+                {r.checkoutId ? <span className="block truncate" title={r.checkoutId}>{`注文: ${r.checkoutId}`}</span> : null}
+                {r.sessionId ? <span className="block truncate" title={r.sessionId}>{`Session: ${r.sessionId}`}</span> : null}
+                {r.paymentMethodType ? <span className="block truncate">{`支払い方法: ${r.paymentMethodType}`}</span> : null}
+                {r.livemode === true || r.livemode === false ? <span className="block">{r.livemode ? "本番" : "テスト"}</span> : null}
               </td>
               <td className="text-[12px]">
                 {r.storeId ? (

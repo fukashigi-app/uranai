@@ -142,6 +142,7 @@ export default async function PaymentMonitorPage(props: PageProps<"/admin/paymen
               <td className="max-w-56 font-mono text-[11px] text-ink-faint">
                 <span className="block truncate" title={r.objectId}>{`${r.objectType}: ${r.objectId}`}</span>
                 {r.checkoutId && r.checkoutId !== r.objectId ? <span className="block truncate">{`注文: ${r.checkoutId}`}</span> : null}
+                {r.paymentIntentId ? <span className="block truncate" title={r.paymentIntentId}>{`PaymentIntent: ${r.paymentIntentId}`}</span> : null}
                 {r.transactionId && r.transactionId !== r.objectId ? <span className="block truncate">{`取引: ${r.transactionId}`}</span> : null}
                 {r.settlementId && r.settlementId !== r.objectId ? <span className="block truncate">{`精算: ${r.settlementId}`}</span> : null}
                 {r.storeId ? (

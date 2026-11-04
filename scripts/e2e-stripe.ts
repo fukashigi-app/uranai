@@ -25,6 +25,8 @@ import { jstYearMonth, shiftYearMonth } from "@/lib/time";
 import { dismissStripeRefundReview, restoreStripeEntitlement } from "@/lib/payments/stripe-confirm";
 import { runMaintenance } from "@/lib/services/maintenance";
 import { stripeEnvTag } from "@/lib/payments/stripe-checkout";
+import { paymentReviewId, resolvePaymentReview } from "@/lib/firestore/payment-reviews";
+import { paymentAlertId, resolvePaymentAlert } from "@/lib/firestore/payment-alerts";
 
 const BASE = process.env.E2E_BASE_URL ?? "http://localhost:3000";
 const STRIPE_PORT = 12111;
@@ -326,6 +328,56 @@ async function main() {
     r = await webhook("checkout.session.completed", { id: p.sessionId, object: "checkout.session" });
     assert.equal(((await r.json()) as { outcome: string }).outcome, "rejected", method);
     assert.equal((await txOf(p.checkoutId)).length, 0);
+    // 支払い済みなのに確定できない決済：決済要確認（Charge ごとに1件）と決済監視（注文ごとに1件）に記録する。決済記録・権利・返金は作らない
+    const piId = String(fake.sessions.get(p.sessionId)!.payment_intent);
+    const chId = String(fake.pis.get(piId)!.latest_charge);
+    const reviewRef = fsdb().collection(C.paymentReviews).doc(paymentReviewId("paid_payment_method_not_allowed", chId));
+    const alertRef = fsdb().collection(C.paymentAlerts).doc(paymentAlertId("paid_payment_method_not_allowed", p.checkoutId));
+    const pmType = method === "link" ? "link" : "card:samsung_pay";
+    let rv = await reviewRef.get();
+    assert.deepEqual(
+      [rv.get("status"), rv.get("occurrences"), rv.get("checkoutId"), rv.get("sessionId"), rv.get("paymentIntentId"), rv.get("chargeId"), rv.get("storeId"), rv.get("amount"), rv.get("livemode"), rv.get("paymentMethodType")],
+      ["OPEN", 1, p.checkoutId, p.sessionId, piId, chId, storeA.id, 100, false, pmType],
+      method,
+    );
+    assert.ok(rv.get("firstSeenAt"), "発生日時がありません");
+    let al = await alertRef.get();
+    assert.deepEqual([al.get("status"), al.get("occurrences"), al.get("checkoutId"), al.get("paymentIntentId"), al.get("mode"), al.get("errorName")], ["OPEN", 1, p.checkoutId, piId, "test", "payment_method_not_allowed"], method);
+    // 秘密情報・個人情報（カード・メールアドレス・名前）は保存しない
+    const saved = JSON.stringify([rv.data(), al.data()]);
+    for (const secret of ["sk_test_", "whsec_", "@", "4242", "last4", "email"]) assert.ok(!saved.includes(secret), `${method}: ${secret} が記録に含まれています`);
+    // くり返し（同じ通知の再送・別の通知・同時の処理・戻り先・状態の確認）でも1件・回数1のまま
+    const again = await Promise.all([
+      webhook("checkout.session.completed", { id: p.sessionId, object: "checkout.session" }),
+      webhook("checkout.session.completed", { id: p.sessionId, object: "checkout.session" }),
+      webhook("checkout.session.async_payment_succeeded", { id: p.sessionId, object: "checkout.session" }),
+      op.req(`/payment/return?session_id=${p.sessionId}`),
+      op.req("/api/checkout/status"),
+    ]);
+    for (const x of again.slice(0, 3)) assert.equal(x.status, 200);
+    // 利用者には「請求は発生していません」と案内しない（運営への問い合わせを案内する）
+    const ret = await (await op.req(`/payment/return?session_id=${p.sessionId}`)).text();
+    assert.match(ret, /お支払いを確認できませんでした/);
+    assert.ok(!ret.includes("請求は発生していません"));
+    assert.deepEqual(await (await op.req("/api/checkout/status")).json(), { status: "failed", failureCode: "stripe_paid_review" });
+    r = await op.req("/api/checkout/stripe-session", { method: "POST", json: {} });
+    assert.equal(r.status, 409);
+    assert.match(await r.text(), /もう一度お支払いいただく必要はありません/);
+    assert.equal((await fsdb().collection(C.paymentReviews).where("chargeId", "==", chId).get()).size, 1);
+    assert.equal((await fsdb().collection(C.paymentAlerts).where("checkoutId", "==", p.checkoutId).get()).size, 1);
+    rv = await reviewRef.get();
+    al = await alertRef.get();
+    assert.deepEqual([rv.get("occurrences"), al.get("occurrences")], [1, 1], `${method}：くり返しで回数が増えています`);
+    // 確認済みにした後の再処理では、未確認に戻らない
+    assert.ok(await resolvePaymentReview(reviewRef.id, { userId: "e2e-operator", role: "OPERATOR" }));
+    assert.ok(await resolvePaymentAlert(alertRef.id, { userId: "e2e-operator", role: "OPERATOR" }));
+    r = await webhook("checkout.session.completed", { id: p.sessionId, object: "checkout.session" });
+    assert.equal(r.status, 200);
+    await op.req("/api/checkout/status");
+    assert.deepEqual([(await reviewRef.get()).get("status"), (await alertRef.get()).get("status")], ["RESOLVED", "RESOLVED"], `${method}：確認済みが未確認に戻りました`);
+    // 決済記録・権利は作らない。注文は決済済みにしない
+    assert.equal((await txOf(p.checkoutId)).length, 0);
+    assert.notEqual((await fsdb().collection(C.checkouts).doc(p.checkoutId).get()).get("status"), "SUCCEEDED");
   }
   // Stripe が想定外の支払い方法を表示する Session になったら、決済画面に移動させない（注文にも紐付けない）
   fake.extraMethods = ["konbini"];
@@ -336,7 +388,7 @@ async function main() {
   assert.equal((await op.req("/api/checkout/stripe-session", { method: "POST", json: {} })).status, 502);
   assert.equal((await fsdb().collection(C.checkouts).doc(cx).get()).get("providerPaymentId") ?? null, null);
   fake.extraMethods = [];
-  step("Apple Pay・Google Pay・PayPay（即時）は確定し支払い方法を記録。Link・Samsung Pay は記録しない。想定外の支払い方法を表示する Session には移動しない");
+  step("Apple Pay・Google Pay・PayPay（即時）は確定し支払い方法を記録。Link・Samsung Pay は確定せず、決済要確認・決済監視に1件ずつ記録（くり返し・同時でも1件、確認済みは戻らない）。想定外の支払い方法を表示する Session には移動しない");
 
   // ---- 13. PayPay の確定待ち（非同期）→ 期限の後に確定：確定するまで権利を付与しない。注文は閉じない ----
   const p9 = await startPurchase(op, storeA.storeCode, "ZODIAC");

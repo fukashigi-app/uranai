@@ -117,7 +117,12 @@ describe("Stripe の決済の照合（金額・通貨・注文・店舗・状態
       [session({ payment_status: "unpaid" }, { status: "processing" }), "not_paid", "session_complete_unpaid"],
       [session({}, { status: "requires_payment_method" }), "not_paid", "payment_intent_requires_payment_method"],
     ];
-    for (const [s, status, reason] of cases) expect(validateStripeSession(s), reason).toEqual({ ok: false, status, reason });
+    for (const [s, status, reason] of cases) {
+      const r = validateStripeSession(s);
+      // 許可しない支払い方法だけ、支払い済みの情報（paidRejection）が付く。判定（status・reason）は変わらない
+      if (reason === "payment_method_not_allowed") expect(r, reason).toEqual({ ok: false, status, reason, paidRejection: expect.objectContaining({ checkoutId: CO }) });
+      else expect(r, reason).toEqual({ ok: false, status, reason });
+    }
     expect(validateStripeSession(session({}, {}, { amount_refunded: 100, refunded: true }))).toMatchObject({ ok: true, facts: { refunded: true } });
   });
 

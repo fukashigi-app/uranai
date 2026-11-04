@@ -60,6 +60,7 @@ import {
   summarizeRefunds,
   stripeRuntime,
   validateStripeSession,
+  type StripePaidRejection,
   type StripeRuntime,
 } from "./stripe-checkout";
 
@@ -97,7 +98,8 @@ export type StripeConfirmOutcome = (
   /** 返金済み・チャージバック：決済記録は作る（または作成済み）が、占い権利は付与しない（注文は REFUNDED） */
   | { status: "refunded"; transactionId: string; refundReason: CheckoutRefundReason | null }
   | { status: "not_paid"; reason: string }
-  | { status: "rejected"; reason: string }
+  /** paidReview … Stripe では支払い済みだが確定を拒否した（決済要確認・決済監視に記録済み。利用者には「請求は発生していません」と案内しない） */
+  | { status: "rejected"; reason: string; paidReview?: true }
 ) & { recheck?: RecheckRun };
 
 /** 再確認の実行の結果（not_pending＝PENDING ではなかったので何もしていない） */
@@ -127,6 +129,9 @@ const EXPIRED_ERROR = () => new CheckoutError("expired", "お支払いの有効�
 const FAILED_ERROR = () => new CheckoutError("payment_failed", "お支払いが完了しませんでした（請求は発生していません）。お手数ですが占いの選択からやり直してください。", 410);
 /** 返金済み・チャージバックの注文（REFUNDED）：占いも新しい決済も始めない（「請求は発生していません」とは案内しない） */
 const REFUNDED_ERROR = (reason: unknown) => new CheckoutError("refunded", refundedNotice(isCheckoutRefundReason(reason) ? reason : null).body, 410);
+/** 支払い済みなのに確定できなかった決済（運営が確認する）：新しい決済を始めない・「請求は発生していません」とは案内しない */
+const PAID_REVIEW_ERROR = () =>
+  new CheckoutError("checkout_conflict", "お支払いの内容を確認できなかったため、占いを開始できませんでした。お手数ですが、運営までお問い合わせください。もう一度お支払いいただく必要はありません。", 409);
 const refundReasonOf = (v: unknown): CheckoutRefundReason | null => (isCheckoutRefundReason(v) ? v : null);
 
 export type StripeStartResult = { status: "redirect"; url: string } | { status: "succeeded" } | { status: "pending"; returnUrl: string };
@@ -152,6 +157,7 @@ export async function startStripeCheckout(token: string | null, origin: string, 
     const r = await confirmStripeCheckout(d.providerPaymentId, r0);
     if (r.status === "refunded") throw REFUNDED_ERROR(r.refundReason);
     if (r.status === "confirmed" || r.status === "duplicate") return { status: "succeeded" };
+    if (r.status === "rejected" && r.paidReview) throw PAID_REVIEW_ERROR();
     if (r.status === "rejected") throw new CheckoutError("checkout_conflict", "お支払い情報を確認できませんでした。占いの選択からやり直してください。", 409);
     // すでに閉じた注文（失敗・期限切れ）は、支払いが確定していなければ選び直しを案内する
     if (d.status === "FAILED") throw FAILED_ERROR();
@@ -259,6 +265,12 @@ export async function confirmStripeCheckout(
   const v = validateStripeSession(session, r0.mode);
   if (!v.ok) {
     if (v.status === "rejected") console.error("[stripe] payment rejected", { sessionId, reason: v.reason });
+    if (v.status === "rejected" && v.paidRejection) {
+      // 支払い済みなのに確定できない（許可しない支払い方法）：運営が見つけられるよう記録する。記録できなければ例外
+      // （Webhook は処理済みにせず 500・Stripe が再送。戻り先・状態の確認は「確認しています」の表示のまま）。返金・付与はしない
+      await recordPaidRejection(v.paidRejection, v.reason);
+      return { status: "rejected", reason: v.reason, paidReview: true };
+    }
     return v.status === "not_paid" ? { status: "not_paid", reason: v.reason } : { status: "rejected", reason: v.reason };
   }
   const f = v.facts;
@@ -1014,6 +1026,38 @@ export async function confirmStripeReturn(
   return confirmStripeCheckout(sessionId, r0);
 }
 
+/**
+ * Stripe では支払い済みなのに、確定を拒否した決済（validateStripeSession の paidRejection）を記録する。
+ *  - 決済要確認（paid_payment_method_not_allowed・対象は Charge）… 必須。失敗したら例外
+ *  - 決済監視（paid_payment_method_not_allowed・対象は注文）     … 失敗しても止めない
+ * どちらも ID は種類と対象で決まる固定の値で、作成・更新は Firestore のトランザクション（別のサーバーから同時に処理されても1件）。
+ * 同じ決済のくり返し（Webhook の再送・戻り先・状態の確認・運営の復旧）では回数を増やさず、確認済みを未確認に戻さない
+ * （決済要確認は内容の判定のキー（種類・項目・金額）が同じ決済では変わらない。決済監視は once）。
+ * 保存するのは ID・金額・モード・支払い方法の種類の名前だけ（秘密情報・カードの情報・個人情報は保存しない）。
+ */
+async function recordPaidRejection(p: StripePaidRejection, reason: string): Promise<void> {
+  const kind = "paid_payment_method_not_allowed" as const;
+  await recordRequiredPaymentReview({
+    kind,
+    objectType: "charge",
+    objectId: p.chargeId,
+    chargeId: p.chargeId,
+    paymentIntentId: p.paymentIntentId,
+    checkoutId: p.checkoutId,
+    sessionId: p.sessionId,
+    storeId: p.storeId,
+    paymentMethodType: p.paymentMethodType,
+    mismatches: ["payment_method"],
+    amount: p.amount,
+    livemode: p.livemode,
+  });
+  await recordPaymentAlert(
+    { kind, objectType: "checkout", objectId: p.checkoutId, checkoutId: p.checkoutId, paymentIntentId: p.paymentIntentId, storeId: p.storeId, mode: alertModeOf(p.livemode), errorName: reason },
+    new Date(),
+    { once: true },
+  );
+}
+
 const RECONCILE_AFTER_MS = 3_000;
 
 /** 状態の確認（/api/checkout/status）。Webhook が遅れても、Stripe API で照合して進める */
@@ -1036,7 +1080,8 @@ export async function stripeCheckoutStatus(checkout: CheckoutLike, rt?: StripeRu
         const outcome = await confirmStripeCheckout(checkout.providerPaymentId, r0);
         if (outcome.status === "refunded") return { status: "refunded", refundReason: outcome.refundReason };
         if (outcome.status === "confirmed" || outcome.status === "duplicate") return { status: "succeeded" };
-        if (outcome.status === "rejected") return { status: "failed", failureCode: "stripe_rejected" };
+        // 支払い済みなのに確定できなかった決済：「請求は発生していません」とは案内しない（運営への問い合わせを案内する）
+        if (outcome.status === "rejected") return { status: "failed", failureCode: outcome.paidReview ? "stripe_paid_review" : "stripe_rejected" };
         // 期限の後だけ、期限切れ・取り消しを確かめて閉じる（非同期の支払いの失敗は Stripe の通知で閉じる）
         if (checkout.expiresAt.getTime() + RECONCILE_AFTER_MS < Date.now()) {
           const closed = await closeStripeCheckout(checkout.providerPaymentId, {}, r0);

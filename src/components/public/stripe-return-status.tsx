@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { Spinner } from "@/components/ui/spinner";
 import { isCheckoutRefundReason, refundedNotice, type CheckoutRefundReason } from "@/lib/payments/refunded-notice";
 
-type Phase = "checking" | "slow" | "failed" | "expired" | "refunded";
+type Phase = "checking" | "slow" | "failed" | "expired" | "refunded" | "review";
 
 const INTERVAL_MS = [2_000, 2_000, 3_000, 3_000, 5_000];
 const SLOW_AFTER_MS = 60_000;
@@ -40,7 +40,7 @@ export function StripeReturnStatus() {
     async function tick() {
       try {
         const res = await fetch("/api/checkout/status", { cache: "no-store" });
-        const json = (await res.json().catch(() => null)) as { status?: string; refundReason?: unknown } | null;
+        const json = (await res.json().catch(() => null)) as { status?: string; failureCode?: unknown; refundReason?: unknown } | null;
         if (stopped) return;
         if (json?.status === "succeeded") {
           router.replace("/fortune/input");
@@ -51,6 +51,8 @@ export function StripeReturnStatus() {
           setRefundReason(isCheckoutRefundReason(json.refundReason) ? json.refundReason : null);
           return setPhase("refunded");
         }
+        // Stripe では支払い済みなのに確定できなかった決済：「請求は発生していません」とは表示しない
+        if (json?.status === "failed" && json.failureCode === "stripe_paid_review") return setPhase("review");
         if (json?.status === "failed") return setPhase("failed");
         if (json?.status === "expired") return setPhase("expired");
       } catch {
@@ -74,6 +76,14 @@ export function StripeReturnStatus() {
     return (
       <Notice title={n.title} action={<Link href="/fortune" className="btn-ghost inline-block rounded-2xl px-6 py-3 font-bold">占いの選択へ</Link>}>
         {n.body}
+      </Notice>
+    );
+  }
+  if (phase === "review") {
+    return (
+      <Notice title="お支払いを確認できませんでした" action={<Link href="/fortune" className="btn-ghost inline-block rounded-2xl px-6 py-3 font-bold">占いの選択へ</Link>}>
+        お支払いの内容を確認できなかったため、占いを開始できませんでした。お手数ですが、運営までお問い合わせください。
+        <span className="mt-2 block font-bold text-gold-200">もう一度お支払いいただく必要はありません。</span>
       </Notice>
     );
   }

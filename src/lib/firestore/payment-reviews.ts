@@ -25,7 +25,8 @@ export type PaymentReviewKind =
   | "multiple_disputes"
   | "dispute_state_regressed"
   | "legacy_settlement_change"
-  | "legacy_settlement_mismatch";
+  | "legacy_settlement_mismatch"
+  | "paid_payment_method_not_allowed";
 
 export const PAYMENT_REVIEW_LABEL: Record<PaymentReviewKind, string> = {
   charge_mismatch: "Stripe の決済と記録が一致しない（返金・異議申し立てを反映していません）",
@@ -36,6 +37,7 @@ export const PAYMENT_REVIEW_LABEL: Record<PaymentReviewKind, string> = {
   dispute_state_regressed: "結果が出た異議申し立てが、対応中に戻った（反映していません）",
   legacy_settlement_change: "以前に確定した精算の月の取引が、後から返金・異議申し立てで変わった（支払った額が不明なため、調整していません）",
   legacy_settlement_mismatch: "以前に確定した精算の金額と、今の集計が一致しない（調整していません）",
+  paid_payment_method_not_allowed: "Stripe では支払い済みだが、許可していない支払い方法のため、決済を確定せず占いの権利も付与していない（返金などの対応が必要。自動では返金しません）",
 };
 
 export type PaymentReviewStatus = "OPEN" | "RESOLVED";
@@ -57,6 +59,12 @@ export type PaymentReviewInput = {
   /** 関係する金額（円。例：取り分の変化・申し立ての額） */
   amount?: number | null;
   livemode?: boolean | null;
+  /** 注文の ID（paid_payment_method_not_allowed など、注文と Stripe の決済を結び付けて確認する記録だけ） */
+  checkoutId?: string | null;
+  /** Stripe の Checkout Session の ID（同上） */
+  sessionId?: string | null;
+  /** 支払い方法の種類の名前（例：link・card:samsung_pay。カードの番号・名前などは含めない） */
+  paymentMethodType?: string | null;
 };
 
 export type PaymentReview = PaymentReviewInput & { id: string; status: PaymentReviewStatus; occurrences: number; firstSeenAt: Date | null; lastSeenAt: Date | null; resolvedAt: Date | null; resolvedBy: string | null };
@@ -174,6 +182,12 @@ function reviewWrite(input: PaymentReviewInput) {
     mismatches: (input.mismatches ?? []).filter((m) => /^[a-z_]{1,40}$/.test(m)).slice(0, 10),
     amount: Number.isSafeInteger(input.amount) ? input.amount : null,
     livemode: typeof input.livemode === "boolean" ? input.livemode : null,
+    // 注文と Stripe の決済を結び付ける項目は、渡されたときだけ保存する（既存の種類の記録の内容は変えない）
+    ...(input.checkoutId !== undefined ? { checkoutId: clean(input.checkoutId) } : {}),
+    ...(input.sessionId !== undefined ? { sessionId: clean(input.sessionId) } : {}),
+    ...(input.paymentMethodType !== undefined
+      ? { paymentMethodType: typeof input.paymentMethodType === "string" && /^[a-z][a-z0-9_]{0,29}(:[a-z][a-z0-9_]{0,29})?$/.test(input.paymentMethodType) ? input.paymentMethodType : null }
+      : {}),
   };
   // 内容が変わったか（食い違った項目・金額）。通知の種類や回数の違いでは変わらない
   const causeKey = JSON.stringify([fields.kind, fields.mismatches, fields.amount]);
@@ -196,6 +210,9 @@ function toReview(id: string, d: DocumentData): PaymentReview {
     mismatches: Array.isArray(d.mismatches) ? d.mismatches.map(String) : [],
     amount: typeof d.amount === "number" ? d.amount : null,
     livemode: typeof d.livemode === "boolean" ? d.livemode : null,
+    checkoutId: d.checkoutId ?? null,
+    sessionId: d.sessionId ?? null,
+    paymentMethodType: d.paymentMethodType ?? null,
     status: d.status === "RESOLVED" ? "RESOLVED" : "OPEN",
     occurrences: Number(d.occurrences ?? 1),
     firstSeenAt: toDate(d.firstSeenAt),

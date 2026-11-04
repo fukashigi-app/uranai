@@ -383,7 +383,36 @@ export type StripePaymentFacts = {
   envTag: string | null;
 };
 
-export type StripeValidation = { ok: true; facts: StripePaymentFacts } | { ok: false; status: "not_paid" | "rejected"; reason: string };
+/**
+ * Stripe では支払い済み（Session が complete・paid、PaymentIntent が succeeded、Charge が succeeded・captured、金額・注文の ID・metadata が一致）と
+ * 確かめた後に、許可しない支払い方法のため確定を拒否した決済の情報（決済要確認・決済監視の記録に使う）。
+ * 支払い方法は種類の名前だけ（例：link・card:samsung_pay）。カードの番号・ブランド・名前・メールアドレスなどは含めない。
+ */
+export type StripePaidRejection = {
+  checkoutId: string;
+  storeId: string;
+  sessionId: string;
+  paymentIntentId: string;
+  chargeId: string;
+  amount: number;
+  livemode: boolean;
+  paymentMethodType: string;
+};
+
+export type StripeValidation =
+  | { ok: true; facts: StripePaymentFacts }
+  | { ok: false; status: "not_paid" | "rejected"; reason: string; /** payment_method_not_allowed のときだけ（支払い済みと確かめた決済） */ paidRejection?: StripePaidRejection };
+
+const PM_PART_RE = /^[a-z][a-z0-9_]{0,29}$/;
+/** 支払い方法の種類の名前（記録用。決まった形の英小文字だけ。それ以外は unknown） */
+function paymentMethodTypeOf(charge: Stripe.Charge): string {
+  const d = charge.payment_method_details;
+  const type = typeof d?.type === "string" && PM_PART_RE.test(d.type) ? d.type : "unknown";
+  if (type !== "card") return type;
+  const wallet = d?.card?.wallet?.type;
+  if (!d?.card) return "card:no_details";
+  return typeof wallet === "string" && PM_PART_RE.test(wallet) ? `card:${wallet}` : "card";
+}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const FORTUNE_TYPES = new Set(["BIRTHDAY", "ZODIAC", "BLOOD"]);
@@ -427,7 +456,14 @@ export function validateStripeSession(session: Stripe.Checkout.Session, mode: St
   if (charge.currency !== CURRENCY || charge.amount !== PRICE_JPY || idOf(charge.payment_intent) !== pi.id) return { ok: false, status: "rejected", reason: "charge_mismatch" };
   // カード（Apple Pay・Google Pay を含む）と PayPay だけを受け付ける（Session で絞り込んでいるが、確定時にも確認する）
   const paymentMethod = paymentMethodOf(charge);
-  if (!paymentMethod) return { ok: false, status: "rejected", reason: "payment_method_not_allowed" };
+  if (!paymentMethod) {
+    return {
+      ok: false,
+      status: "rejected",
+      reason: "payment_method_not_allowed",
+      paidRejection: { checkoutId, storeId, sessionId: session.id, paymentIntentId: pi.id, chargeId: charge.id, amount: PRICE_JPY, livemode: live, paymentMethodType: paymentMethodTypeOf(charge) },
+    };
+  }
 
   const { fee, balanceTransactionId } = feeOf(charge);
   return {

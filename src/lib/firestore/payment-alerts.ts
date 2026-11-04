@@ -24,6 +24,8 @@ export type PaymentAlertInput = {
   mode: AlertMode;
   eventType?: string | null;
   checkoutId?: string | null;
+  /** Stripe の PaymentIntent の ID（paid_payment_method_not_allowed など、Stripe の決済と結び付けて確認する異常だけ） */
+  paymentIntentId?: string | null;
   transactionId?: string | null;
   storeId?: string | null;
   settlementId?: string | null;
@@ -47,8 +49,12 @@ const ID_RE = /^[A-Za-z0-9_:.-]{1,200}$/;
 const clean = (v: unknown) => (typeof v === "string" && ID_RE.test(v) ? v : null);
 export const paymentAlertId = (kind: PaymentAlertKind, objectId: string) => safeId(kind, createHash("sha256").update(objectId).digest("hex").slice(0, 40));
 
-/** 異常を記録する（同じ種類・対象なら回数を増やす。確認済みの後にまた起きたら未確認に戻す）。失敗しても例外にしない */
-export async function recordPaymentAlert(input: PaymentAlertInput, now: Date = new Date()): Promise<boolean> {
+/**
+ * 異常を記録する（同じ種類・対象なら回数を増やす。確認済みの後にまた起きたら未確認に戻す）。失敗しても例外にしない。
+ * opts.once … 1つの対象につき1回だけの異常（例：同じ決済の確定の拒否）。同じ対象のくり返し（Webhook の再送・戻り先・状態の確認・
+ * 別のサーバーからの同時の処理）では回数を増やさず、確認済みを未確認に戻さない（ID は種類と対象で決まる固定の値。作成はトランザクション）
+ */
+export async function recordPaymentAlert(input: PaymentAlertInput, now: Date = new Date(), opts: { once?: boolean } = {}): Promise<boolean> {
   const objectId = clean(input.objectId) ?? "invalid";
   const fields = {
     kind: input.kind,
@@ -57,6 +63,7 @@ export async function recordPaymentAlert(input: PaymentAlertInput, now: Date = n
     mode: input.mode === "live" || input.mode === "test" ? input.mode : "unknown",
     eventType: clean(input.eventType),
     checkoutId: clean(input.checkoutId),
+    ...(input.paymentIntentId !== undefined ? { paymentIntentId: clean(input.paymentIntentId) } : {}),
     transactionId: clean(input.transactionId),
     storeId: clean(input.storeId),
     settlementId: clean(input.settlementId),
@@ -69,7 +76,15 @@ export async function recordPaymentAlert(input: PaymentAlertInput, now: Date = n
   };
   const observed = Number.isSafeInteger(input.observedCount) && input.observedCount! > 0 ? input.observedCount! : null;
   try {
-    const r = await upsertDedupedRecord(col().doc(paymentAlertId(input.kind, objectId)), fields, { causeKey: input.kind, reopen: "always", timeoutMs: PAYMENT_ALERT_TIMEOUT_MS, now, ...(observed ? { add: { observedCount: observed } } : {}) });
+    const r = await upsertDedupedRecord(col().doc(paymentAlertId(input.kind, objectId)), fields, {
+      causeKey: input.kind,
+      // once：内容の判定のキーは種類だけ（同じ対象では変わらない）なので、確認済みに戻らない。回数も増やさない
+      reopen: opts.once ? "on_change" : "always",
+      ...(opts.once ? { countRepeat: false } : {}),
+      timeoutMs: PAYMENT_ALERT_TIMEOUT_MS,
+      now,
+      ...(observed ? { add: { observedCount: observed } } : {}),
+    });
     if (!r.ok) console.error("[payment-alert] record failed", { kind: input.kind, objectType: input.objectType, error: r.error });
     return r.ok;
   } catch (e) {
@@ -92,6 +107,7 @@ function toAlert(id: string, d: DocumentData): PaymentAlert {
     mode: d.mode === "live" || d.mode === "test" ? d.mode : "unknown",
     eventType: d.eventType ?? null,
     checkoutId: d.checkoutId ?? null,
+    paymentIntentId: d.paymentIntentId ?? null,
     transactionId: d.transactionId ?? null,
     storeId: d.storeId ?? null,
     settlementId: d.settlementId ?? null,
