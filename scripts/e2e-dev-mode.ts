@@ -201,6 +201,15 @@ async function main() {
   r = await fetch(`${BASE}/api/admin/stripe-account-diagnostics`, { method: "POST", headers: { origin: BASE } });
   assert.equal(r.status, 404); // ログインしていない
   step("Stripe アカウントの照合の診断：ローカルでは表示せず、API も拒否（運営・未ログインとも 404）");
+  // Discord のテスト異常の通知も Sandbox v2 の Preview 専用（ローカルでは画面に出さず、API も 404。送信の処理まで進まない）
+  assert.doesNotMatch(await op.text("/admin/settings"), /Discord のテスト異常の通知/);
+  for (const mode of ["preview", "send"]) {
+    r = await op.req("/api/admin/test-alert", { method: "POST", json: { mode } });
+    assert.equal(r.status, 404, `test-alert（${mode}）が運営アカウントで拒否されていません`);
+    r = await fetch(`${BASE}/api/admin/test-alert`, { method: "POST", headers: { origin: BASE, "content-type": "application/json" }, body: JSON.stringify({ mode }) });
+    assert.equal(r.status, 404); // ログインしていない
+  }
+  step("Discord のテスト異常の通知：ローカルでは表示せず、API も拒否（運営・未ログインとも 404）");
 
   // ---- 4. 登録済み・稼働中の実店舗の QR（運営だけ）----
   html = await op.text(`/s/${store.storeCode}`); // qr_store Cookie が実店舗になる

@@ -118,10 +118,17 @@ export function buildAlertMessage(o: {
   /** 未確認の一覧が取得の上限を超えた（確定）か。超えたときは、一部の異常を通知できていない可能性があることを書く */
   listsExceeded?: { alerts: boolean; reviews: boolean; limit: number } | null;
   adminUrl?: string | null;
+  /**
+   * テストの通知だけ（運営者が行うテスト。src/lib/ops/test-alert.ts）：見出しを「【テスト異常】…」にし、送信の時刻と案内の文を続ける。
+   * 指定しなければ今までどおりの見出し（【要対応】・【注意】）
+   */
+  test?: { notice: string } | null;
 }): DiscordPayload {
   const at = o.at.toLocaleString("ja-JP", { timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
   const hasError = o.issues.some((i) => i.severity === "error") || o.newAlerts.length > 0 || o.newReviews.length > 0;
-  const lines: string[] = [`【${hasError ? "要対応" : "注意"}】100円占い・決済の運用（${o.envLabel}） ${at}`];
+  const lines: string[] = o.test
+    ? [`【テスト異常】100円占い・決済の運用（${o.envLabel}）`, o.test.notice, `送信の時刻：${at}`]
+    : [`【${hasError ? "要対応" : "注意"}】100円占い・決済の運用（${o.envLabel}） ${at}`];
   const errs = o.issues.filter((i) => i.severity === "error");
   const warns = o.issues.filter((i) => i.severity === "warn");
   if (o.newAlerts.length) lines.push(`■ 新しい未確認の決済監視の異常：${o.newAlerts.length}件`, ...groupLines(o.newAlerts));

@@ -11,6 +11,8 @@ import { changeAdminPasswordAction } from "../../actions";
 import { isSandboxV2Environment, STRIPE_ACCOUNT_DIAGNOSTICS_ERROR_LABEL } from "@/lib/ops/stripe-account-diagnostics";
 import { STRIPE_TEST_DENY_MESSAGE } from "@/lib/payments/stripe-guard";
 import { StripeAccountDiagnosticsPanel } from "@/components/console/stripe-account-diagnostics";
+import { TestAlertPanel } from "@/components/console/test-alert-panel";
+import { isTestAlertAllowed } from "@/lib/ops/test-alert";
 
 export const metadata = { title: "設定" };
 
@@ -78,6 +80,11 @@ export default async function AdminSettingsPage() {
               ...Object.fromEntries(Object.entries(STRIPE_TEST_DENY_MESSAGE).map(([k, v]) => [`config_${k}`, v])),
             }}
           />
+        </Card>
+      ) : null}
+      {isTestAlertAllowed() ? (
+        <Card title="Discord のテスト異常の通知（Sandbox v2 専用）" className="mt-4">
+          <TestAlertPanel />
         </Card>
       ) : null}
       <Card title="パスワード変更" className="mt-4">
