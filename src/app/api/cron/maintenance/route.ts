@@ -10,6 +10,7 @@ import { runPaymentMonitor } from "@/lib/payments/payment-monitor";
 import { isFirestore } from "@/lib/data-provider";
 import type { CronPaymentMonitorSummary } from "@/lib/firestore/cron-run";
 import { acquireCronRunLock, recordCronRunResult, releaseCronRunLock, stillCronRunOwner } from "@/lib/services/cron-run";
+import { notifyCronLockFailure, notifyCronRun, type NotificationSummary } from "@/lib/services/alert-notification";
 import { cronRunStatusOf, runCronPhases, type CronPhase } from "@/lib/ops/cron-phases";
 
 /**
@@ -30,6 +31,9 @@ const RECHECK_RECOVERY_MAX_MS = 90 * 1000;
 const PAYMENT_MONITOR_NOT_AFTER_MS = 210 * 1000;
 const PAYMENT_MONITOR_MAX_MS = 60 * 1000;
 export const CRON_HARD_DEADLINE_MS = 270 * 1000;
+/** 運営者への通知は、すべての段階の後に行う。開始からこの時間までに終える（応答の時間を残す） */
+const NOTIFY_FINISH_BY_MS = 292 * 1000;
+const NOTIFY_MAX_MS = 15 * 1000;
 
 /**
  * 関数の実行時間の上限（秒）。Hobby プラン・Fluid Compute 有効の上限の300秒（Webhook と同じ。docs/preview-verification.md §11）。
@@ -45,6 +49,7 @@ type MaintenanceOutcome = { ok: true; result: Record<string, number> } | { ok: f
  * CRON_SECRET が未設定なら常に 401（認証を弱めない）。未設定は /api/health と運営ダッシュボードで検知する。
  *
  * 処理は段階に分けて順に実行する（src/lib/ops/cron-phases.ts）：メンテナンス → Webhook の通知の自動の復旧 → 決済記録の再確認の自動の回収 → 決済監視の点検。
+ * すべての段階の後に、運営者に異常を通知する（Discord。src/lib/services/alert-notification.ts。送信先は OPS_ALERT_WEBHOOK_URL。結果は system/cronRun）。
  * 決済監視の点検は読み取りと異常の記録だけ（決済の確定・返金・再決済はしない）。点検のロック（system/paymentMonitorLock）は今までどおりで、
  * 運営画面の「今すぐ点検」と重なったら開始しない（busy として、正常の実行と区別して記録する）。
  *  - 1つの段階が失敗・時間切れでも、次の段階は実行する（全体の締め切りを過ぎたら、新しい段階は始めない）
@@ -70,6 +75,9 @@ export async function GET(req: Request) {
   }
   if (lock.status === "failed") {
     console.error("[cron] lock could not be acquired; nothing was run", { error: lock.errorName });
+    // 運営者に知らせる（Firestore を使わない。失敗しても応答は変えない）
+    const n = await notifyCronLockFailure({ timeoutMs: 8000 });
+    console.log("[cron] notification", n);
     return NextResponse.json({ ok: false, error: "cron_lock_failed" }, { status: 503, headers: NO_STORE });
   }
   const ownerId = lock.status === "acquired" ? lock.ownerId : null;
@@ -196,11 +204,21 @@ export async function GET(req: Request) {
   if (mp?.status === "timed_out" || mp?.status === "skipped") {
     await recordMaintenanceRun({ ok: false, errorCode: mp.status === "timed_out" ? "PhaseTimeout" : `skipped_${mp.reason ?? "unknown"}` }, startedAt);
   }
-  const finishedAt = new Date();
   const status = cronRunStatusOf(outcome);
+  // 運営者への通知（Discord）：すべての段階の後に、残りの時間の中で行う。失敗しても定期処理の結果・応答は変えない
+  const remaining = NOTIFY_FINISH_BY_MS - (Date.now() - startedAt.getTime());
+  const notification: NotificationSummary =
+    remaining >= 2000
+      ? await notifyCronRun(
+          { runStatus: status, unsettled: outcome.unsettled, phases: outcome.phases, webhookRecovery, recheckRecovery, paymentMonitor, maintenanceOk: mp?.status === "ok" && m?.ok === true, startedAt },
+          { timeoutMs: Math.min(NOTIFY_MAX_MS, remaining) },
+        )
+      : { status: "skipped_time", issues: 0, newAlerts: 0, newReviews: 0, errorCode: null };
+  console.log("[cron] notification", notification);
+  const finishedAt = new Date();
   console.log("[cron] run finished", { status, ms: finishedAt.getTime() - startedAt.getTime(), phases: outcome.phases.map((p) => `${p.name}:${p.status}${p.reason ? `(${p.reason})` : ""}:${p.durationMs}ms`) });
   if (ownerId) {
-    await recordCronRunResult(ownerId, { status, startedAt, finishedAt, phases: outcome.phases, paymentMonitor });
+    await recordCronRunResult(ownerId, { status, startedAt, finishedAt, phases: outcome.phases, paymentMonitor, notification });
     // 中止の合図の後も止まらなかった段階は裏で続いている可能性があるので、ロックは外さず期限（CRON_LOCK_TTL_MS）で外れるのを待つ。
     // 時間切れでも止まった（abortSettled）なら、続いている処理は無いので外す
     if (!outcome.unsettled) await releaseCronRunLock(ownerId);

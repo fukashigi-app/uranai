@@ -6,6 +6,7 @@
  * - next.config・テストからも読み込めるよう、server-only やアプリ本体のモジュールには依存しない。
  */
 import { createPrivateKey } from "node:crypto";
+import { alertWebhookStatus } from "./alert-notifier";
 import { readOperatorInfo } from "../../config/operator";
 import { normalizePrivateKey } from "../firestore/private-key";
 import { isSessionSecretStrong, livePaymentKeyNames } from "../env-rules";
@@ -94,6 +95,12 @@ export function checkProductionEnv(env: Env): CheckResult[] {
   if (!has(cron)) add("CRON_SECRET", "error", "未登録です（定期処理が実行されず、占い結果の30日削除などが止まります）。");
   else if (cron.length < 32) add("CRON_SECRET", "warn", "32文字以上を推奨します。");
   else add("CRON_SECRET", "ok", "32文字以上です。");
+
+  // 運営者への異常の通知（値は表示しない）。本番は本番専用のチャンネルの送信先を登録する（Sandbox v2 とは別）
+  const alert = alertWebhookStatus(env);
+  if (alert === "not_configured") add("OPS_ALERT_WEBHOOK_URL", "warn", "未登録です（決済の異常・定期処理の失敗が運営者に通知されません）。本番専用の Discord のチャンネルの Webhook を登録してください。");
+  else if (alert === "invalid") add("OPS_ALERT_WEBHOOK_URL", "error", "Discord の Webhook の URL（https://discord.com/api/webhooks/…）の形ではありません。通知は送られません。");
+  else add("OPS_ALERT_WEBHOOK_URL", "ok", "Discord の Webhook の形です（Sandbox v2 とは別の送信先か、Discord の画面で確かめてください）。");
 
   if (has(env.APP_URL)) {
     let ok = false;
@@ -219,6 +226,9 @@ export function checkPreviewEnv(env: Env, targets: readonly PreviewFirebaseTarge
   else add("STRIPE_TEST_CHECKOUT", has(env.STRIPE_TEST_CHECKOUT) ? "error" : "warn", `Stripe のテスト決済を使えません：${STRIPE_TEST_DENY_MESSAGE[st.reason]}`);
   if (!isSessionSecretStrong(env)) add("SESSION_SECRET", "error", "32文字以上の推測しにくい値が必要です。検証環境ごとに別の値にしてください。");
   if (!has(env.CRON_SECRET)) add("CRON_SECRET", "warn", "未設定です（定期処理を手で呼んで確かめるときに必要。検証環境ごとに別の値にしてください）。");
+  const alert = alertWebhookStatus(env);
+  if (alert === "invalid") add("OPS_ALERT_WEBHOOK_URL", "error", "Discord の Webhook の URL（https://discord.com/api/webhooks/…）の形ではありません。通知は送られません。");
+  else if (alert === "configured") add("OPS_ALERT_WEBHOOK_URL", "ok", "Discord の Webhook の形です（本番とは別の、検証用のチャンネルの送信先にしてください）。");
   for (const k of ["STRIPE_LIVE_CHECKOUT", "STRIPE_LIVE_OPERATOR_TEST"]) if (has(env[k])) add(k, "error", "本番決済のスイッチが Preview にあります。削除してください。");
   return r;
 }

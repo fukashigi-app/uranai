@@ -189,6 +189,9 @@ describe("定期処理（/api/cron/maintenance）：段階・ロック", () => {
     monitorMode: "ok" as "ok" | "issues" | "failed" | "throws" | "busy" | "lock_failed" | "hang",
     firestore: true,
     webhookHang: false,
+    notifyInputs: [] as Record<string, unknown>[],
+    notifyStatus: "sent" as string,
+    lockNotices: 0,
   };
   let logs: string[];
   const load = async () => {
@@ -222,6 +225,10 @@ describe("定期処理（/api/cron/maintenance）：段階・ロック", () => {
     }));
     vi.doMock("@/lib/payments/recheck-recovery", () => ({ runCronRecheckRecovery: async () => (st.calls.push("recheck"), { status: "completed", done: 0 }) }));
     vi.doMock("@/lib/data-provider", async (orig) => ({ ...(await orig<object>()), isFirestore: () => st.firestore }));
+    vi.doMock("@/lib/services/alert-notification", () => ({
+      notifyCronRun: async (input: Record<string, unknown>) => (st.notifyInputs.push(input), { status: st.notifyStatus, issues: 1, newAlerts: 0, newReviews: 0, errorCode: st.notifyStatus === "sent" ? null : "http_500" }),
+      notifyCronLockFailure: async () => (st.lockNotices++, { status: "sent", issues: 1, newAlerts: 0, newReviews: 0, errorCode: null }),
+    }));
     vi.doMock("@/lib/payments/payment-monitor", () => ({
       runPaymentMonitor: async (opts: { source?: string }) => {
         st.calls.push(`monitor:${opts.source}`);
@@ -250,14 +257,14 @@ describe("定期処理（/api/cron/maintenance）：段階・ロック", () => {
   beforeEach(() => {
     vi.stubEnv("SESSION_SECRET", "unit-test-session-secret-Qx7v2Lr9Tm4Kp8Zw");
     vi.stubEnv("CRON_SECRET", SECRET);
-    Object.assign(st, { lock: { status: "acquired", ownerId: "owner-1", tookOverExpired: false }, owner: true, released: [], runs: [], maint: [], calls: [], maintFails: false, webhookFails: false, maintMode: "normal", monitorMode: "ok", firestore: true, webhookHang: false });
+    Object.assign(st, { lock: { status: "acquired", ownerId: "owner-1", tookOverExpired: false }, owner: true, released: [], runs: [], maint: [], calls: [], maintFails: false, webhookFails: false, maintMode: "normal", monitorMode: "ok", firestore: true, webhookHang: false, notifyInputs: [], notifyStatus: "sent", lockNotices: 0 });
     logs = [];
     for (const k of ["log", "warn", "error"] as const) vi.spyOn(console, k).mockImplementation((...a: unknown[]) => void logs.push(JSON.stringify(a)));
   });
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
-    for (const m of ["@/lib/services/cron-run", "@/lib/services/maintenance", "@/lib/services/maintenance-status", "@/lib/payments/webhook-recovery", "@/lib/payments/recheck-recovery", "@/lib/payments/payment-monitor", "@/lib/data-provider"]) vi.doUnmock(m);
+    for (const m of ["@/lib/services/cron-run", "@/lib/services/maintenance", "@/lib/services/maintenance-status", "@/lib/payments/webhook-recovery", "@/lib/payments/recheck-recovery", "@/lib/payments/payment-monitor", "@/lib/data-provider", "@/lib/services/alert-notification"]) vi.doUnmock(m);
   });
 
   it("正常：4段階を順に実行し、応答はメンテナンスの結果＋復旧・回収・決済監視の要約。段階の結果を記録し、ロックを外す", async () => {
@@ -295,13 +302,60 @@ describe("定期処理（/api/cron/maintenance）：段階・ロック", () => {
     expect(st.released).toEqual([]);
   });
 
-  it("ロックを取れない（Firestore の失敗）なら、何もせず 503", async () => {
+  it("ロックを取れない（Firestore の失敗）なら、何もせず 503。運営者には Firestore を使わずに知らせる", async () => {
     st.lock = { status: "failed", errorName: "Error" };
     const cron = await load();
     const res = await cron();
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ ok: false, error: "cron_lock_failed" });
     expect(st.calls).toEqual([]);
+    expect(st.lockNotices).toBe(1);
+    expect(st.notifyInputs).toEqual([]);
+  });
+
+  it("実行中（cron_busy）なら通知しない", async () => {
+    st.lock = { status: "busy", heldUntil: new Date() };
+    const cron = await load();
+    await cron();
+    expect(st.notifyInputs).toEqual([]);
+    expect(st.lockNotices).toBe(0);
+  });
+
+  it("すべての段階の後に通知する：段階の結果・復旧・回収・監視・メンテナンスの成否を渡し、通知の結果を記録する", async () => {
+    st.webhookFails = true;
+    const cron = await load();
+    const res = await cron();
+    expect(res.status).toBe(200);
+    expect(st.notifyInputs).toHaveLength(1);
+    const n = st.notifyInputs[0] as { runStatus: string; phases: { name: string; status: string }[]; maintenanceOk: boolean; webhookRecovery: unknown; paymentMonitor: { status: string } };
+    expect(n.runStatus).toBe("partial");
+    expect(n.maintenanceOk).toBe(true);
+    expect(n.phases.map((p) => [p.name, p.status])).toEqual([
+      ["maintenance", "ok"],
+      ["webhookRecovery", "failed"],
+      ["recheckRecovery", "ok"],
+      ["paymentMonitor", "ok"],
+    ]);
+    expect(n.webhookRecovery).toEqual({ status: "failed" });
+    expect(n.paymentMonitor.status).toBe("ok");
+    expect(st.runs[0].r).toMatchObject({ notification: { status: "sent", issues: 1 } });
+  });
+
+  it("通知に失敗しても、定期処理の結果・応答・ロックの解除は変わらない（失敗の種類を記録）", async () => {
+    st.notifyStatus = "send_failed";
+    const cron = await load();
+    const res = await cron();
+    expect(res.status).toBe(200);
+    expect(st.runs[0].r.status).toBe("completed");
+    expect(st.runs[0].r).toMatchObject({ notification: { status: "send_failed", errorCode: "http_500" } });
+    expect(st.released).toEqual(["owner-1"]);
+  });
+
+  it("メンテナンスが失敗した回は、削除の遅れを数えないよう maintenanceOk=false を渡す", async () => {
+    st.maintFails = true;
+    const cron = await load();
+    await cron();
+    expect((st.notifyInputs[0] as { maintenanceOk: boolean }).maintenanceOk).toBe(false);
   });
 
   it("メンテナンスが失敗しても復旧・回収は実行する（応答は今までどおり 500。失敗を記録）", async () => {

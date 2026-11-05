@@ -106,6 +106,7 @@ async function main() {
   assert.equal((await fsdb().collection(C.system).doc("paymentMonitorLock").get()).exists, false, "点検のロックが残っています");
   assert.deepEqual((body.paymentMonitor as { status: string }).status, pm.status);
   assert.equal(run.currentStatus, "finished");
+  assert.equal(run.lastNotification.status, "not_configured", "送信先が未登録なのに通知しようとしました");
   assert.ok(typeof run.lastDurationMs === "number" && run.lastDurationMs >= 0);
   for (const p of run.lastPhases as { durationMs: number; startedAtMs: number }[]) assert.ok(p.durationMs >= 0 && p.startedAtMs >= 0);
   assert.equal((await lockDoc().get()).exists, false, "終了の後にロックが残っています");
@@ -187,6 +188,8 @@ async function main() {
   let m = await runMaintenance({ deadlineMs: 0 });
   assert.deepEqual(m, { expiredSessions: 0, expiredCheckouts: 0, purgedResults: 0, purgedCheckouts: 0, truncatedTasks: 8, tasksWithRemaining: 8, conflictsSkipped: 0 }); // 8つの処理すべて
   assert.equal((await db.collection(C.fortuneSessions).doc("paid_00").get()).get("status"), "PAID");
+  const tasks0 = (await db.collection(C.system).doc("maintenanceTasks").get()).get("lastTasks") as { task: string; stoppedBy: string | null }[];
+  assert.ok(tasks0.every((x) => x.stoppedBy === "time"), "時間の上限で止まった理由が記録されていません");
   // 件数の上限（1ページ5件・1処理10件）：期限が最近の PAID から処理し、打ち切りを数える
   m = await runMaintenance({ pageSize: 5, maxScanPerTask: 10 });
   assert.equal(m.expiredSessions, 10, JSON.stringify(m));
@@ -228,6 +231,8 @@ async function main() {
   m = await runMaintenance(LIM);
   assert.equal((await db.collection(C.fortuneSessions).doc("buried_paid").get()).get("status"), "PAID", "1回目で届かないはずの記録が処理されました（検証の前提）");
   assert.ok(m.tasksWithRemaining >= 1);
+  const t5 = ((await db.collection(C.system).doc("maintenanceTasks").get()).get("lastTasks") as { task: string; stoppedBy: string | null }[]).find((x) => x.task === "expireSessions")!;
+  assert.equal(t5.stoppedBy, "cap", "続きの位置からの読み込み（通常の区切り）が、時間の上限として記録されました");
   const cur1 = (await db.collection(C.system).doc("maintenanceCursors").get()).get("expireSessions") as { id: string };
   assert.equal(cur1.id, "old_used_09", "続きの位置が古い順の10件目ではありません");
   m = await runMaintenance(LIM);
@@ -252,6 +257,9 @@ async function main() {
   await db.collection(C.fortuneResults).doc("r_del").set({ createdAt: new Date(t - 30 * DAY - H) });
   await db.collection(C.checkouts).doc("c_keep").set({ status: "EXPIRED", createdAt: new Date(t - 7 * DAY + H), expiresAt: new Date(t - 7 * DAY + H) });
   await db.collection(C.checkouts).doc("c_del").set({ status: "FAILED", createdAt: new Date(t - 7 * DAY - H), expiresAt: new Date(t - 7 * DAY - H) });
+  // 保存期間＋間隔＋ずれ（8日と2時間）を過ぎて残っていた未決済の注文：削除し、遅れていた件数として数える。決済済みの古い注文は数えない
+  await db.collection(C.checkouts).doc("c_overdue").set({ status: "CREATED", createdAt: new Date(t - 9 * DAY), expiresAt: new Date(t - 9 * DAY) });
+  await db.collection(C.checkouts).doc("c_paid_old").set({ status: "SUCCEEDED", providerPaymentId: "cs_test_old", createdAt: new Date(t - 20 * DAY), expiresAt: new Date(t - 20 * DAY) });
   await db.collection(C.checkouts).doc("c_refunded").set({ status: "REFUNDED", providerPaymentId: "cs_test_r", createdAt: new Date(t - 8 * DAY), expiresAt: new Date(t - 8 * DAY) });
   await db.collection(C.checkouts).doc("p_keep").set({ status: "PROCESSING", processingStartedAt: new Date(Date.now() - 14 * 60_000), createdAt: new Date(), expiresAt: new Date(t + H) });
   await db.collection(C.checkouts).doc("p_fail").set({ status: "PROCESSING", processingStartedAt: new Date(Date.now() - 16 * 60_000), createdAt: new Date(), expiresAt: new Date(t + H) });
@@ -259,10 +267,12 @@ async function main() {
   await runMaintenance();
   const ids = async (c: string) => (await db.collection(c).get()).docs.map((d) => d.id).sort();
   assert.deepEqual(await ids(C.fortuneResults), ["r_keep"]);
-  assert.deepEqual(await ids(C.checkouts), ["c_keep", "c_refunded", "p_fail", "p_keep", "p_paid"]);
+  assert.deepEqual(await ids(C.checkouts), ["c_keep", "c_paid_old", "c_refunded", "p_fail", "p_keep", "p_paid"]);
+  const pc = ((await db.collection(C.system).doc("maintenanceTasks").get()).get("lastTasks") as { task: string; overdueFound: number; stoppedBy: string | null; processed: number }[]).find((x) => x.task === "purgeCheckouts")!;
+  assert.deepEqual([pc.processed, pc.overdueFound, pc.stoppedBy], [2, 1, null], JSON.stringify(pc));
   const st = async (id: string) => (await db.collection(C.checkouts).doc(id).get()).get("status");
   assert.deepEqual([await st("c_refunded"), await st("p_keep"), await st("p_fail"), await st("p_paid")], ["REFUNDED", "PROCESSING", "FAILED", "PROCESSING"]);
-  step("保存期間・状態の区切り（占い結果30日・未決済の注文7日・課金不明の処理中15分）と、返金済み・決済済みの注文を残す条件は今までどおり");
+  step("保存期間・状態の区切り（占い結果30日・未決済の注文7日・課金不明の処理中15分）と、返金済み・決済済みの注文を残す条件は今までどおり。期限を過ぎて残っていた未決済の注文だけを遅れとして実数で数える");
 
   // ---- 7. 競合の防止：読んだ後に Webhook の確定・利用で変わった記録は上書きしない（次の回に回す） ----
   await resetProject();
@@ -329,6 +339,87 @@ async function main() {
   assert.ok((await db.collection(C.fortuneResults).doc("r_old").get()).exists, "中止の後に削除しました");
   assert.equal((await db.collection(C.fortuneSessions).doc("s_paid").get()).get("status"), "PAID", "中止の後に更新しました");
   step("中止の合図の後は、読み込み・書き込みを始めない（すべての処理を打ち切りとして数える）");
+
+  // ---- 9. 運営者への通知（Discord）：送信は模擬（discord.com への送信をこのプロセスの中で受け取る。外には送らない） ----
+  await resetProject();
+  const token = randomBytes(51).toString("base64url");
+  process.env.OPS_ALERT_WEBHOOK_URL = `https://discord.com/api/webhooks/${"2".repeat(18)}/${token}`;
+  const sent: string[] = [];
+  let discordStatus = 204;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (u.hostname === "discord.com" || u.hostname === "discordapp.com") {
+      sent.push(String(init?.body ?? ""));
+      return new Response(null, { status: discordStatus });
+    }
+    return realFetch(input, init);
+  }) as typeof fetch;
+  try {
+    const notifyDoc = () => fsdb().collection(C.system).doc("alertNotification").get();
+    // 1回目：異常が無く、正常の報告の履歴も無い → 週1回の正常の報告を送る（実行の回数は記録から数える）
+    res = await call();
+    assert.equal(res.status, 200);
+    let rn = (await runDoc().get()).data()!;
+    assert.equal(rn.lastNotification.status, "heartbeat", JSON.stringify(rn.lastNotification));
+    assert.equal(sent.length, 1);
+    const hb = JSON.parse(sent[0]) as { content: string };
+    assert.match(hb.content, /^【正常】100円占い・決済の運用（ローカル） 週1回の定期報告/);
+    assert.match(hb.content, /・直近7日の実行：1回（今回を含む。記録は .+ から）/);
+    assert.match(hb.content, /・未確認：決済監視の異常 0件・決済要確認 0件/);
+    assert.match(hb.content, /届かないことは自動では検知できません/);
+    assert.ok((await notifyDoc()).get("lastHeartbeatAt"));
+    assert.equal(((await runDoc().get()).get("recentStarts") as unknown[]).length, 1, "実行の履歴が記録されていません");
+    // 2回目：異常が無く、正常の報告から7日未満 → 送らない
+    res = await call();
+    assert.equal(sent.length, 1);
+    assert.equal((await runDoc().get()).get("lastNotification.status"), "nothing");
+    assert.equal(((await runDoc().get()).get("recentStarts") as unknown[]).length, 2);
+
+    // 新しい未確認の決済監視の異常：1回だけ送る（同じ未確認は次の回に送らない）
+    const { recordPaymentAlert } = await import("@/lib/firestore/payment-alerts");
+    await recordPaymentAlert({ kind: "stripe_paid_not_confirmed", objectType: "checkout", objectId: "co_notify_1", checkoutId: "co_notify_1", mode: "test" });
+    res = await call();
+    assert.equal(sent.length, 2);
+    const msg = JSON.parse(sent[1]) as { content: string; allowed_mentions: unknown };
+    assert.deepEqual(msg.allowed_mentions, { parse: [] });
+    assert.match(msg.content, /^【要対応】100円占い・決済の運用（ローカル）/);
+    assert.match(msg.content, /■ 新しい未確認の決済監視の異常：1件/);
+    assert.match(msg.content, /Stripe では支払い済みなのに、アプリで決済が確定していない（テスト） ×1/);
+    assert.ok(!sent[1].includes("co_notify_1"), "本文に注文の ID が入りました");
+    for (const secret of [token, process.env.CRON_SECRET!, process.env.SESSION_SECRET!]) for (const b of sent) assert.ok(!b.includes(secret), "本文に秘密の値が入りました");
+    rn = (await runDoc().get()).data()!;
+    assert.deepEqual([rn.lastNotification.status, rn.lastNotification.newAlerts], ["sent", 1]);
+    assert.ok(!JSON.stringify(rn).includes(token) && !JSON.stringify((await notifyDoc()).data()).includes(token), "送信先のトークンが記録されました");
+    res = await call();
+    assert.equal(sent.length, 2, "同じ未確認の異常をもう一度通知しました");
+    assert.equal((await runDoc().get()).get("lastNotification.status"), "nothing");
+
+    // 送信の失敗：通知済みにしない（次の回にもう一度送る）。定期処理の結果・応答は変わらない
+    await recordPaymentAlert({ kind: "checkout_stuck_processing", objectType: "checkout", objectId: "co_notify_2", checkoutId: "co_notify_2", mode: "test" });
+    discordStatus = 500;
+    res = await call();
+    assert.equal(res.status, 200);
+    rn = (await runDoc().get()).data()!;
+    assert.deepEqual([rn.lastNotification.status, rn.lastNotification.errorCode, rn.lastStatus], ["send_failed", "http_500", "completed"]);
+    assert.equal((await notifyDoc()).get("lastStatus"), "send_failed");
+    discordStatus = 204;
+    res = await call();
+    assert.match(JSON.parse(sent[sent.length - 1]).content, /確定待ちのまま一定時間を過ぎた注文がある（テスト） ×1/, "失敗した通知が次の回に送られません");
+    assert.equal((await runDoc().get()).get("lastNotification.status"), "sent");
+
+    // 送信先が正規の Discord ではない：送らない（定期処理は成功のまま）
+    const before = sent.length;
+    process.env.OPS_ALERT_WEBHOOK_URL = `https://evil.example/api/webhooks/${"2".repeat(18)}/${token}`;
+    res = await call();
+    assert.equal(res.status, 200);
+    assert.equal(sent.length, before);
+    assert.equal((await runDoc().get()).get("lastNotification.status"), "invalid_url");
+  } finally {
+    globalThis.fetch = realFetch;
+    delete process.env.OPS_ALERT_WEBHOOK_URL;
+  }
+  step("運営者への通知：初回は週1回の正常の報告（実行の回数は記録から）、7日未満は送らない。異常を本文にまとめて送る（メンション無効・ID と秘密の値なし）。新しい未確認の異常は1回だけ。送信の失敗は次の回に送り直し、定期処理の結果は変えない。正規の Discord 以外には送らない");
 
   await resetProject();
   console.log("\nCRON PHASES E2E PASSED");

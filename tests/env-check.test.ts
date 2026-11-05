@@ -13,6 +13,8 @@ const SECRETS = {
   dek: randomBytes(32).toString("base64"),
   cron: "C".repeat(10) + randomBytes(16).toString("hex"),
   liveKey: "sk_live_" + "Z9".repeat(12),
+  // 形だけの Discord の Webhook（実在しない ID とトークン。その場で作る）
+  alertUrl: `https://discord.com/api/webhooks/${"1".repeat(18)}/${randomBytes(51).toString("base64url")}`,
 };
 
 const good = {
@@ -24,6 +26,7 @@ const good = {
   SESSION_SECRET: SECRETS.session,
   DATA_ENCRYPTION_KEY: SECRETS.dek,
   CRON_SECRET: SECRETS.cron,
+  OPS_ALERT_WEBHOOK_URL: SECRETS.alertUrl,
   APP_URL: "https://uranai.example.jp",
   SITE_STATUS: "coming_soon",
 };
@@ -69,6 +72,9 @@ describe("check:env（本番の環境変数の形式確認）", () => {
     expect(levelOf({ ...good, PAYJP_SECRET_KEY: SECRETS.liveKey }, "PAYJP_SECRET_KEY")).toEqual(["warn"]); // 廃止：削除を促す
     expect(levelOf({ ...good, PAYMENT_PROVIDER: "payjp" }, "PAYMENT_PROVIDER")).toEqual(["warn"]); // 廃止：起動は止めない
     expect(levelOf({ ...good, CRON_SECRET: "" }, "CRON_SECRET")).toEqual(["error"]);
+    expect(levelOf({ ...good, OPS_ALERT_WEBHOOK_URL: "" }, "OPS_ALERT_WEBHOOK_URL")).toEqual(["warn"]); // 未登録：通知されない
+    expect(levelOf({ ...good, OPS_ALERT_WEBHOOK_URL: SECRETS.alertUrl.replace("https://discord.com", "https://evil.example") }, "OPS_ALERT_WEBHOOK_URL")).toEqual(["error"]);
+    expect(JSON.stringify(checkProductionEnv(good))).not.toContain(SECRETS.alertUrl.split("/").pop()!); // トークンを表示しない
     expect(levelOf({ ...good, SESSION_SECRET: "short" }, "SESSION_SECRET")).toEqual(["error"]);
     expect(levelOf({ ...good, DATA_ENCRYPTION_KEY: "not-32-bytes" }, "DATA_ENCRYPTION_KEY")).toEqual(["error"]);
     expect(levelOf({ ...good, FIREBASE_PROJECT_ID: "demo-uranai" }, "FIREBASE_PROJECT_ID")).toEqual(["error"]);

@@ -96,13 +96,24 @@ export type CronPaymentMonitorSummary = {
   finishedAt: Date | null;
 };
 
-export type CronRunRecord = { status: CronRunStatus; startedAt: Date; finishedAt: Date; phases: CronPhaseRecord[]; paymentMonitor?: CronPaymentMonitorSummary };
+/** 運営者への通知の結果（状態・件数・エラーの種類だけ。送信先の URL・本文は保存しない） */
+export type CronNotificationSummary = { status: string; issues: number; newAlerts: number; newReviews: number; errorCode: string | null };
+
+export type CronRunRecord = { status: CronRunStatus; startedAt: Date; finishedAt: Date; phases: CronPhaseRecord[]; paymentMonitor?: CronPaymentMonitorSummary; notification?: CronNotificationSummary };
+
+/** 実行の履歴（開始の時刻）を残す期間と件数の上限（週1回の正常の報告で、直近7日の実行の回数を数えるため） */
+export const CRON_RUN_HISTORY_MS = 14 * 86_400_000;
+export const CRON_RUN_HISTORY_MAX = 100;
 
 /** 終了の記録：最後に開始したのが自分のときだけ（古い定期処理が新しい記録を上書きしない） */
 export async function recordCronRun(ownerId: string, r: CronRunRecord): Promise<boolean> {
   return fsdb().runTransaction(async (tx) => {
     const cur = await tx.get(runRef());
     if (cur.exists && cur.get("currentRunId") !== ownerId) return false;
+    // 実行の履歴：記録が残っている範囲の開始の時刻（推測で補わない）。履歴を取り始めた時刻も残す
+    const prev = (Array.isArray(cur.get("recentStarts")) ? (cur.get("recentStarts") as unknown[]) : []).map((v) => toDate(v)).filter((d): d is Date => d !== null);
+    const recentStarts = [...prev.filter((d) => r.startedAt.getTime() - d.getTime() < CRON_RUN_HISTORY_MS), r.startedAt].slice(-CRON_RUN_HISTORY_MAX);
+    const recentStartsSince = toDate(cur.get("recentStartsSince")) ?? r.startedAt;
     tx.set(
       runRef(),
       {
@@ -113,8 +124,11 @@ export async function recordCronRun(ownerId: string, r: CronRunRecord): Promise<
         lastFinishedAt: r.finishedAt,
         lastDurationMs: r.finishedAt.getTime() - r.startedAt.getTime(),
         lastStatus: r.status,
+        recentStarts,
+        recentStartsSince,
         lastPhases: r.phases.map((p) => ({ ...p, errorCode: p.errorCode ? p.errorCode.slice(0, 80) : null })),
         ...(r.paymentMonitor ? { lastPaymentMonitor: { ...r.paymentMonitor, status: r.paymentMonitor.status.slice(0, 40) } } : {}),
+        ...(r.notification ? { lastNotification: { ...r.notification, status: r.notification.status.slice(0, 40), errorCode: r.notification.errorCode ? r.notification.errorCode.slice(0, 40) : null } } : {}),
         updatedAt: FieldValue.serverTimestamp(),
       },
       { merge: true },

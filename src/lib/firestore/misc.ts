@@ -51,7 +51,26 @@ export const MAINTENANCE_DEADLINE_MS = 60 * 1000;
 export type MaintenanceLimits = { pageSize: number; maxScanPerTask: number; headScanPerTask: number; privacyUntilMs: number; stateUntilMs: number; deadlineMs: number };
 
 /** 処理ごとの結果（system/maintenanceTasks に記録。件数・打ち切り・残りの有無だけ） */
-export type MaintenanceTaskStat = { task: string; scanned: number; processed: number; conflicts: number; truncated: boolean; hasMore: boolean };
+/**
+ * 処理ごとの結果（system/maintenanceTasks に記録。件数・打ち切り・残りの有無だけ）。
+ *  stoppedBy   … 途中で止まった理由：time（時間の上限）・aborted（中止の合図）・cap（件数の上限）・null（最後まで読んだ）。
+ *                条件で絞る処理の「新しい順の読み込みの上限」は毎回の通常の区切りなので、ここには記録しない（続きの位置から読む）
+ *  overdueFound … 未決済の注文の削除だけ：保存期間（7日）と定期処理の間隔（1日）と時刻のずれ（2時間）を過ぎてなお残っていた、
+ *                削除の対象の注文の件数（この回に読んだ記録で数えた実数。読んでいない記録は数えない＝推測しない）
+ */
+export type MaintenanceTaskStat = {
+  task: string;
+  scanned: number;
+  processed: number;
+  conflicts: number;
+  truncated: boolean;
+  hasMore: boolean;
+  stoppedBy: "time" | "aborted" | "cap" | null;
+  overdueFound: number;
+};
+
+/** 未決済の注文が「削除が遅れている」とみなす経過時間（保存期間7日＋定期処理の間隔1日＋時刻のずれ2時間） */
+export const CHECKOUT_PURGE_OVERDUE_MS = (7 * 24 + 24 + 2) * 3_600_000;
 
 const cursorsRef = () => fsdb().collection(C.system).doc("maintenanceCursors");
 const tasksRef = () => fsdb().collection(C.system).doc("maintenanceTasks");
@@ -105,6 +124,8 @@ export async function runMaintenance(limits: Partial<MaintenanceLimits> = {}, cl
     for (;;) {
       if (stop() || scanned >= o.cap) {
         st.truncated = true;
+        if (stop()) st.stoppedBy = signal?.aborted ? "aborted" : "time";
+        else if (!st.stoppedBy) st.stoppedBy = "cap";
         return { reachedEnd: false, last };
       }
       let q = db.collection(o.collection).where(o.field, "<", ts(o.cut)).orderBy(o.field, o.dir).orderBy(FieldPath.documentId(), o.dir).limit(Math.min(L.pageSize, o.cap - scanned));
@@ -124,7 +145,7 @@ export async function runMaintenance(limits: Partial<MaintenanceLimits> = {}, cl
 
   /** すべてが対象の削除：古い順。打ち切ったら残りがある（次の回は残りの古いものから） */
   async function allMatch(task: string, collection: string, field: string, cut: Date, onPage: PageFn) {
-    const st: MaintenanceTaskStat = { task, scanned: 0, processed: 0, conflicts: 0, truncated: false, hasMore: false };
+    const st: MaintenanceTaskStat = { task, scanned: 0, processed: 0, conflicts: 0, truncated: false, hasMore: false, stoppedBy: null, overdueFound: 0 };
     stats.push(st);
     const r = await scanRange(st, { collection, field, cut, dir: "asc", cap: L.maxScanPerTask, onPage });
     st.hasMore = !r.reachedEnd;
@@ -133,7 +154,7 @@ export async function runMaintenance(limits: Partial<MaintenanceLimits> = {}, cl
 
   /** 条件で絞る処理：新しい順に一定の件数 → 続きの位置から古い順に残りの件数（最後まで読んだら次の回は最初から） */
   async function filtered(task: string, collection: string, field: string, cut: Date, onPage: PageFn) {
-    const st: MaintenanceTaskStat = { task, scanned: 0, processed: 0, conflicts: 0, truncated: false, hasMore: false };
+    const st: MaintenanceTaskStat = { task, scanned: 0, processed: 0, conflicts: 0, truncated: false, hasMore: false, stoppedBy: null, overdueFound: 0 };
     stats.push(st);
     const headCap = Math.min(L.headScanPerTask, L.maxScanPerTask);
     const head = await scanRange(st, { collection, field, cut, dir: "desc", cap: headCap, onPage });
@@ -144,6 +165,8 @@ export async function runMaintenance(limits: Partial<MaintenanceLimits> = {}, cl
       return st;
     }
     st.truncated = false;
+    // 新しい順の読み込みが件数の上限で区切られたのは通常のこと（続きは古い順の読み込みで読む）：打ち切りの理由にしない
+    if (st.stoppedBy === "cap") st.stoppedBy = null;
     const saved = savedCursors[task];
     const after = saved?.at && saved.id ? { at: saved.at, id: saved.id } : null;
     const sweep = await scanRange(st, { collection, field, cut, dir: "asc", cap: L.maxScanPerTask - headCap, after, onPage });
@@ -203,9 +226,15 @@ export async function runMaintenance(limits: Partial<MaintenanceLimits> = {}, cl
   // 占い結果の本文は30日
   const results = await allMatch("purgeResults", C.fortuneResults, "createdAt", new Date(now.getTime() - 30 * 86_400_000), deleteAll);
   // 未決済の注文は7日（決済済み・処理中のものは残す。読んだ後に決済が紐付いた注文は消さない）
-  const oldCheckouts = await filtered("purgeCheckouts", C.checkouts, "createdAt", new Date(now.getTime() - 7 * 86_400_000), (docs) =>
-    deleteIfUnchanged(docs.filter((d) => ["EXPIRED", "FAILED", "CREATED"].includes(d.get("status")) && !d.get("providerPaymentId"))),
-  );
+  // 削除が遅れていた注文（保存期間＋間隔＋ずれを過ぎて残っていた、削除の対象の注文）は、読んだ範囲で実数を数える
+  let overdueCheckouts = 0;
+  const overdueCut = now.getTime() - CHECKOUT_PURGE_OVERDUE_MS;
+  const oldCheckouts = await filtered("purgeCheckouts", C.checkouts, "createdAt", new Date(now.getTime() - 7 * 86_400_000), (docs) => {
+    const targets = docs.filter((d) => ["EXPIRED", "FAILED", "CREATED"].includes(d.get("status")) && !d.get("providerPaymentId"));
+    overdueCheckouts += targets.filter((d) => (toDate(d.get("createdAt"))?.getTime() ?? Infinity) < overdueCut).length;
+    return deleteIfUnchanged(targets);
+  });
+  oldCheckouts.overdueFound = overdueCheckouts;
   // 期限切れのログイン
   await allMatch("purgeAuthSessions", C.authSessions, "expiresAt", now, deleteAll);
 
@@ -213,14 +242,20 @@ export async function runMaintenance(limits: Partial<MaintenanceLimits> = {}, cl
   untilMs = L.stateUntilMs;
   // 課金されたか不明なまま放置された処理中（Charge IDなし）。処理中の注文は少ないので、上限の件数まで1回で読む
   {
-    const st: MaintenanceTaskStat = { task: "failStaleProcessing", scanned: 0, processed: 0, conflicts: 0, truncated: false, hasMore: false };
+    const st: MaintenanceTaskStat = { task: "failStaleProcessing", scanned: 0, processed: 0, conflicts: 0, truncated: false, hasMore: false, stoppedBy: null, overdueFound: 0 };
     stats.push(st);
-    if (stop()) st.truncated = st.hasMore = true;
+    if (stop()) {
+      st.truncated = st.hasMore = true;
+      st.stoppedBy = signal?.aborted ? "aborted" : "time";
+    }
     else {
       const staleCut = new Date(now.getTime() - 15 * 60 * 1000);
       const processing = await db.collection(C.checkouts).where("status", "==", "PROCESSING").limit(L.maxScanPerTask).get();
       st.scanned = processing.size;
-      if (processing.size >= L.maxScanPerTask) st.truncated = st.hasMore = true;
+      if (processing.size >= L.maxScanPerTask) {
+        st.truncated = st.hasMore = true;
+        st.stoppedBy = "cap";
+      }
       const stale = processing.docs.filter((d) => !d.get("providerPaymentId") && mustDate(d.get("processingStartedAt")) < staleCut);
       const r = await updateIfUnchanged(stale, { status: "FAILED", failureCode: "stale_processing", updatedAt: FieldValue.serverTimestamp() });
       st.processed = r.processed;

@@ -73,6 +73,7 @@
 | `SITE_STATUS` | `development` |
 | `PAYMENT_PROVIDER` | `stripe` |
 | `SESSION_SECRET`・`DATA_ENCRYPTION_KEY`・`CRON_SECRET` | 既存の Preview とは**別の値** |
+| `OPS_ALERT_WEBHOOK_URL` | 運営者への異常の通知の送信先（Discord の**検証用のチャンネル**の Webhook。`https://discord.com/api/webhooks/…` の形だけ受け付ける）。**本番（Production）とは別のチャンネル・別の値**にする。未登録なら通知しない。異常が無いときは7日に1回、正常の報告を送る（**報告が届かないことは自動では検知できない**。7日を過ぎても届かなければ、定期処理の停止を疑う） |
 
 登録しないもの：`STRIPE_LIVE_CHECKOUT`・`STRIPE_LIVE_OPERATOR_TEST`・`sk_live_` のキー・`STRIPE_API_BASE`・`FIRESTORE_EMULATOR_HOST`
 

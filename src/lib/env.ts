@@ -26,6 +26,8 @@ const schema = z.object({
   PAYMENT_PROVIDER: z.enum(["payjp", "mock", "stripe"]).optional(),
   MOCK_WEBHOOK_SECRET: z.string().optional(),
   CRON_SECRET: z.string().optional(),
+  /** 運営者への異常の通知の送信先（Discord の Incoming Webhook の URL。秘密の値として扱い、表示・記録しない） */
+  OPS_ALERT_WEBHOOK_URL: z.string().optional(),
   ALLOW_MOCK_PAYMENTS_IN_PRODUCTION: z.string().optional(),
 });
 
