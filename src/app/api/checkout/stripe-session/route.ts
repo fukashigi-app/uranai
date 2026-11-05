@@ -2,9 +2,10 @@ import { guardPost, jsonError, jsonOk } from "@/lib/api";
 import { env } from "@/lib/env";
 import { getAccessToken } from "@/lib/cookies";
 import { CheckoutError } from "@/lib/errors";
-import { stripeCheckoutAccess } from "@/lib/payments/stripe-access";
+import { isStripeNewCheckoutPaused, stripeCheckoutAccess } from "@/lib/payments/stripe-access";
+import { NEW_CHECKOUT_PAUSED_MESSAGE } from "@/lib/payments/stripe-public";
 import { startStripeCheckout } from "@/lib/payments/stripe-confirm";
-import { StripeAccountMismatchError, stripeErrorSummary, stripeRuntime } from "@/lib/payments/stripe-checkout";
+import { StripeAccountMismatchError, StripeNewCheckoutStoppedError, stripeErrorSummary, stripeRuntime } from "@/lib/payments/stripe-checkout";
 import { stripeReturnOrigin } from "@/lib/payments/stripe-return-origin";
 import { notePaymentApiError } from "@/lib/services/payment-monitor";
 
@@ -17,7 +18,11 @@ import { notePaymentApiError } from "@/lib/services/payment-monitor";
  */
 export async function POST(req: Request) {
   const access = await stripeCheckoutAccess();
-  if (!access.ok) return jsonError(404, "not_found", "ただいまお支払いを受け付けていません。");
+  if (!access.ok) {
+    // 新規の決済の受付を止めている（STRIPE_NEW_CHECKOUT）：決済画面を作らない・既存の決済画面にも移動させない（Stripe API は呼ばない）
+    if (isStripeNewCheckoutPaused()) return jsonError(503, "payment_paused", NEW_CHECKOUT_PAUSED_MESSAGE);
+    return jsonError(404, "not_found", "ただいまお支払いを受け付けていません。");
+  }
   const blocked = await guardPost(req, "stripe-session", 10, 60);
   if (blocked) return blocked;
   let alertMode: "live" | "test" | "unknown" = "unknown";
@@ -31,6 +36,8 @@ export async function POST(req: Request) {
     return jsonOk(r.status === "succeeded" ? { status: "succeeded" } : r.status === "pending" ? { status: "pending", url: r.returnUrl } : { status: "redirect", url: r.url });
   } catch (e) {
     if (e instanceof CheckoutError) return jsonError(e.httpStatus, e.code, e.userMessage);
+    // 判定の後に受付が止まった（設定の切り替えの直後など）：Stripe API は呼んでいない。異常ではないので記録しない
+    if (e instanceof StripeNewCheckoutStoppedError) return jsonError(503, "payment_paused", NEW_CHECKOUT_PAUSED_MESSAGE);
     // Stripe のエラーは種類・コード・項目名・リクエストID だけを残す（エラー文・秘密情報は出さない。Stripe のログで照合できる）
     console.error("[api/checkout/stripe-session] failed", stripeErrorSummary(e));
     if (e instanceof StripeAccountMismatchError) {

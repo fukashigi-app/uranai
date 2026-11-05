@@ -2,7 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { PublicShell, Notice } from "@/components/public/public-shell";
 import { getAccessToken } from "@/lib/cookies";
-import { stripeTestConfig } from "@/lib/payments/stripe-guard";
+import { stripeNewCheckoutState } from "@/lib/payments/stripe-access";
 import { confirmStripeReturn } from "@/lib/payments/stripe-confirm";
 import { refundedNotice, type CheckoutRefundReason } from "@/lib/payments/refunded-notice";
 import { StripeReturnStatus } from "@/components/public/stripe-return-status";
@@ -12,15 +12,17 @@ export const dynamic = "force-dynamic";
 export const metadata = { title: "お支払いの確認", robots: { index: false } };
 
 /**
- * Stripe の決済画面から戻ってきたところ（テスト決済）。
+ * Stripe の決済画面から戻ってきたところ（テスト決済・本番の決済）。
  * URL の session_id は信用せず、このブラウザの注文と紐付いた Session か確かめてから、Stripe API で照合して確定する。
  * 同時に Webhook が動いても、決済記録と占い権利は1回だけ作られる。
  * まだ確定していなければ（PayPay などの非同期の支払い）、権利は付与せず、確認中の表示で待つ。
+ * 確定に使うのは Stripe との接続（stripe-access.ts の stripeNewCheckoutState().connection。Preview はテスト、Production は本番）。新規の決済の受付を止めていても、
+ * すでに支払われた決済の確定は続ける（受付の停止で、支払い済みのお客さんの確定を止めない）。
  */
 export default async function StripeReturnPage(props: PageProps<"/payment/return">) {
   const raw = (await props.searchParams).session_id;
   const sessionId = typeof raw === "string" ? raw : "";
-  if (!stripeTestConfig().ok) {
+  if (!stripeNewCheckoutState().connection) {
     return (
       <PublicShell>
         <Notice title="ただいまお支払いを受け付けていません">お支払いの確認ができませんでした。お手数ですが、占いの選択からやり直してください。</Notice>

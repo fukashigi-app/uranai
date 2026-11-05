@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { stripeConfig, stripeLiveConfig, stripeTestConfig, STRIPE_LIVE_DENY_MESSAGE, STRIPE_TEST_DENY_MESSAGE } from "@/lib/payments/stripe-guard";
+import { newCheckoutSwitch, stripeConfig, stripeLiveConfig, stripeTestConfig, STRIPE_LIVE_DENY_MESSAGE, STRIPE_NEW_CHECKOUT_DENY_MESSAGE, STRIPE_TEST_DENY_MESSAGE } from "@/lib/payments/stripe-guard";
 import { productionConfigIssues } from "@/lib/env";
 import { checkProductionEnv } from "@/lib/ops/env-check";
 
@@ -16,6 +16,7 @@ const LIVE: E = {
   PRODUCTION_FIREBASE_PROJECT_ID: "uranai-b6edf",
   STRIPE_ACCOUNT_ID: "acct_unitTest123",
   SITE_STATUS: "open",
+  STRIPE_NEW_CHECKOUT: "on",
 };
 const PREVIEW: E = {
   VERCEL_ENV: "preview",
@@ -32,9 +33,42 @@ const LOCAL: E = { STRIPE_TEST_CHECKOUT: "on", STRIPE_SECRET_KEY: "sk_test_unit"
 
 describe("Stripe の本番（Live）の判定（Production だけ・sk_live_ だけ・uranai-b6edf だけ）", () => {
   it("すべての条件がそろうときだけ有効。公開中は一般のお客さん、開発モードは運営の本番テストのスイッチがあるときだけ運営", () => {
-    expect(stripeLiveConfig(LIVE)).toMatchObject({ ok: true, mode: "live", audience: "public", accountId: "acct_unitTest123" });
+    expect(stripeLiveConfig(LIVE)).toMatchObject({ ok: true, mode: "live", audience: "public", accountId: "acct_unitTest123", newCheckout: { ok: true } });
     expect(stripeLiveConfig({ ...LIVE, SITE_STATUS: undefined })).toMatchObject({ ok: true, audience: "public" }); // 未設定＝公開中
-    expect(stripeLiveConfig({ ...LIVE, SITE_STATUS: "development", STRIPE_LIVE_OPERATOR_TEST: "on" })).toMatchObject({ ok: true, audience: "operator" });
+    expect(stripeLiveConfig({ ...LIVE, SITE_STATUS: "development", STRIPE_LIVE_OPERATOR_TEST: "on" })).toMatchObject({ ok: true, audience: "operator", newCheckout: { ok: true } });
+  });
+
+  it("新規の決済の受付だけを止める条件では、接続（Webhook・定期処理・運営の操作）は残し、新規の決済だけを受け付けない", () => {
+    const cases: [E, string][] = [
+      [{ ...LIVE, STRIPE_NEW_CHECKOUT: undefined }, "new_checkout_not_set"], // 未設定は受け付けない（安全側）
+      [{ ...LIVE, STRIPE_NEW_CHECKOUT: "" }, "new_checkout_not_set"],
+      [{ ...LIVE, STRIPE_NEW_CHECKOUT: "off" }, "new_checkout_off"],
+      [{ ...LIVE, STRIPE_NEW_CHECKOUT: " OFF " }, "new_checkout_off"],
+      [{ ...LIVE, STRIPE_NEW_CHECKOUT: "true" }, "new_checkout_invalid"], // on 以外は受け付けない
+      [{ ...LIVE, STRIPE_NEW_CHECKOUT: "1" }, "new_checkout_invalid"],
+      [{ ...LIVE, SITE_STATUS: "development" }, "live_not_open"], // 開発モードでは運営の本番テストのスイッチが必要
+      [{ ...LIVE, SITE_STATUS: "coming_soon" }, "live_not_open"],
+      [{ ...LIVE, SITE_STATUS: "coming_soon", STRIPE_LIVE_OPERATOR_TEST: "on" }, "live_not_open"],
+      [{ ...LIVE, SITE_STATUS: "typo" }, "live_not_open"], // 不明な値は準備中扱い
+      [{ ...LIVE, STRIPE_LIVE_OPERATOR_TEST: "on" }, "operator_test_while_open"], // 公開中に運営テストのスイッチが残っている
+      [{ ...LIVE, SITE_STATUS: undefined, STRIPE_LIVE_OPERATOR_TEST: "off" }, "operator_test_while_open"], // 値に関係なく、残っていれば受け付けない
+      [{ ...LIVE, SITE_STATUS: "development", STRIPE_LIVE_OPERATOR_TEST: "on", STRIPE_NEW_CHECKOUT: "off" }, "new_checkout_off"], // 運営の本番テストも止まる
+    ];
+    for (const [env, reason] of cases) {
+      const c = stripeLiveConfig(env);
+      expect(c, JSON.stringify(env)).toMatchObject({ ok: true, mode: "live", audience: null, newCheckout: { ok: false, reason } });
+      // 接続の鍵・Webhook の署名の秘密・アカウントはそのまま（受付の停止で接続を止めない）
+      expect(c).toMatchObject({ secretKey: "sk_live_x", webhookSecret: "whsec_live_unit", accountId: "acct_unitTest123" });
+      expect(stripeConfig(env), JSON.stringify(env)).toMatchObject({ ok: true, mode: "live", newCheckout: { ok: false, reason } });
+    }
+  });
+
+  it("STRIPE_NEW_CHECKOUT は on のときだけ受け付ける", () => {
+    expect(newCheckoutSwitch({ STRIPE_NEW_CHECKOUT: "on" })).toEqual({ ok: true });
+    expect(newCheckoutSwitch({ STRIPE_NEW_CHECKOUT: " On " })).toEqual({ ok: true });
+    expect(newCheckoutSwitch({})).toEqual({ ok: false, reason: "new_checkout_not_set" });
+    expect(newCheckoutSwitch({ STRIPE_NEW_CHECKOUT: "off" })).toEqual({ ok: false, reason: "new_checkout_off" });
+    expect(newCheckoutSwitch({ STRIPE_NEW_CHECKOUT: "yes" })).toEqual({ ok: false, reason: "new_checkout_invalid" });
   });
 
   it("設定の不足・キーの混在・Firebase の接続先の間違い・危険な設定では拒否する", () => {
@@ -62,15 +96,9 @@ describe("Stripe の本番（Live）の判定（Production だけ・sk_live_ だ
       [{ ...LIVE, PAYMENT_PROVIDER: "mock" }, "dangerous_config"],
       [{ ...LIVE, ALLOW_MOCK_PAYMENTS_IN_PRODUCTION: "true" }, "dangerous_config"],
       [{ ...LIVE, ENABLE_TEST_PAYMENT: "true" }, "dangerous_config"],
-      [{ ...LIVE, SITE_STATUS: "development" }, "live_not_open"], // 開発モードでは運営の本番テストのスイッチが必要
-      [{ ...LIVE, SITE_STATUS: "coming_soon" }, "live_not_open"],
-      [{ ...LIVE, SITE_STATUS: "coming_soon", STRIPE_LIVE_OPERATOR_TEST: "on" }, "live_not_open"],
-      [{ ...LIVE, SITE_STATUS: "typo" }, "live_not_open"], // 不明な値は準備中扱い
       [{ ...LIVE, STRIPE_ACCOUNT_ID: undefined }, "account_id_missing"], // 本番に使う Stripe のアカウントの指定が必須
       [{ ...LIVE, STRIPE_ACCOUNT_ID: "acct_" }, "account_id_missing"],
       [{ ...LIVE, STRIPE_ACCOUNT_ID: "cus_abcdef123" }, "account_id_missing"],
-      [{ ...LIVE, STRIPE_LIVE_OPERATOR_TEST: "on" }, "operator_test_while_open"], // 公開中に運営テストのスイッチが残っている
-      [{ ...LIVE, SITE_STATUS: undefined, STRIPE_LIVE_OPERATOR_TEST: "off" }, "operator_test_while_open"], // 値に関係なく、残っていれば拒否
     ];
     for (const [env, reason] of cases) expect(stripeLiveConfig(env), JSON.stringify(env)).toEqual({ ok: false, reason });
   });
@@ -112,7 +140,7 @@ describe("テスト（Sandbox）の判定の追加の条件", () => {
   });
 
   it("拒否の理由には、すべて説明の文がある（値は含めない）", () => {
-    for (const m of [...Object.values(STRIPE_TEST_DENY_MESSAGE), ...Object.values(STRIPE_LIVE_DENY_MESSAGE)]) {
+    for (const m of [...Object.values(STRIPE_TEST_DENY_MESSAGE), ...Object.values(STRIPE_LIVE_DENY_MESSAGE), ...Object.values(STRIPE_NEW_CHECKOUT_DENY_MESSAGE)]) {
       expect(m.length).toBeGreaterThan(5);
       expect(m).not.toMatch(/sk_live_[A-Za-z0-9]|whsec_[A-Za-z0-9]/);
     }
@@ -165,5 +193,17 @@ describe("本番の設定の確認（/api/health・check:env）：本番決済�
     const cli = checkProductionEnv({ ...LIVE, FIREBASE_PROJECT_ID: "uranai-preview", STRIPE_SECRET_KEY: "sk_live_SECRETVALUE" });
     expect(cli.find((r) => r.key === "STRIPE_LIVE_CHECKOUT")).toMatchObject({ level: "error" });
     expect(JSON.stringify(cli)).not.toContain("SECRETVALUE");
+
+    // 新規の決済の受付の停止：運営の意図した停止（off・未設定）は警告、設定の誤り（不正な値・公開中の運営テストのスイッチ）は error。値は出さない
+    const off = productionConfigIssues({ ...LIVE, STRIPE_NEW_CHECKOUT: "off", CRON_SECRET: "x".repeat(32) });
+    expect(off.find((i) => i.key === "STRIPE_NEW_CHECKOUT")).toMatchObject({ level: "warning", message: expect.stringContaining("Webhook") });
+    expect(off.some((i) => i.key === "STRIPE_LIVE_CHECKOUT")).toBe(false);
+    const invalid = productionConfigIssues({ ...LIVE, STRIPE_NEW_CHECKOUT: "yes", CRON_SECRET: "x".repeat(32) });
+    expect(invalid.find((i) => i.key === "STRIPE_NEW_CHECKOUT")).toMatchObject({ level: "error" });
+    const leftover = productionConfigIssues({ ...LIVE, STRIPE_LIVE_OPERATOR_TEST: "on", CRON_SECRET: "x".repeat(32) });
+    expect(leftover.find((i) => i.key === "STRIPE_NEW_CHECKOUT")).toMatchObject({ level: "error" });
+    const cliOff = checkProductionEnv({ ...LIVE, STRIPE_NEW_CHECKOUT: "off" });
+    expect(cliOff.find((r) => r.key === "STRIPE_NEW_CHECKOUT")).toMatchObject({ level: "warn" });
+    expect(JSON.stringify([off, invalid, leftover, cliOff])).not.toMatch(/acct_unitTest123|sk_live_x|whsec_live_unit/);
   });
 });

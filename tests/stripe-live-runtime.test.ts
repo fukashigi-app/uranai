@@ -19,6 +19,7 @@ const KEYS = [
   "ALLOW_MOCK_PAYMENTS_IN_PRODUCTION",
   "STRIPE_TEST_CHECKOUT",
   "STRIPE_LIVE_CHECKOUT",
+  "STRIPE_NEW_CHECKOUT",
   "STRIPE_LIVE_OPERATOR_TEST",
   "STRIPE_SECRET_KEY",
   "STRIPE_WEBHOOK_SECRET",
@@ -41,6 +42,7 @@ const LIVE_PUBLIC: Record<string, string> = {
   SITE_STATUS: "open",
   PAYMENT_PROVIDER: "stripe",
   STRIPE_LIVE_CHECKOUT: "on",
+  STRIPE_NEW_CHECKOUT: "on",
   STRIPE_SECRET_KEY: "sk_live_unit_fake",
   STRIPE_WEBHOOK_SECRET: "whsec_unit_live_fake",
   STRIPE_ACCOUNT_ID: "acct_unitLive123",
@@ -56,6 +58,7 @@ const PREVIEW: Record<string, string> = {
   SITE_STATUS: "open",
   PAYMENT_PROVIDER: "stripe",
   STRIPE_TEST_CHECKOUT: "on",
+  STRIPE_NEW_CHECKOUT: "on",
   STRIPE_SECRET_KEY: "sk_test_unit_fake",
   STRIPE_WEBHOOK_SECRET: "whsec_unit_test_fake",
   FIREBASE_PROJECT_ID: "uranai-preview",
@@ -110,13 +113,36 @@ describe("決済の処理の接続（stripeRuntime）：Production は本番、P
       { ...LIVE_PUBLIC, NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: "pk_test_unit_fake" },
       { ...LIVE_PUBLIC, FIREBASE_PROJECT_ID: "uranai-preview" },
       { ...LIVE_PUBLIC, FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080" },
-      { ...LIVE_PUBLIC, SITE_STATUS: "development" }, // 運営テストのスイッチ無しの開発モード
-      { ...LIVE_PUBLIC, STRIPE_LIVE_OPERATOR_TEST: "on" }, // 公開中に運営テストのスイッチが残っている
       { ...PREVIEW, VERCEL_ENV: "production" }, // Production にテストの設定だけ
     ];
     for (const e of bad) {
       stub(e);
       expect(() => stripeRuntime(), JSON.stringify(e)).toThrow(/Stripe checkout is not available/);
+    }
+  });
+
+  it("新規の決済の受付だけを止める設定では、本番の接続は作り（Webhook・定期処理・運営の操作に使う）、新規の決済は受け付けない", async () => {
+    const stopped: [Record<string, string>, string][] = [
+      [{ ...LIVE_PUBLIC, STRIPE_NEW_CHECKOUT: "off" }, "new_checkout_off"],
+      [{ ...LIVE_PUBLIC, STRIPE_NEW_CHECKOUT: "" }, "new_checkout_not_set"],
+      [{ ...LIVE_PUBLIC, STRIPE_NEW_CHECKOUT: "yes" }, "new_checkout_invalid"],
+      [{ ...LIVE_PUBLIC, SITE_STATUS: "development" }, "live_not_open"], // 運営テストのスイッチ無しの開発モード
+      [{ ...LIVE_PUBLIC, SITE_STATUS: "coming_soon" }, "live_not_open"],
+      [{ ...LIVE_PUBLIC, STRIPE_LIVE_OPERATOR_TEST: "on" }, "operator_test_while_open"], // 公開中に運営テストのスイッチが残っている
+    ];
+    for (const [e, reason] of stopped) {
+      stub(e);
+      vi.resetModules();
+      const m = await import("@/lib/payments/stripe-checkout");
+      const a = await import("@/lib/payments/stripe-access");
+      const rt = m.stripeRuntime();
+      expect(rt, JSON.stringify(e)).toMatchObject({ mode: "live", webhookSecret: "whsec_unit_live_fake", accountId: "acct_unitLive123", newCheckout: { ok: false, reason } });
+      expect(rt.liveAudience).toBeUndefined();
+      expect(m.acceptsNewCheckout(rt)).toBe(false);
+      expect(await a.stripeCheckoutAccess()).toEqual({ ok: false });
+      expect(a.stripeNewCheckoutState()).toEqual({ connection: true, mode: "live", accepting: false, reason });
+      // Stripe API を呼ばずに止める（模擬の接続を使わない。呼べば実際の Stripe への接続になるので、例外の種類で確かめる）
+      await expect(m.createStripeCheckoutSession({ checkoutId: "co_unit", storeId: "st_unit", fortuneType: "ZODIAC", productName: "x", origin: "https://example.test", expiresAt: new Date(Date.now() + 40 * 60_000) }, rt)).rejects.toBeInstanceOf(m.StripeNewCheckoutStoppedError);
     }
   });
 });

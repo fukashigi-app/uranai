@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { isStripeProviderSelected, stripePublicCheckoutAccess } from "@/lib/payments/stripe-access";
+import { isStripeNewCheckoutPaused, isStripeProviderSelected, stripeNewCheckoutState, stripePublicCheckoutAccess } from "@/lib/payments/stripe-access";
 import { dataProvider } from "@/lib/data-provider";
 import { readOperatorInfo } from "@/config/operator";
 import { dangerousConfigReasons, isPaidFlowBlocked, isTestPaymentConfigured, pausedMessage, productionConfigIssues, siteStatus } from "@/lib/env";
@@ -41,10 +41,18 @@ export async function GET() {
             ? (stripePublicCheckoutAccess() as { mode?: string }).mode === "live"
               ? "stripe (live: 本番決済。売上・精算の対象)"
               : "stripe (test: Sandbox。売上・精算には含めない)"
-            : "stripe (決済を受け付けていません：設定が不足しています)"
+            : isStripeNewCheckoutPaused()
+              ? "stripe (新規の決済の受付を停止中：STRIPE_NEW_CHECKOUT。既存の決済の Webhook・返金・定期処理は継続)"
+              : "stripe (決済を受け付けていません：設定が不足しています)"
           : "none (決済未設定。決済は Stripe だけ：PAYMENT_PROVIDER=stripe)",
     CRON_SECRET: process.env.CRON_SECRET ? "set" : "missing (定期処理が実行されません)",
   };
+  // Stripe との接続（Webhook・定期処理・運営の操作に使う）と、新規の決済の受付は別に表示する（値は返さない）
+  {
+    const st = stripeNewCheckoutState();
+    checks.stripeConnection = st.connection ? `${st.mode} (Webhook・返金・異議申し立て・再確認・決済監視を処理します)` : "unavailable (Stripe の Webhook・決済を受け付けていません)";
+    checks.stripeNewCheckout = !st.connection ? "unavailable" : st.accepting ? "accepting (STRIPE_NEW_CHECKOUT=on)" : `stopped (${st.reason})`;
+  }
   // 本番環境の危険な設定・設定漏れ（値は返さない）。error があれば ok=false
   const prodIssues = productionConfigIssues();
   const prodErrors = prodIssues.filter((i) => i.level === "error");

@@ -67,6 +67,7 @@
 | `PRODUCTION_FIREBASE_PROJECT_ID` | 本番のプロジェクトの ID（今の Preview と同じ） |
 | `STRIPE_TEST_FIREBASE_PROJECT_ID` | `uranai-stripe-sandbox-v2`（`FIREBASE_PROJECT_ID` と同じ） |
 | `STRIPE_TEST_CHECKOUT` | `on` |
+| `STRIPE_NEW_CHECKOUT` | 新しいテスト決済を行うときは `on`（未設定・`off` は新しい決済を受け付けない。Webhook・返金・定期処理は続く） |
 | `STRIPE_SECRET_KEY` | 個人事業主のアカウントの Sandbox の `sk_test_` |
 | `STRIPE_WEBHOOK_SECRET` | 新しい送信先の `whsec_` |
 | `STRIPE_ACCOUNT_ID` | 個人事業主のアカウントの `acct_`（**Preview 全体には登録しない**） |

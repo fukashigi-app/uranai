@@ -2,7 +2,7 @@ import "server-only";
 import { createHash } from "node:crypto";
 import Stripe from "stripe";
 import { CURRENCY, PRICE_JPY } from "@/config/pricing";
-import { isLocalEmulatorTarget, STRIPE_ACCOUNT_ID_RE, stripeConfig, STRIPE_LIVE_DENY_MESSAGE, STRIPE_TEST_DENY_MESSAGE, type StripeLiveAudience, type StripeLiveDenyReason, type StripeTestDenyReason } from "./stripe-guard";
+import { isLocalEmulatorTarget, STRIPE_ACCOUNT_ID_RE, stripeConfig, STRIPE_LIVE_DENY_MESSAGE, STRIPE_TEST_DENY_MESSAGE, type StripeLiveAudience, type StripeLiveDenyReason, type StripeNewCheckoutDecision, type StripeNewCheckoutDenyReason, type StripeTestDenyReason } from "./stripe-guard";
 import { disputeAmountProblem } from "./stripe-sync-rules";
 
 /**
@@ -37,8 +37,14 @@ export type StripeRuntime = {
   readonly envTag: string;
   /** キーの持ち主であるべき Stripe のアカウント（acct_）。ensureStripeAccount で確かめる（本番は必須。テストは新しい検証環境で必須・それ以外は設定されていれば） */
   readonly accountId?: string;
-  /** 本番の接続だけ：誰の決済を受け付けるか（operator … 運営アカウントだけの本番決済テスト・public … 一般のお客さん） */
+  /** 本番の接続だけ：誰の決済を受け付けるか（operator … 運営アカウントだけの本番決済テスト・public … 一般のお客さん）。新規の決済を受け付けないときは無し */
   readonly liveAudience?: StripeLiveAudience;
+  /**
+   * 新規の決済（Checkout Session の作成）を受け付けるか（stripe-guard.ts の newCheckout。STRIPE_NEW_CHECKOUT など）。
+   * 受け付けなくても、この接続で Webhook・決済確定・返金・異議申し立て・再確認・決済監視は続ける。
+   * 自動テストの模擬の接続で未指定のときは受け付ける（createSimulatedStripeRuntime）
+   */
+  readonly newCheckout?: StripeNewCheckoutDecision;
   /** 自動テスト専用（createSimulatedStripeRuntime だけが設定する）：処理の途中の停止を再現する */
   readonly testHooks?: StripeTestHooks;
 };
@@ -115,13 +121,22 @@ export function stripeRuntime(): StripeRuntime {
   }
   const envTag = envTagOrThrow(process.env);
   if (cfg.mode === "live") {
-    const key = `live|${cfg.secretKey}|${cfg.webhookSecret}|${cfg.accountId}|${cfg.audience}|${envTag}`;
+    const key = `live|${cfg.secretKey}|${cfg.webhookSecret}|${cfg.accountId}|${cfg.audience ?? ""}|${newCheckoutKey(cfg.newCheckout)}|${envTag}`;
     if (cached?.key === key) return cached.runtime;
-    const runtime: StripeRuntime = { mode: "live", client: newClient(cfg.secretKey, null), webhookSecret: cfg.webhookSecret, allowHttpOrigin: false, envTag, accountId: cfg.accountId, liveAudience: cfg.audience };
+    const runtime: StripeRuntime = {
+      mode: "live",
+      client: newClient(cfg.secretKey, null),
+      webhookSecret: cfg.webhookSecret,
+      allowHttpOrigin: false,
+      envTag,
+      accountId: cfg.accountId,
+      ...(cfg.audience ? { liveAudience: cfg.audience } : {}),
+      newCheckout: cfg.newCheckout,
+    };
     cached = { key, runtime };
     return runtime;
   }
-  const key = `test|${cfg.secretKey}|${cfg.webhookSecret}|${cfg.apiBase ? `${cfg.apiBase.protocol}://${cfg.apiBase.host}:${cfg.apiBase.port}` : ""}|${cfg.accountId ?? ""}|${envTag}`;
+  const key = `test|${cfg.secretKey}|${cfg.webhookSecret}|${cfg.apiBase ? `${cfg.apiBase.protocol}://${cfg.apiBase.host}:${cfg.apiBase.port}` : ""}|${cfg.accountId ?? ""}|${newCheckoutKey(cfg.newCheckout)}|${envTag}`;
   if (cached?.key === key) return cached.runtime;
   // テストの接続も、STRIPE_ACCOUNT_ID があればキーのアカウントを確かめる（新しい検証環境では必須。別の Sandbox のキーの混入を防ぐ）
   const runtime: StripeRuntime = {
@@ -131,9 +146,25 @@ export function stripeRuntime(): StripeRuntime {
     allowHttpOrigin: cfg.runtime === "local",
     envTag,
     ...(cfg.accountId ? { accountId: cfg.accountId } : {}),
+    newCheckout: cfg.newCheckout,
   };
   cached = { key, runtime };
   return runtime;
+}
+
+const newCheckoutKey = (d: StripeNewCheckoutDecision) => (d.ok ? "accept" : `stop:${d.reason}`);
+
+/** この接続で新規の決済（Checkout Session の作成）を受け付けるか（模擬の接続で未指定なら受け付ける） */
+export function acceptsNewCheckout(rt: Pick<StripeRuntime, "newCheckout">): boolean {
+  return rt.newCheckout === undefined || rt.newCheckout.ok;
+}
+
+/** 新規の決済の受付を止めているのに Checkout Session を作ろうとした（Stripe API は呼んでいない） */
+export class StripeNewCheckoutStoppedError extends Error {
+  constructor(readonly reason: StripeNewCheckoutDenyReason | "unknown") {
+    super("new Stripe checkouts are not being accepted");
+    this.name = "StripeNewCheckoutStoppedError";
+  }
 }
 
 export class StripeAccountMismatchError extends Error {
@@ -178,7 +209,7 @@ const LOOPBACK = new Set(["localhost", "127.0.0.1"]);
  */
 export function createSimulatedStripeRuntime(
   mode: StripeMode,
-  opts: { apiBase: string; secretKey: string; webhookSecret: string; testHooks?: StripeTestHooks; envTag?: string; accountId?: string; liveAudience?: StripeLiveAudience },
+  opts: { apiBase: string; secretKey: string; webhookSecret: string; testHooks?: StripeTestHooks; envTag?: string; accountId?: string; liveAudience?: StripeLiveAudience; newCheckout?: StripeNewCheckoutDecision },
   e: Record<string, string | undefined> = process.env,
 ): StripeRuntime {
   if (e.VERCEL_ENV) throw new StripeUnavailableError("simulated runtime is for local automated tests only");
@@ -198,6 +229,7 @@ export function createSimulatedStripeRuntime(
     envTag,
     ...(opts.accountId !== undefined ? { accountId: opts.accountId } : {}),
     ...(opts.liveAudience ? { liveAudience: opts.liveAudience } : {}),
+    ...(opts.newCheckout ? { newCheckout: opts.newCheckout } : {}),
     ...(opts.testHooks ? { testHooks: opts.testHooks } : {}),
   };
 }
@@ -243,6 +275,8 @@ export type StripeSessionInput = {
  * 運営が銀行振込する。アカウントの既定で有効になっていても、Session ごとに managed_payments.enabled=false を明示する。
  */
 export async function createStripeCheckoutSession(input: StripeSessionInput, rt: StripeRuntime = stripeRuntime()): Promise<{ id: string; url: string; expiresAt: Date }> {
+  // 新規の決済の受付を止めているときは、Stripe API を呼ばずに止める（画面・API の判定の漏れへの備え。既存の記録は変えない）
+  if (!acceptsNewCheckout(rt)) throw new StripeNewCheckoutStoppedError(rt.newCheckout && !rt.newCheckout.ok ? rt.newCheckout.reason : "unknown");
   const origin = new URL(input.origin);
   if (origin.protocol !== "https:" && !(rt.allowHttpOrigin && origin.protocol === "http:")) throw new Error("checkout origin must be https");
   const metadata = { checkoutId: input.checkoutId, storeId: input.storeId, fortuneType: input.fortuneType, [STRIPE_ENV_METADATA_KEY]: rt.envTag };

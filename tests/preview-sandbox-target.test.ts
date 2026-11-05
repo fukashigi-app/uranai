@@ -36,6 +36,7 @@ const LEGACY_ENV: E = {
   FIREBASE_CLIENT_EMAIL: "stripe-test@uranai-preview.iam.gserviceaccount.com",
   STRIPE_TEST_FIREBASE_PROJECT_ID: LEGACY,
   STRIPE_TEST_CHECKOUT: "on",
+  STRIPE_NEW_CHECKOUT: "on",
   STRIPE_SECRET_KEY: "sk_test_unit_old_sandbox",
   STRIPE_WEBHOOK_SECRET: "whsec_unit_old_sandbox",
 };
@@ -153,7 +154,7 @@ describe("Stripe のテスト決済の判定（新しい検証環境は STRIPE_A
   });
 
   it("以前からの Preview は今までどおり（STRIPE_ACCOUNT_ID は任意。設定されていれば形を確かめて使う）", () => {
-    expect(stripeTestConfig(LEGACY_ENV)).toEqual({ ok: true, mode: "preview", secretKey: "sk_test_unit_old_sandbox", webhookSecret: "whsec_unit_old_sandbox", apiBase: null });
+    expect(stripeTestConfig(LEGACY_ENV)).toEqual({ ok: true, mode: "preview", secretKey: "sk_test_unit_old_sandbox", webhookSecret: "whsec_unit_old_sandbox", apiBase: null, newCheckout: { ok: true } });
     expect(stripeTestConfig({ ...LEGACY_ENV, STRIPE_ACCOUNT_ID: "acct_unitOldSandbox1" })).toMatchObject({ ok: true, accountId: "acct_unitOldSandbox1" });
     expect(stripeTestConfig({ ...LEGACY_ENV, STRIPE_ACCOUNT_ID: "bad" })).toEqual({ ok: false, reason: "test_account_id_missing" });
   });

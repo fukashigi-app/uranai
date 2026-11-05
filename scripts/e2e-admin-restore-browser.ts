@@ -7,7 +7,7 @@
  *   firebase emulators:start --only firestore --project demo-uranai
  *   （別ターミナル）npm run build && FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 FIREBASE_PROJECT_ID=demo-uranai-browser DB_PROVIDER=firestore \
  *       SITE_STATUS=development PAYMENT_PROVIDER=stripe ENABLE_TEST_PAYMENT=false ALLOW_MOCK_PAYMENTS_IN_PRODUCTION=false \
- *       STRIPE_TEST_CHECKOUT=on STRIPE_SECRET_KEY=sk_test_e2e_dummy STRIPE_WEBHOOK_SECRET=whsec_e2e_dummy \
+ *       STRIPE_TEST_CHECKOUT=on STRIPE_NEW_CHECKOUT=on STRIPE_SECRET_KEY=sk_test_e2e_dummy STRIPE_WEBHOOK_SECRET=whsec_e2e_dummy \
  *       STRIPE_API_BASE=http://127.0.0.1:12111 npx next start
  *   （別ターミナル）FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 FIREBASE_PROJECT_ID=demo-uranai-browser npm run e2e:admin-restore-browser
  */

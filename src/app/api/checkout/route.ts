@@ -4,7 +4,8 @@ import { serviceStopReason } from "@/lib/env";
 import { getAccessToken, getQrStoreCode, setAccessCookie } from "@/lib/cookies";
 import { getFortuneSession } from "@/lib/services/fortune";
 import { CheckoutError, createCheckout, getCheckoutByToken } from "@/lib/services/checkout";
-import { isStripeProviderSelected, stripeCheckoutAccess } from "@/lib/payments/stripe-access";
+import { isStripeNewCheckoutPaused, isStripeProviderSelected, stripeCheckoutAccess } from "@/lib/payments/stripe-access";
+import { NEW_CHECKOUT_PAUSED_MESSAGE } from "@/lib/payments/stripe-public";
 import { STRIPE_SESSION_TTL_MS } from "@/lib/payments/stripe-checkout";
 import { clearFreeSessions } from "@/lib/services/test-store";
 import { notePaymentApiError } from "@/lib/services/payment-monitor";
@@ -20,6 +21,8 @@ export async function POST(req: Request) {
   if (!stripe.ok) {
     const stopped = paymentStopResponse(serviceStopReason());
     if (stopped) return stopped;
+    // 新規の決済の受付を止めている（STRIPE_NEW_CHECKOUT）：注文を作らない（既存の決済・占い権利はそのまま。Webhook・定期処理は続く）
+    if (isStripeProviderSelected() && isStripeNewCheckoutPaused()) return jsonError(503, "payment_paused", NEW_CHECKOUT_PAUSED_MESSAGE);
     // Stripe を選んでいるのに使えない（設定の不足・開発モード・準備中）：疑似決済などへは切り替えない
     if (isStripeProviderSelected()) return jsonError(503, "payment_unavailable", "ただいまお支払いを受け付けていません。");
   }

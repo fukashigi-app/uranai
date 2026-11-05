@@ -46,6 +46,7 @@ function appEnv(overrides: Record<string, string>): NodeJS.ProcessEnv {
     ENABLE_TEST_PAYMENT: "false",
     ALLOW_MOCK_PAYMENTS_IN_PRODUCTION: "false",
     STRIPE_TEST_CHECKOUT: "on",
+    STRIPE_NEW_CHECKOUT: "on",
     STRIPE_SECRET_KEY: SECRET_KEY,
     STRIPE_WEBHOOK_SECRET: WEBHOOK_SECRET,
     STRIPE_API_BASE: `http://127.0.0.1:${STRIPE_PORT}`,

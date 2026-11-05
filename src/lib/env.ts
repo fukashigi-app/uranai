@@ -75,7 +75,7 @@ export const isProduction = () => process.env.NODE_ENV === "production";
 type RawProcessEnv = Record<string, string | undefined>;
 
 import { isDevModeLiveKeyConflict, isLiveOperatorTestRequested, livePaymentKeyNames, siteStatus } from "./env-rules";
-import { STRIPE_LIVE_DENY_MESSAGE, stripeLiveConfig } from "./payments/stripe-guard";
+import { isNewCheckoutMisconfigured, STRIPE_LIVE_DENY_MESSAGE, STRIPE_NEW_CHECKOUT_DENY_MESSAGE, stripeLiveConfig } from "./payments/stripe-guard";
 export { isDevModeLiveKeyConflict, isLiveOperatorTestRequested, isSessionSecretStrong, livePaymentKeyNames, siteStatus, type SiteStatus } from "./env-rules";
 
 /**
@@ -256,7 +256,13 @@ export function productionConfigIssues(e: RawProcessEnv = process.env): Producti
   if ((e.STRIPE_LIVE_CHECKOUT ?? "").trim() || (e.STRIPE_LIVE_OPERATOR_TEST ?? "").trim()) {
     const live = stripeLiveConfig({ ...e, VERCEL_ENV: "production" });
     issues.push(
-      live.ok
+      live.ok && !live.newCheckout.ok
+        ? {
+            level: isNewCheckoutMisconfigured(live.newCheckout.reason) ? "error" : "warning",
+            key: "STRIPE_NEW_CHECKOUT",
+            message: `Stripe の本番の接続は有効です（既存の決済の Webhook・返金・異議申し立て・定期処理は続けます）。新規の決済は受け付けていません：${STRIPE_NEW_CHECKOUT_DENY_MESSAGE[live.newCheckout.reason]}`,
+          }
+        : live.ok
         ? {
             level: "warning",
             key: "STRIPE_LIVE_CHECKOUT",

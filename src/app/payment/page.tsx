@@ -9,7 +9,8 @@ import { getAccessToken } from "@/lib/cookies";
 import { getCheckoutByToken } from "@/lib/services/checkout";
 import { activeProvider, PaymentUnavailableError } from "@/lib/payments";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
-import { stripeCheckoutAccess } from "@/lib/payments/stripe-access";
+import { isStripeNewCheckoutPaused, stripeCheckoutAccess } from "@/lib/payments/stripe-access";
+import { NEW_CHECKOUT_PAUSED_MESSAGE } from "@/lib/payments/stripe-public";
 import { refundedNotice } from "@/lib/payments/refunded-notice";
 import { StripeCheckoutButton } from "@/components/public/stripe-checkout-button";
 import { PAY_BUTTON_LABEL, STRIPE_TEST_PAY_BUTTON_LABEL } from "@/lib/legal/labels";
@@ -59,6 +60,28 @@ export default async function PaymentPage(props: PageProps<"/payment">) {
 
   const item = FORTUNE_CATALOG[checkout.fortuneType];
   if (checkout.provider === "stripe") {
+    if (!stripe.ok && isStripeNewCheckoutPaused()) {
+      // 新規の決済の受付を止めている：決済画面は開かない。支払いの確定待ち（PayPay など）の注文は、確認の画面で状態を確かめられる
+      const sessionId = checkout.status === "PROCESSING" && /^cs_(test|live)_[A-Za-z0-9_]{1,200}$/.test(checkout.providerPaymentId ?? "") ? checkout.providerPaymentId! : null;
+      return (
+        <PublicShell storeName={storeName}>
+          <Notice
+            title="新しいお支払いの受付を一時停止しています"
+            action={
+              sessionId ? (
+                <Link href={`/payment/return?session_id=${encodeURIComponent(sessionId)}`} className="btn-gold inline-block rounded-2xl px-6 py-3 font-bold">
+                  お支払いの状況を確認する
+                </Link>
+              ) : (
+                <Link href="/fortune" className="btn-gold inline-block rounded-2xl px-6 py-3 font-bold">占いの選択へ</Link>
+              )
+            }
+          >
+            {sessionId ? "お支払いの確認中の注文は、確認の画面で状況を確かめられます。" : `${NEW_CHECKOUT_PAUSED_MESSAGE}この注文のお支払いは行われていません。`}
+          </Notice>
+        </PublicShell>
+      );
+    }
     if (!stripe.ok) {
       return (
         <PublicShell storeName={storeName}>

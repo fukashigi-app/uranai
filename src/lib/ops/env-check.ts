@@ -10,7 +10,7 @@ import { alertWebhookStatus } from "./alert-notifier";
 import { readOperatorInfo } from "../../config/operator";
 import { normalizePrivateKey } from "../firestore/private-key";
 import { isSessionSecretStrong, livePaymentKeyNames } from "../env-rules";
-import { STRIPE_LIVE_DENY_MESSAGE, stripeLiveConfig, STRIPE_TEST_DENY_MESSAGE, stripeTestConfig } from "../payments/stripe-guard";
+import { isNewCheckoutMisconfigured, STRIPE_LIVE_DENY_MESSAGE, STRIPE_NEW_CHECKOUT_DENY_MESSAGE, stripeLiveConfig, STRIPE_TEST_DENY_MESSAGE, stripeTestConfig } from "../payments/stripe-guard";
 import { checkFirestoreTarget, FIRESTORE_TARGET_MESSAGE, PREVIEW_FIREBASE_TARGETS, previewFirebaseTargetOf, PRODUCTION_FIREBASE_PROJECT_ID, type PreviewFirebaseTarget } from "../firestore/target-guard";
 
 export type CheckLevel = "ok" | "warn" | "error" | "unknown";
@@ -152,7 +152,13 @@ export function checkProductionEnv(env: Env): CheckResult[] {
   // 本番決済のスイッチがあれば、本番の条件（sk_live_・Firebase の接続先など）がそろっているか確かめる（値は出さない）
   if (has(env.STRIPE_LIVE_CHECKOUT) || has(env.STRIPE_LIVE_OPERATOR_TEST)) {
     const live = stripeLiveConfig({ ...env, VERCEL_ENV: "production" });
-    if (live.ok)
+    if (live.ok && !live.newCheckout.ok)
+      add(
+        "STRIPE_NEW_CHECKOUT",
+        isNewCheckoutMisconfigured(live.newCheckout.reason) ? "error" : "warn",
+        `Stripe の本番の接続の設定はそろっています（Webhook・返金・異議申し立て・定期処理は処理します）。新規の決済は受け付けません：${STRIPE_NEW_CHECKOUT_DENY_MESSAGE[live.newCheckout.reason]}`,
+      );
+    else if (live.ok)
       add(
         "STRIPE_LIVE_CHECKOUT",
         live.audience === "operator" ? "warn" : "ok",
@@ -224,6 +230,13 @@ export function checkPreviewEnv(env: Env, targets: readonly PreviewFirebaseTarge
   const st = stripeTestConfig(e, targets);
   if (st.ok) add("STRIPE_TEST_CHECKOUT", "ok", st.accountId ? "Stripe のテスト決済の条件を満たしています（キーのアカウントは、デプロイの後にアプリが Stripe API で確かめます）。" : "Stripe のテスト決済の条件を満たしています（STRIPE_ACCOUNT_ID なし：キーのアカウントは確かめません）。");
   else add("STRIPE_TEST_CHECKOUT", has(env.STRIPE_TEST_CHECKOUT) ? "error" : "warn", `Stripe のテスト決済を使えません：${STRIPE_TEST_DENY_MESSAGE[st.reason]}`);
+  if (st.ok && !st.newCheckout.ok)
+    add(
+      "STRIPE_NEW_CHECKOUT",
+      isNewCheckoutMisconfigured(st.newCheckout.reason) ? "error" : "warn",
+      `新規のテスト決済は受け付けません（Webhook・返金・定期処理は処理します）：${STRIPE_NEW_CHECKOUT_DENY_MESSAGE[st.newCheckout.reason]}。テスト決済を行うときは STRIPE_NEW_CHECKOUT=on にしてください。`,
+    );
+  else if (st.ok) add("STRIPE_NEW_CHECKOUT", "ok", "新規のテスト決済を受け付けます（STRIPE_NEW_CHECKOUT=on）。");
   if (!isSessionSecretStrong(env)) add("SESSION_SECRET", "error", "32文字以上の推測しにくい値が必要です。検証環境ごとに別の値にしてください。");
   if (!has(env.CRON_SECRET)) add("CRON_SECRET", "warn", "未設定です（定期処理を手で呼んで確かめるときに必要。検証環境ごとに別の値にしてください）。");
   const alert = alertWebhookStatus(env);

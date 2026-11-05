@@ -185,7 +185,7 @@ async function main() {
   assert.equal(dataProvider(), "firestore");
   for (const k of ["STRIPE_SECRET_KEY", "STRIPE_LIVE_CHECKOUT", "STRIPE_LIVE_OPERATOR_TEST"]) delete process.env[k];
   // 定期処理（/api/cron/maintenance）の Stripe との接続は環境変数から作る：模擬 Stripe（テストモード・localhost）だけ
-  Object.assign(process.env, { STRIPE_TEST_CHECKOUT: "on", STRIPE_SECRET_KEY: TEST_KEY, STRIPE_WEBHOOK_SECRET: TEST_WHSEC, STRIPE_API_BASE: `http://127.0.0.1:${TEST_PORT}` });
+  Object.assign(process.env, { STRIPE_TEST_CHECKOUT: "on", STRIPE_NEW_CHECKOUT: "on", STRIPE_SECRET_KEY: TEST_KEY, STRIPE_WEBHOOK_SECRET: TEST_WHSEC, STRIPE_API_BASE: `http://127.0.0.1:${TEST_PORT}` });
   if (!process.env.CRON_SECRET) process.env.CRON_SECRET = randomBytes(24).toString("hex");
   await live.start();
   await testFake.start();

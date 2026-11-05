@@ -1,5 +1,5 @@
 import { Card, PageHeader } from "@/components/console/shell";
-import { isStripeProviderSelected, stripePublicCheckoutAccess } from "@/lib/payments/stripe-access";
+import { isStripeNewCheckoutPaused, isStripeProviderSelected, stripeNewCheckoutState, stripePublicCheckoutAccess } from "@/lib/payments/stripe-access";
 import { stripeLiveConfig } from "@/lib/payments/stripe-guard";
 import { PasswordForm } from "@/components/console/store-forms";
 import { requireOperator } from "@/lib/auth/session";
@@ -15,6 +15,14 @@ import { TestAlertPanel } from "@/components/console/test-alert-panel";
 import { isTestAlertAllowed } from "@/lib/ops/test-alert";
 
 export const metadata = { title: "設定" };
+
+/** Stripe との接続（Webhook・定期処理）と、新規の決済の受付（STRIPE_NEW_CHECKOUT）を分けて表示する（値は出さない） */
+function stripeStateLabel(): string {
+  const st = stripeNewCheckoutState();
+  if (!st.connection) return "接続なし（Stripe の Webhook・決済を受け付けていません）";
+  const conn = `接続あり（${st.mode === "live" ? "本番" : "テスト（Sandbox）"}。Webhook・返金・異議申し立て・再確認・決済監視を処理）`;
+  return st.accepting ? `${conn}／新規の決済：受付の設定 on（STRIPE_NEW_CHECKOUT=on）` : `${conn}／新規の決済：停止中（${st.reason}）`;
+}
 
 export default async function AdminSettingsPage() {
   const user = await requireOperator();
@@ -39,7 +47,9 @@ export default async function AdminSettingsPage() {
       ? (stripePublicCheckoutAccess() as { mode?: string }).mode === "live"
         ? "Stripe の本番決済：一般のお客さんの決済を受け付けています（売上・店舗の精算の対象）"
         : "Stripe のテスト決済（Sandbox）：一般のお客さんも利用可能。実際の請求は発生せず、売上・店舗の精算には含めない"
-      : "Stripe（PAYMENT_PROVIDER=stripe）：決済を受け付けていません（設定の不足。/api/health・運営ダッシュボードの設定の問題を確認してください）"
+      : isStripeNewCheckoutPaused()
+        ? "Stripe（PAYMENT_PROVIDER=stripe）：新規の決済の受付を停止中（STRIPE_NEW_CHECKOUT）。既存の決済の Webhook・返金・異議申し立て・定期処理・決済監視は続けています"
+        : "Stripe（PAYMENT_PROVIDER=stripe）：決済を受け付けていません（設定の不足。/api/health・運営ダッシュボードの設定の問題を確認してください）"
     : e.PAYMENT_PROVIDER === "mock"
       ? "自動テスト用の疑似決済（PAYMENT_PROVIDER=mock）"
       : "未設定（決済を受け付けていません。決済は Stripe だけです）";
@@ -52,6 +62,7 @@ export default async function AdminSettingsPage() {
     ["決済手数料率（既定）", `${defaultFeeRateBps() / 100}%（推定値。Stripe の手数料が確定したら確定値に更新。手数料は運営の負担）`],
     ["決済プロバイダ", isStripeProviderSelected() ? "stripe" : (e.PAYMENT_PROVIDER ?? "—")],
     ["決済モード", mode],
+    ["Stripe の接続・新規の決済の受付", stripeStateLabel()],
     ["Webhook URL", isStripeProviderSelected() ? `${e.APP_URL}/api/webhooks/stripe` : e.PAYMENT_PROVIDER ? `${e.APP_URL}/api/webhooks/${e.PAYMENT_PROVIDER}` : "—"],
     ["公開状態（SITE_STATUS）", status === "development" ? "開発モード（development）" : status === "coming_soon" ? "準備中（coming_soon）" : "公開中（open）"],
     ...(status === "development"

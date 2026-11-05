@@ -57,7 +57,7 @@ async function main() {
   assert.match(project, /^demo-/, "FIREBASE_PROJECT_ID は demo- で始まる Emulator 用の ID にしてください");
   assert.ok(!process.env.VERCEL_ENV, "Vercel 上では実行しません");
   assert.equal(dataProvider(), "firestore");
-  for (const k of ["STRIPE_SECRET_KEY", "STRIPE_LIVE_CHECKOUT", "STRIPE_LIVE_OPERATOR_TEST", "STRIPE_TEST_CHECKOUT", "STRIPE_ACCOUNT_ID"]) delete process.env[k];
+  for (const k of ["STRIPE_SECRET_KEY", "STRIPE_LIVE_CHECKOUT", "STRIPE_LIVE_OPERATOR_TEST", "STRIPE_NEW_CHECKOUT", "STRIPE_TEST_CHECKOUT", "STRIPE_ACCOUNT_ID"]) delete process.env[k];
   // この検証用の demo- プロジェクトを空にしてから始める（件数で「記録を作らない」を確かめるため）
   let del = 0;
   for (let i = 0; i < 20 && del !== 200; i++) {

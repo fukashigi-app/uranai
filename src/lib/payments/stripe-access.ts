@@ -3,21 +3,23 @@ import { cache } from "react";
 import { isFirestore } from "@/lib/data-provider";
 import { isSessionSecretStrong, isTestPaymentConfigured, serviceStopReason } from "@/lib/env";
 import type { SessionUser } from "@/lib/auth/session";
-import { stripeLiveConfig, stripeTestConfig, type StripeLiveDenyReason, type StripeTestDenyReason } from "./stripe-guard";
-import { stripeRuntime, type StripeMode } from "./stripe-checkout";
+import { stripeConfig, stripeLiveConfig, stripeTestConfig, type StripeLiveDenyReason, type StripeNewCheckoutDenyReason, type StripeTestDenyReason } from "./stripe-guard";
+import { acceptsNewCheckout, stripeRuntime, type StripeMode } from "./stripe-checkout";
 import { stripePublicDecision, type StripePublicDecision } from "./stripe-public";
 
 /**
  * Stripe のテスト決済を使ってよい利用者か（毎回サーバー側で確認する）。
  *  - テスト決済の設定がそろっている（stripe-guard.ts。欠けていたら使えない）
+ *  - 新規の決済を受け付けている（STRIPE_NEW_CHECKOUT=on。止めていれば新しい決済は作らない）
  *  - Firestore を使っている（決済記録の作成は Firestore 版だけ）・安全な SESSION_SECRET がある
  *  - 運営アカウント（OPERATOR）でログイン中（一般の方・店舗アカウントは使えない）
  */
-export type StripeTestAccess = { ok: true; user: SessionUser } | { ok: false; reason: StripeTestDenyReason | "not_firestore" | "weak_secret" | "not_logged_in" | "not_operator" | "unavailable" };
+export type StripeTestAccess = { ok: true; user: SessionUser } | { ok: false; reason: StripeTestDenyReason | StripeNewCheckoutDenyReason | "not_firestore" | "weak_secret" | "not_logged_in" | "not_operator" | "unavailable" };
 
 export const stripeTestAccess = cache(async (): Promise<StripeTestAccess> => {
   const cfg = stripeTestConfig();
   if (!cfg.ok) return { ok: false, reason: cfg.reason };
+  if (!cfg.newCheckout.ok) return { ok: false, reason: cfg.newCheckout.reason };
   if (!isFirestore()) return { ok: false, reason: "not_firestore" };
   if (!isSessionSecretStrong()) return { ok: false, reason: "weak_secret" };
   try {
@@ -39,11 +41,15 @@ export const stripeTestAccess = cache(async (): Promise<StripeTestAccess> => {
  *  - 本番の条件（stripe-guard.ts の stripeLiveConfig）で、受け付ける相手が operator（運営だけ）
  *  - Firestore・安全な SESSION_SECRET・運営アカウント（OPERATOR）でログイン中（一般の方・店舗アカウントは使えない）
  */
-export type StripeLiveOperatorAccess = { ok: true; user: SessionUser } | { ok: false; reason: StripeLiveDenyReason | "not_operator_audience" | "not_firestore" | "weak_secret" | "not_logged_in" | "not_operator" | "unavailable" };
+export type StripeLiveOperatorAccess =
+  | { ok: true; user: SessionUser }
+  | { ok: false; reason: StripeLiveDenyReason | StripeNewCheckoutDenyReason | "not_operator_audience" | "not_firestore" | "weak_secret" | "not_logged_in" | "not_operator" | "unavailable" };
 
 export const stripeLiveOperatorAccess = cache(async (): Promise<StripeLiveOperatorAccess> => {
   const cfg = stripeLiveConfig();
   if (!cfg.ok) return { ok: false, reason: cfg.reason };
+  // 新規の決済の受付を止めている（STRIPE_NEW_CHECKOUT・公開状態）：運営の本番決済テストも新しくは作らない
+  if (!cfg.newCheckout.ok) return { ok: false, reason: cfg.newCheckout.reason };
   if (cfg.audience !== "operator") return { ok: false, reason: "not_operator_audience" };
   if (!isFirestore()) return { ok: false, reason: "not_firestore" };
   if (!isSessionSecretStrong()) return { ok: false, reason: "weak_secret" };
@@ -81,10 +87,12 @@ export const stripeOperatorAccess = cache(async (): Promise<StripeOperatorAccess
  */
 export const stripePublicCheckoutAccess = cache((): StripePublicDecision => {
   let runtimeMode: StripeMode | null = null;
+  let newCheckoutStopped = false;
   try {
     const rt = stripeRuntime();
+    if (!acceptsNewCheckout(rt)) newCheckoutStopped = true;
     // 本番の接続は、一般のお客さんを受け付ける設定（公開中）のときだけ。運営だけの本番決済テストでは使わない
-    runtimeMode = rt.mode === "live" && rt.liveAudience !== "public" ? null : rt.mode;
+    else runtimeMode = rt.mode === "live" && rt.liveAudience !== "public" ? null : rt.mode;
   } catch {
     runtimeMode = null;
   }
@@ -93,6 +101,7 @@ export const stripePublicCheckoutAccess = cache((): StripePublicDecision => {
     stop: serviceStopReason(),
     freeTestEnabled: isTestPaymentConfigured(),
     runtimeMode,
+    newCheckoutStopped,
     firestore: isFirestore(),
     strongSecret: isSessionSecretStrong(),
   });
@@ -114,6 +123,26 @@ export const stripeCheckoutAccess = cache(async (): Promise<StripeCheckoutAccess
   if (pub.ok) return { ok: true, audience: "public", mode: pub.mode };
   return { ok: false };
 });
+
+/**
+ * 新規の決済の受付の状態（画面・API の案内と /api/health 用。値は返さない）。
+ *  connection … Stripe との接続（Webhook・定期処理・運営の操作に使う）があるか
+ *  accepting  … 新規の決済（Checkout Session の作成）を受け付ける設定か（誰に受け付けるかは別に判定する）
+ *  reason     … 受け付けない理由（接続があって受け付けないときだけ）
+ */
+export type StripeNewCheckoutState = { connection: false } | { connection: true; mode: StripeMode; accepting: true } | { connection: true; mode: StripeMode; accepting: false; reason: StripeNewCheckoutDenyReason };
+
+export function stripeNewCheckoutState(): StripeNewCheckoutState {
+  const cfg = stripeConfig();
+  if (!cfg.ok) return { connection: false };
+  return cfg.newCheckout.ok ? { connection: true, mode: cfg.mode, accepting: true } : { connection: true, mode: cfg.mode, accepting: false, reason: cfg.newCheckout.reason };
+}
+
+/** 運営が新規の決済の受付を止めている（STRIPE_NEW_CHECKOUT=off・未設定・不正な値）。接続はあり、既存の決済の処理は続いている */
+export function isStripeNewCheckoutPaused(): boolean {
+  const st = stripeNewCheckoutState();
+  return st.connection && !st.accepting && (st.reason === "new_checkout_off" || st.reason === "new_checkout_not_set" || st.reason === "new_checkout_invalid");
+}
 
 /** PAYMENT_PROVIDER=stripe を選んでいるか（疑似決済などへは切り替えない） */
 export function isStripeProviderSelected(): boolean {

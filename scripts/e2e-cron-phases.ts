@@ -41,7 +41,7 @@ async function main() {
   assert.ok(!process.env.VERCEL_ENV, "Vercel 上では実行しません");
   assert.equal(dataProvider(), "firestore");
   // Stripe は使わない（復旧・回収は「Stripe を使えない」で何もしない）
-  for (const k of ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_TEST_CHECKOUT", "STRIPE_LIVE_CHECKOUT", "STRIPE_LIVE_OPERATOR_TEST", "STRIPE_API_BASE"]) delete process.env[k];
+  for (const k of ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_TEST_CHECKOUT", "STRIPE_LIVE_CHECKOUT", "STRIPE_LIVE_OPERATOR_TEST", "STRIPE_NEW_CHECKOUT", "STRIPE_API_BASE"]) delete process.env[k];
   if (!process.env.SESSION_SECRET) process.env.SESSION_SECRET = randomBytes(24).toString("hex");
   process.env.CRON_SECRET = randomBytes(24).toString("hex");
   console.log(`Cron phases E2E (emulator ${host} / ${process.env.FIREBASE_PROJECT_ID})`);

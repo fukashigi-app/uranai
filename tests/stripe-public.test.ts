@@ -11,6 +11,7 @@ const LOCAL = {
   SITE_STATUS: "open",
   PAYMENT_PROVIDER: "stripe",
   STRIPE_TEST_CHECKOUT: "on",
+  STRIPE_NEW_CHECKOUT: "on",
   STRIPE_SECRET_KEY: "sk_test_unit",
   STRIPE_WEBHOOK_SECRET: "whsec_unit_secret",
   FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080",
@@ -18,7 +19,7 @@ const LOCAL = {
 };
 
 function stubAll(e: Record<string, string>) {
-  for (const k of ["VERCEL_ENV", "ENABLE_TEST_PAYMENT", "STRIPE_API_BASE", "STRIPE_LIVE_CHECKOUT", "STRIPE_LIVE_OPERATOR_TEST", "PAYJP_SECRET_KEY", "PAYJP_PUBLIC_KEY", "PAYJP_WEBHOOK_TOKEN", "DB_PROVIDER"]) vi.stubEnv(k, "");
+  for (const k of ["VERCEL_ENV", "ENABLE_TEST_PAYMENT", "STRIPE_API_BASE", "STRIPE_LIVE_CHECKOUT", "STRIPE_LIVE_OPERATOR_TEST", "STRIPE_NEW_CHECKOUT", "PAYJP_SECRET_KEY", "PAYJP_PUBLIC_KEY", "PAYJP_WEBHOOK_TOKEN", "DB_PROVIDER"]) vi.stubEnv(k, "");
   for (const [k, v] of Object.entries(e)) vi.stubEnv(k, v);
 }
 
@@ -67,6 +68,20 @@ describe("一般のお客さんの Stripe 決済の受付（環境変数から�
     expect(await access({ ...LOCAL, PAYMENT_PROVIDER: "" })).toEqual({ ok: false, reason: "provider_not_stripe" });
     expect(await access({ ...LOCAL, ENABLE_TEST_PAYMENT: "true" })).toEqual({ ok: false, reason: "free_test_enabled" });
     expect(await access({ ...LOCAL, STRIPE_TEST_CHECKOUT: "" })).toEqual({ ok: false, reason: "stripe_unavailable" });
+  });
+
+  it("新規の決済の受付を止める（STRIPE_NEW_CHECKOUT が on 以外）と受け付けない。接続は残る（Webhook・定期処理は続く）", async () => {
+    for (const v of ["off", "", "yes"]) {
+      expect(await access({ ...LOCAL, STRIPE_NEW_CHECKOUT: v }), v).toEqual({ ok: false, reason: "new_checkout_stopped" });
+      const m = await import("@/lib/payments/stripe-access");
+      expect(m.stripeNewCheckoutState()).toMatchObject({ connection: true, mode: "test", accepting: false });
+      expect(m.isStripeNewCheckoutPaused()).toBe(true);
+      expect(await m.stripeCheckoutAccess()).toEqual({ ok: false });
+      const c = await import("@/lib/payments/stripe-checkout");
+      expect(c.stripeRuntime()).toMatchObject({ mode: "test", newCheckout: { ok: false } }); // 接続（Webhook の署名の確認に使う）は作れる
+      vi.resetModules();
+    }
+    expect(stripePublicDecision({ ...GOOD, newCheckoutStopped: true })).toEqual({ ok: false, reason: "new_checkout_stopped" });
   });
 
   it("本番用のキー・本番決済のスイッチが混ざっていたら受け付けない（テストと本番の取り違え）", async () => {

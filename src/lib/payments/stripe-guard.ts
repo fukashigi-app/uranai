@@ -77,9 +77,43 @@ export type StripeLiveDenyReason =
   | "webhook_secret_missing"
   | "test_key_present"
   | "dangerous_config"
+  | "account_id_missing";
+
+/**
+ * ---- 新規の決済（Checkout Session の作成）の受付 ----
+ * Stripe との接続（鍵・Webhook の署名の秘密・アカウント・実行環境・Firebase の接続先）とは別に判定する。
+ * 受付を止めても接続は残るので、すでに受けた決済の Webhook（決済確定・返金・異議申し立て）・定期処理・決済監視・再確認・運営の操作は続く。
+ * 受付を止めるために鍵や Webhook の署名の秘密を消す必要はない（消すと接続ごと止まり、通知を取りこぼす）。
+ *
+ * スイッチは STRIPE_NEW_CHECKOUT。on のときだけ受け付ける（未設定・off・それ以外の値は受け付けない＝安全側）。
+ */
+export type StripeNewCheckoutDenyReason =
+  /** STRIPE_NEW_CHECKOUT が未設定 */
+  | "new_checkout_not_set"
+  /** STRIPE_NEW_CHECKOUT=off（運営が受付を止めている） */
+  | "new_checkout_off"
+  /** STRIPE_NEW_CHECKOUT が on・off 以外の値（設定の誤り。安全のため止める） */
+  | "new_checkout_invalid"
+  /** 本番：公開中（SITE_STATUS=open）でも、運営だけの本番決済テスト（開発モード＋STRIPE_LIVE_OPERATOR_TEST=on）でもない */
   | "live_not_open"
-  | "account_id_missing"
+  /** 本番：公開中なのに、運営だけの本番決済テストのスイッチ（STRIPE_LIVE_OPERATOR_TEST）が残っている（設定の誤り） */
   | "operator_test_while_open";
+
+export type StripeNewCheckoutDecision = { ok: true } | { ok: false; reason: StripeNewCheckoutDenyReason };
+
+/** STRIPE_NEW_CHECKOUT の値の判定（on のときだけ受け付ける） */
+export function newCheckoutSwitch(e: Env = process.env): StripeNewCheckoutDecision {
+  const v = norm(e.STRIPE_NEW_CHECKOUT);
+  if (v === "on") return { ok: true };
+  if (!v) return { ok: false, reason: "new_checkout_not_set" };
+  if (v === "off") return { ok: false, reason: "new_checkout_off" };
+  return { ok: false, reason: "new_checkout_invalid" };
+}
+
+/** 受付を止めている理由のうち、設定の誤り（運営の意図した停止ではない）か */
+export function isNewCheckoutMisconfigured(reason: StripeNewCheckoutDenyReason): boolean {
+  return reason === "new_checkout_invalid" || reason === "operator_test_while_open";
+}
 
 /**
  * 本番決済を誰に出すか（段階的な公開。stripe-access.ts で利用者を確かめる）。
@@ -88,8 +122,12 @@ export type StripeLiveDenyReason =
  */
 export type StripeLiveAudience = "operator" | "public";
 
+/**
+ * 本番（Live）の Stripe との接続の判定。ok は「接続を作ってよい」（Webhook・定期処理・決済監視・再確認・運営の操作に使う）。
+ * 新規の決済を受け付けるかは newCheckout（ok でも受け付けないことがある）。audience は受け付ける相手（受け付けないときは null）。
+ */
 export type StripeLiveConfig =
-  | { ok: true; mode: "live"; audience: StripeLiveAudience; secretKey: string; webhookSecret: string; accountId: string }
+  | { ok: true; mode: "live"; audience: StripeLiveAudience | null; newCheckout: StripeNewCheckoutDecision; secretKey: string; webhookSecret: string; accountId: string }
   | { ok: false; reason: StripeLiveDenyReason };
 
 export type StripeTestConfig =
@@ -101,6 +139,8 @@ export type StripeTestConfig =
       apiBase: { host: string; port: number; protocol: "http" | "https" } | null;
       /** キーの持ち主であるべき Stripe のアカウント（acct_）。設定されていれば Stripe API で確かめる（新しい検証環境では必須） */
       accountId?: string;
+      /** 新規の決済（Checkout Session の作成）を受け付けるか（STRIPE_NEW_CHECKOUT）。接続の可否とは別 */
+      newCheckout: StripeNewCheckoutDecision;
     }
   | { ok: false; reason: StripeTestDenyReason };
 
@@ -180,7 +220,7 @@ export function stripeTestConfig(e: Env = process.env, targets: readonly Preview
   const accountRaw = (e.STRIPE_ACCOUNT_ID ?? "").trim();
   if (accountRaw && !STRIPE_ACCOUNT_ID_RE.test(accountRaw)) return { ok: false, reason: "test_account_id_missing" };
   if (previewTarget?.requireStripeAccountId && !accountRaw) return { ok: false, reason: "test_account_id_missing" };
-  return { ok: true, mode, secretKey, webhookSecret, apiBase, ...(accountRaw ? { accountId: accountRaw } : {}) };
+  return { ok: true, mode, secretKey, webhookSecret, apiBase, ...(accountRaw ? { accountId: accountRaw } : {}), newCheckout: newCheckoutSwitch(e) };
 }
 
 const TEST_KEY_RE = /^(sk|pk|rk)_test_/;
@@ -189,7 +229,7 @@ export const STRIPE_ACCOUNT_ID_RE = /^acct_[A-Za-z0-9]{6,64}$/;
 
 /**
  * ---- 本番（Live）----
- * 次のすべてを満たすときだけ有効。1つでも欠けたら決済を受け付けない（安全側）。
+ * 【接続】次のすべてを満たすときだけ、本番の Stripe との接続を作る。1つでも欠けたら接続を作らない（決済も Webhook も受け付けない。安全側）。
  *  - Vercel の Production（VERCEL_ENV=production）
  *  - STRIPE_LIVE_CHECKOUT=on を明示している。テストのスイッチ（STRIPE_TEST_CHECKOUT）・接続先の差し替え（STRIPE_API_BASE）・Emulator が無い
  *  - Firebase の接続先が本番（FIREBASE_PROJECT_ID と PRODUCTION_FIREBASE_PROJECT_ID がどちらも uranai-b6edf）
@@ -197,8 +237,10 @@ export const STRIPE_ACCOUNT_ID_RE = /^acct_[A-Za-z0-9]{6,64}$/;
  *  - STRIPE_ACCOUNT_ID（acct_。本番に使う Stripe のアカウント）が設定されている。キーがこのアカウントのものかは、
  *    決済画面の作成・Webhook の処理の前に Stripe API で確かめる（stripe-checkout.ts の ensureStripeAccount。別のアカウントのキーなら受け付けない）
  *  - 疑似決済・無料テストの設定が無い
+ * 【新規の決済の受付】接続に加えて、次のすべてを満たすときだけ（newCheckout。満たさなくても接続は残り、既存の決済の処理は続く）
+ *  - STRIPE_NEW_CHECKOUT=on
  *  - 公開中（SITE_STATUS=open → 一般のお客さん）、または開発モードで STRIPE_LIVE_OPERATOR_TEST=on（運営アカウントだけ。一般の方は開発モードなので決済できない）
- *    公開中に STRIPE_LIVE_OPERATOR_TEST が残っていたら、設定の誤りとして受け付けない（公開の前に削除する）
+ *    公開中に STRIPE_LIVE_OPERATOR_TEST が残っていたら、設定の誤りとして新規の決済を受け付けない（公開の前に削除する）
  *    開発モードで本番用キーがあるときは、STRIPE_LIVE_OPERATOR_TEST=on のときだけ受付を止めない（env-rules.ts の isDevModeLiveKeyConflict）。
  *    そのときに本番の条件がそろっていなければ、受付全体を止める（env.ts の isPaidFlowBlocked）
  */
@@ -222,22 +264,43 @@ export function stripeLiveConfig(e: Env = process.env): StripeLiveConfig {
     return { ok: false, reason: "test_key_present" };
   }
   if (e.PAYMENT_PROVIDER === "mock" || e.ALLOW_MOCK_PAYMENTS_IN_PRODUCTION === "true" || norm(e.ENABLE_TEST_PAYMENT) === "true") return { ok: false, reason: "dangerous_config" };
+  // ここまでで接続は作れる。以下は新規の決済の受付だけの判定（接続の可否には影響しない）
   const site = siteStatus(e);
-  if (site.status === "open" && !site.unknown && norm(e.STRIPE_LIVE_OPERATOR_TEST)) return { ok: false, reason: "operator_test_while_open" };
-  const audience: StripeLiveAudience | null =
-    site.status === "open" && !site.unknown ? "public" : site.status === "development" && norm(e.STRIPE_LIVE_OPERATOR_TEST) === "on" ? "operator" : null;
-  if (!audience) return { ok: false, reason: "live_not_open" };
-  return { ok: true, mode: "live", audience, secretKey, webhookSecret, accountId };
+  const operatorTestWhileOpen = site.status === "open" && !site.unknown && Boolean(norm(e.STRIPE_LIVE_OPERATOR_TEST));
+  const audience: StripeLiveAudience | null = operatorTestWhileOpen
+    ? null
+    : site.status === "open" && !site.unknown
+      ? "public"
+      : site.status === "development" && norm(e.STRIPE_LIVE_OPERATOR_TEST) === "on"
+        ? "operator"
+        : null;
+  const sw = newCheckoutSwitch(e);
+  const newCheckout: StripeNewCheckoutDecision = operatorTestWhileOpen
+    ? { ok: false, reason: "operator_test_while_open" }
+    : !audience
+      ? { ok: false, reason: "live_not_open" }
+      : sw;
+  return { ok: true, mode: "live", audience: newCheckout.ok ? audience : null, newCheckout, secretKey, webhookSecret, accountId };
 }
 
 export type StripeConfig =
-  | { ok: true; mode: "test"; runtime: "preview" | "local"; secretKey: string; webhookSecret: string; apiBase: { host: string; port: number; protocol: "http" | "https" } | null; accountId?: string }
+  | {
+      ok: true;
+      mode: "test";
+      runtime: "preview" | "local";
+      secretKey: string;
+      webhookSecret: string;
+      apiBase: { host: string; port: number; protocol: "http" | "https" } | null;
+      accountId?: string;
+      newCheckout: StripeNewCheckoutDecision;
+    }
   | Extract<StripeLiveConfig, { ok: true }>
   | { ok: false; mode: "test" | "live" | "none"; reason: StripeTestDenyReason | StripeLiveDenyReason };
 
 /**
  * 実行環境に合ったモードの判定（Production → 本番だけ、Preview・ローカル → テストだけ、それ以外 → 使えない）。
  * 決済の処理が使う接続（stripe-checkout.ts の stripeRuntime）は、この関数で決める。
+ * ok は接続の可否だけ。新規の決済を受け付けるかは newCheckout（受付を止めても、Webhook・定期処理・運営の操作は続く）。
  */
 export function stripeConfig(e: Env = process.env): StripeConfig {
   if (e.VERCEL_ENV === "production") {
@@ -247,7 +310,7 @@ export function stripeConfig(e: Env = process.env): StripeConfig {
   if (e.VERCEL_ENV && e.VERCEL_ENV !== "preview") return { ok: false, mode: "none", reason: "unsupported_environment" };
   const test = stripeTestConfig(e);
   return test.ok
-    ? { ok: true, mode: "test", runtime: test.mode, secretKey: test.secretKey, webhookSecret: test.webhookSecret, apiBase: test.apiBase, ...(test.accountId ? { accountId: test.accountId } : {}) }
+    ? { ok: true, mode: "test", runtime: test.mode, secretKey: test.secretKey, webhookSecret: test.webhookSecret, apiBase: test.apiBase, ...(test.accountId ? { accountId: test.accountId } : {}), newCheckout: test.newCheckout }
     : { ok: false, mode: "test", reason: test.reason };
 }
 
@@ -284,7 +347,14 @@ export const STRIPE_LIVE_DENY_MESSAGE: Record<StripeLiveDenyReason, string> = {
   webhook_secret_missing: "STRIPE_WEBHOOK_SECRET（whsec_）が設定されていません",
   test_key_present: "本番にテスト用の Stripe のキーがあります",
   dangerous_config: "疑似決済・無料テストの設定が残っています",
-  live_not_open: "公開中（SITE_STATUS=open）ではなく、運営だけの本番決済テスト（STRIPE_LIVE_OPERATOR_TEST=on）も有効ではありません",
   account_id_missing: "STRIPE_ACCOUNT_ID（本番に使う Stripe のアカウントの acct_）が設定されていないか、形が正しくありません",
+};
+
+/** 新規の決済を受け付けない理由の表示・ログ用（値は含めない） */
+export const STRIPE_NEW_CHECKOUT_DENY_MESSAGE: Record<StripeNewCheckoutDenyReason, string> = {
+  new_checkout_not_set: "新規の決済の受付のスイッチ（STRIPE_NEW_CHECKOUT=on）が設定されていません",
+  new_checkout_off: "新規の決済の受付を停止しています（STRIPE_NEW_CHECKOUT=off）",
+  new_checkout_invalid: "STRIPE_NEW_CHECKOUT が on・off 以外の値です。安全のため新規の決済の受付を停止しています",
+  live_not_open: "公開中（SITE_STATUS=open）ではなく、運営だけの本番決済テスト（STRIPE_LIVE_OPERATOR_TEST=on）も有効ではありません",
   operator_test_while_open: "公開中（SITE_STATUS=open）なのに、運営だけの本番決済テストのスイッチ（STRIPE_LIVE_OPERATOR_TEST）が残っています。削除してください",
 };

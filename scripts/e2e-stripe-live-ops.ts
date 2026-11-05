@@ -108,7 +108,7 @@ async function main() {
   assert.ok(!process.env.VERCEL_ENV, "Vercel 上では実行しません");
   assert.equal(dataProvider(), "firestore");
   // 本番用・テスト用の Stripe のキーを環境変数に入れない（アプリの判定には一切渡さない）
-  for (const k of ["STRIPE_SECRET_KEY", "STRIPE_LIVE_CHECKOUT", "STRIPE_LIVE_OPERATOR_TEST", "STRIPE_TEST_CHECKOUT", "STRIPE_ACCOUNT_ID"]) delete process.env[k];
+  for (const k of ["STRIPE_SECRET_KEY", "STRIPE_LIVE_CHECKOUT", "STRIPE_LIVE_OPERATOR_TEST", "STRIPE_NEW_CHECKOUT", "STRIPE_TEST_CHECKOUT", "STRIPE_ACCOUNT_ID"]) delete process.env[k];
   await live.start();
   await testFake.start();
   const base = { apiBase: `http://127.0.0.1:${LIVE_PORT}`, secretKey: LIVE_KEY, webhookSecret: LIVE_WHSEC };
