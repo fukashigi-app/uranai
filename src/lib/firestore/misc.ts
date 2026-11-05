@@ -1,5 +1,5 @@
 import "server-only";
-import { FieldValue, Timestamp } from "firebase-admin/firestore";
+import { FieldValue, Timestamp, type QueryDocumentSnapshot } from "firebase-admin/firestore";
 import type { FortuneTypeValue } from "@/lib/db/schema";
 import { sha256Hex } from "@/lib/security/crypto";
 import { C, fsdb, inBatches, mustDate, toDate } from "./admin";
@@ -31,46 +31,104 @@ export async function logTestFortune(storeCode: string, type: FortuneTypeValue, 
     .add({ storeCode: storeCode.slice(0, 32), fortuneType: type, ...(mode ? { mode } : {}), createdAt: FieldValue.serverTimestamp() });
 }
 
-/** 定期メンテナンス（期限切れ処理・不要データの削除）。PostgreSQL 版と同じ内容 */
-export async function runMaintenance() {
+/**
+ * 定期メンテナンスの件数・時間の上限（後ろの段階の Webhook の復旧・再確認の時間を使い切らないように）。
+ *  - 処理ごとに、最大 MAINTENANCE_MAX_SCAN_PER_TASK 件まで、MAINTENANCE_PAGE_SIZE 件ずつ読む
+ *  - 開始から MAINTENANCE_DEADLINE_MS を過ぎたら、新しいページを読まずに終える（残りは次の定期処理で処理する）
+ *  - 上限で打ち切った処理の数を truncatedTasks に返す（記録と応答に残る。0 なら全件を処理した）
+ */
+export const MAINTENANCE_PAGE_SIZE = 300;
+export const MAINTENANCE_MAX_SCAN_PER_TASK = 3000;
+export const MAINTENANCE_DEADLINE_MS = 60 * 1000;
+
+export type MaintenanceLimits = { pageSize: number; maxScanPerTask: number; deadlineMs: number };
+
+/**
+ * 定期メンテナンス（期限切れ処理・不要データの削除）。PostgreSQL 版と同じ内容（対象の条件は変えない）。
+ * 読み込みは「日時の項目 < 区切り」を新しい順に（単一の項目のインデックスだけで動く。複合インデックスは不要）。
+ * 新しい順なので、件数・時間の上限で打ち切っても、直近に期限が来たもの（毎日の定期処理で新しく対象になるもの）から処理する。
+ */
+export async function runMaintenance(limits: Partial<MaintenanceLimits> = {}, clock: () => number = Date.now) {
+  const L: MaintenanceLimits = { pageSize: MAINTENANCE_PAGE_SIZE, maxScanPerTask: MAINTENANCE_MAX_SCAN_PER_TASK, deadlineMs: MAINTENANCE_DEADLINE_MS, ...limits };
   const db = fsdb();
   const now = new Date();
+  const t0 = clock();
+  const timeUp = () => clock() - t0 >= L.deadlineMs;
   const ts = (d: Date) => Timestamp.fromDate(d);
+  let truncatedTasks = 0;
+
+  /** collection の field < cut を新しい順にページで読み、onPage で処理する。上限で打ち切ったら truncatedTasks を数える */
+  async function scan(collection: string, field: string, cut: Date, onPage: (docs: QueryDocumentSnapshot[]) => Promise<void>): Promise<void> {
+    let cursor: QueryDocumentSnapshot | null = null;
+    let scanned = 0;
+    for (;;) {
+      if (timeUp() || scanned >= L.maxScanPerTask) {
+        truncatedTasks++;
+        return;
+      }
+      let q = db.collection(collection).where(field, "<", ts(cut)).orderBy(field, "desc").limit(Math.min(L.pageSize, L.maxScanPerTask - scanned));
+      if (cursor) q = q.startAfter(cursor);
+      const snap = await q.get();
+      if (snap.empty) return;
+      await onPage(snap.docs);
+      scanned += snap.size;
+      cursor = snap.docs[snap.docs.length - 1];
+      if (snap.size < L.pageSize && scanned < L.maxScanPerTask) return;
+    }
+  }
 
   // 期限切れの占い権利
-  const sessions = (await db.collection(C.fortuneSessions).where("expiresAt", "<", ts(now)).get()).docs.filter((d) => d.get("status") === "PAID");
-  await inBatches(sessions, (b, d) => {
-    b.update(d.ref, { status: "EXPIRED" });
-    b.update(db.collection(C.transactions).doc(String(d.get("transactionId"))), { fortuneStatus: "EXPIRED" });
+  let expiredSessions = 0;
+  await scan(C.fortuneSessions, "expiresAt", now, async (docs) => {
+    const sessions = docs.filter((d) => d.get("status") === "PAID");
+    expiredSessions += sessions.length;
+    await inBatches(sessions, (b, d) => {
+      b.update(d.ref, { status: "EXPIRED" });
+      b.update(db.collection(C.transactions).doc(String(d.get("transactionId"))), { fortuneStatus: "EXPIRED" });
+    });
   });
 
   // 期限切れの注文（未払いの CREATED・FAILED だけ。返金済み・チャージバックの REFUNDED は決済記録があるので上書きしない）
-  const expiredCheckouts = (await db.collection(C.checkouts).where("expiresAt", "<", ts(now)).get()).docs.filter((d) => ["CREATED", "FAILED"].includes(d.get("status")));
-  await inBatches(expiredCheckouts, (b, d) => b.update(d.ref, { status: "EXPIRED", updatedAt: FieldValue.serverTimestamp() }));
+  let expiredCheckouts = 0;
+  await scan(C.checkouts, "expiresAt", now, async (docs) => {
+    const expired = docs.filter((d) => ["CREATED", "FAILED"].includes(d.get("status")));
+    expiredCheckouts += expired.length;
+    await inBatches(expired, (b, d) => b.update(d.ref, { status: "EXPIRED", updatedAt: FieldValue.serverTimestamp() }));
+  });
 
-  // 課金されたか不明なまま放置された処理中（Charge IDなし）
+  // 課金されたか不明なまま放置された処理中（Charge IDなし）。処理中の注文は少ないので、上限の件数まで1回で読む
   const staleCut = new Date(now.getTime() - 15 * 60 * 1000);
-  const stale = (await db.collection(C.checkouts).where("status", "==", "PROCESSING").get()).docs.filter(
-    (d) => !d.get("providerPaymentId") && mustDate(d.get("processingStartedAt")) < staleCut,
-  );
-  await inBatches(stale, (b, d) => b.update(d.ref, { status: "FAILED", failureCode: "stale_processing", updatedAt: FieldValue.serverTimestamp() }));
+  if (timeUp()) truncatedTasks++;
+  else {
+    const processing = await db.collection(C.checkouts).where("status", "==", "PROCESSING").limit(L.maxScanPerTask).get();
+    if (processing.size >= L.maxScanPerTask) truncatedTasks++;
+    const stale = processing.docs.filter((d) => !d.get("providerPaymentId") && mustDate(d.get("processingStartedAt")) < staleCut);
+    await inBatches(stale, (b, d) => b.update(d.ref, { status: "FAILED", failureCode: "stale_processing", updatedAt: FieldValue.serverTimestamp() }));
+  }
 
   // プライバシー: 結果本文は30日、未決済の注文は7日で削除
-  const results = (await db.collection(C.fortuneResults).where("createdAt", "<", ts(new Date(now.getTime() - 30 * 86_400_000))).get()).docs;
-  await inBatches(results, (b, d) => b.delete(d.ref));
-  const oldCheckouts = (await db.collection(C.checkouts).where("createdAt", "<", ts(new Date(now.getTime() - 7 * 86_400_000))).get()).docs.filter(
-    (d) => ["EXPIRED", "FAILED", "CREATED"].includes(d.get("status")) && !d.get("providerPaymentId"),
+  let purgedResults = 0;
+  await scan(C.fortuneResults, "createdAt", new Date(now.getTime() - 30 * 86_400_000), async (docs) => {
+    purgedResults += docs.length;
+    await inBatches(docs, (b, d) => b.delete(d.ref));
+  });
+  let purgedCheckouts = 0;
+  await scan(C.checkouts, "createdAt", new Date(now.getTime() - 7 * 86_400_000), async (docs) => {
+    const old = docs.filter((d) => ["EXPIRED", "FAILED", "CREATED"].includes(d.get("status")) && !d.get("providerPaymentId"));
+    purgedCheckouts += old.length;
+    await inBatches(old, (b, d) => b.delete(d.ref));
+  });
+
+  await scan(C.authSessions, "expiresAt", now, (docs) => inBatches(docs, (b, d) => b.delete(d.ref)));
+  await scan(C.webhookEvents, "createdAt", new Date(now.getTime() - 90 * 86_400_000), (docs) =>
+    inBatches(
+      docs.filter((d) => d.get("processedAt")),
+      (b, d) => b.delete(d.ref),
+    ),
   );
-  await inBatches(oldCheckouts, (b, d) => b.delete(d.ref));
+  await scan(C.rateLimits, "windowStart", new Date(now.getTime() - 86_400_000), (docs) => inBatches(docs, (b, d) => b.delete(d.ref)));
 
-  const sessionsAuth = (await db.collection(C.authSessions).where("expiresAt", "<", ts(now)).get()).docs;
-  await inBatches(sessionsAuth, (b, d) => b.delete(d.ref));
-  const events = (await db.collection(C.webhookEvents).where("createdAt", "<", ts(new Date(now.getTime() - 90 * 86_400_000))).get()).docs.filter((d) => d.get("processedAt"));
-  await inBatches(events, (b, d) => b.delete(d.ref));
-  const limits = (await db.collection(C.rateLimits).where("windowStart", "<", ts(new Date(now.getTime() - 86_400_000))).get()).docs;
-  await inBatches(limits, (b, d) => b.delete(d.ref));
-
-  return { expiredSessions: sessions.length, expiredCheckouts: expiredCheckouts.length, purgedResults: results.length, purgedCheckouts: oldCheckouts.length };
+  return { expiredSessions, expiredCheckouts, purgedResults, purgedCheckouts, truncatedTasks };
 }
 
 /** 接続確認（/api/health）。読み取り1回のみ */

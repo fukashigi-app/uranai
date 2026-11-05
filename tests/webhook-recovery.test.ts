@@ -105,9 +105,17 @@ describe("定期処理（/api/cron/maintenance）の自動の復旧", () => {
     vi.unstubAllEnvs();
     vi.doUnmock("@/lib/services/maintenance");
     vi.doUnmock("@/lib/services/maintenance-status");
+    vi.doUnmock("@/lib/services/cron-run");
   });
   const load = async (maintenanceFails = false) => {
     vi.resetModules();
+    // 定期処理全体のロック（Firestore）は模擬：取得できる。ロックそのものは tests/cron-phases.test.ts と E2E で確かめる
+    vi.doMock("@/lib/services/cron-run", () => ({
+      acquireCronRunLock: async () => ({ status: "acquired", ownerId: "owner-unit", tookOverExpired: false }),
+      stillCronRunOwner: async () => true,
+      releaseCronRunLock: async () => {},
+      recordCronRunResult: async () => {},
+    }));
     const recovery = vi.fn(async () => ({ status: "completed", scanned: 1, attempted: 1, deferred: 0, truncated: false, recovered: 1, failed: 0 }));
     vi.doMock("@/lib/payments/webhook-recovery", () => ({ runCronWebhookRecovery: recovery }));
     vi.doMock("@/lib/services/maintenance", () => ({ runMaintenance: async () => (maintenanceFails ? Promise.reject(new Error("x")) : { expiredSessions: 0, expiredCheckouts: 0, purgedResults: 0, purgedCheckouts: 0 }) }));

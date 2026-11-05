@@ -48,6 +48,7 @@
     "e2e:stripe-sandbox-env": "tsx --conditions=react-server scripts/e2e-stripe-sandbox-env.ts",
     "e2e:stripe-live-ops": "tsx --conditions=react-server scripts/e2e-stripe-live-ops.ts",
     "e2e:stripe-recheck-recovery": "tsx --conditions=react-server scripts/e2e-stripe-recheck-recovery.ts",
+    "e2e:cron-phases": "tsx --conditions=react-server scripts/e2e-cron-phases.ts",
     "e2e:recheck-recovery-browser": "tsx --conditions=react-server scripts/e2e-recheck-recovery-browser.ts",
     "e2e:admin-restore-browser": "tsx --conditions=react-server scripts/e2e-admin-restore-browser.ts",
     "monitor:payments": "tsx --conditions=react-server scripts/payment-monitor.ts"
