@@ -254,6 +254,6 @@ describe("組み込み（ソースの確認）", () => {
     // 段階の順序：メンテナンス → Webhook の復旧 → 再確認の回収（最後）
     expect(cron.indexOf('name: "webhookRecovery"')).toBeGreaterThan(cron.indexOf('name: "maintenance"'));
     expect(cron.indexOf('name: "recheckRecovery"')).toBeGreaterThan(cron.indexOf('name: "webhookRecovery"'));
-    expect(cron).toContain("runCronRecheckRecovery(new Date(startedAt.getTime() + RECHECK_RECOVERY_NOT_AFTER_MS))");
+    expect(cron).toContain("runCronRecheckRecovery(new Date(startedAt.getTime() + RECHECK_RECOVERY_NOT_AFTER_MS), signal)");
   });
 });

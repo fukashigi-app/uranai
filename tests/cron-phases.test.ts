@@ -65,22 +65,65 @@ describe("段階の実行（runCronPhases）", () => {
     ]);
   });
 
-  it("待つ上限を過ぎた段階は timed_out。残りの時間があれば次の段階は実行する", async () => {
+  it("待つ上限を過ぎた段階は timed_out（中止の合図を送る）。止まらなければ unsettled。残りの時間があれば次の段階は実行する", async () => {
     const ran: string[] = [];
+    let aborted = false;
     const phases: CronPhase[] = [
-      { name: "hang", startNotAfterMs: 10_000, maxMs: 30, run: never },
+      {
+        name: "hang",
+        startNotAfterMs: 10_000,
+        maxMs: 30,
+        run: (signal) => {
+          signal.addEventListener("abort", () => void (aborted = true));
+          return never(); // 合図を受けても止まらない
+        },
+      },
       { name: "next", startNotAfterMs: 10_000, maxMs: 1000, run: async () => void ran.push("next") },
     ];
-    const o = await runCronPhases(phases, { startedAt: Date.now(), hardDeadlineMs: 5000, errorCodeOf });
+    const o = await runCronPhases(phases, { startedAt: Date.now(), hardDeadlineMs: 5000, abortGraceMs: 30, errorCodeOf });
+    expect(aborted).toBe(true);
     expect(o.timedOut).toBe(true);
-    expect(o.phases[0]).toMatchObject({ name: "hang", status: "timed_out", errorCode: "PhaseTimeout" });
+    expect(o.unsettled).toBe(true);
+    expect(o.phases[0]).toMatchObject({ name: "hang", status: "timed_out", errorCode: "PhaseTimeout", abortSettled: false });
     expect(ran).toEqual(["next"]);
     expect(cronRunStatusOf(o)).toBe("timed_out");
   });
 
+  it("中止の合図で止まった段階も timed_out のまま（正常終了とは記録しない）。unsettled にはしない", async () => {
+    const o = await runCronPhases(
+      [
+        {
+          name: "cooperative",
+          startNotAfterMs: 10_000,
+          maxMs: 30,
+          run: (signal) => new Promise<void>((ok) => signal.addEventListener("abort", () => setTimeout(ok, 10))), // ページの途中を終えてから止まる
+        },
+      ],
+      { startedAt: Date.now(), hardDeadlineMs: 5000, abortGraceMs: 2000, errorCodeOf },
+    );
+    expect(o.phases[0]).toMatchObject({ status: "timed_out", abortSettled: true });
+    expect(o.timedOut).toBe(true);
+    expect(o.unsettled).toBe(false);
+    expect(cronRunStatusOf(o)).toBe("timed_out");
+  });
+
+  it("止まるのを待つ時間は、全体の締め切りを超えない", async () => {
+    const t0 = Date.now();
+    const o = await runCronPhases([{ name: "hang", startNotAfterMs: 10_000, maxMs: 20, run: never }], { startedAt: t0, hardDeadlineMs: 60, abortGraceMs: 60_000, errorCodeOf });
+    expect(o.phases[0].abortSettled).toBe(false);
+    expect(Date.now() - t0).toBeLessThan(2000);
+  });
+
+  it("正常に終わった段階には中止の合図を送らない", async () => {
+    let aborted = false;
+    await runCronPhases([{ name: "a", startNotAfterMs: 1000, maxMs: 1000, run: async (signal) => void signal.addEventListener("abort", () => (aborted = true)) }], { startedAt: Date.now(), hardDeadlineMs: 5000, errorCodeOf });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(aborted).toBe(false);
+  });
+
   it("待つ上限は全体の締め切りまでの残りに切り詰める", async () => {
     const t0 = Date.now();
-    const o = await runCronPhases([{ name: "hang", startNotAfterMs: 10_000, maxMs: 60_000, run: never }], { startedAt: t0, hardDeadlineMs: 40, errorCodeOf });
+    const o = await runCronPhases([{ name: "hang", startNotAfterMs: 10_000, maxMs: 60_000, run: never }], { startedAt: t0, hardDeadlineMs: 40, abortGraceMs: 10, errorCodeOf });
     expect(o.phases[0].status).toBe("timed_out");
     expect(Date.now() - t0).toBeLessThan(2000);
   });
@@ -90,7 +133,7 @@ describe("段階の実行（runCronPhases）", () => {
     process.on("unhandledRejection", onUnhandled);
     const o = await runCronPhases(
       [{ name: "late_fail", startNotAfterMs: 10_000, maxMs: 10, run: () => new Promise<void>((_, rej) => setTimeout(() => rej(new Error("late")), 40)) }],
-      { startedAt: Date.now(), hardDeadlineMs: 5000, errorCodeOf },
+      { startedAt: Date.now(), hardDeadlineMs: 5000, abortGraceMs: 5, errorCodeOf },
     );
     await new Promise((r) => setTimeout(r, 80));
     process.off("unhandledRejection", onUnhandled);
@@ -140,6 +183,8 @@ describe("定期処理（/api/cron/maintenance）：段階・ロック", () => {
     calls: [] as string[],
     maintFails: false,
     webhookFails: false,
+    /** hang … 中止の合図を無視して止まらない・cooperative … 合図を受けて途中の結果を返す */
+    maintMode: "normal" as "normal" | "hang" | "cooperative",
   };
   let logs: string[];
   const load = async () => {
@@ -151,9 +196,14 @@ describe("定期処理（/api/cron/maintenance）：段階・ロック", () => {
       recordCronRunResult: async (ownerId: string, r: never) => void st.runs.push({ ownerId, r }),
     }));
     vi.doMock("@/lib/services/maintenance", () => ({
-      runMaintenance: async () => {
+      runMaintenance: async (signal?: AbortSignal) => {
         st.calls.push("maintenance");
         if (st.maintFails) throw Object.assign(new Error("boom"), { name: "SimulatedMaintenanceError" });
+        if (st.maintMode === "hang") return new Promise(() => undefined);
+        if (st.maintMode === "cooperative") {
+          await new Promise<void>((ok) => signal!.addEventListener("abort", () => setTimeout(ok, 1000)));
+          return { expiredSessions: 0, expiredCheckouts: 0, purgedResults: 0, purgedCheckouts: 0, truncatedTasks: 3 };
+        }
         return { expiredSessions: 0, expiredCheckouts: 0, purgedResults: 1, purgedCheckouts: 0, truncatedTasks: 0 };
       },
     }));
@@ -172,7 +222,7 @@ describe("定期処理（/api/cron/maintenance）：段階・ロック", () => {
   beforeEach(() => {
     vi.stubEnv("SESSION_SECRET", "unit-test-session-secret-Qx7v2Lr9Tm4Kp8Zw");
     vi.stubEnv("CRON_SECRET", SECRET);
-    Object.assign(st, { lock: { status: "acquired", ownerId: "owner-1", tookOverExpired: false }, owner: true, released: [], runs: [], maint: [], calls: [], maintFails: false, webhookFails: false });
+    Object.assign(st, { lock: { status: "acquired", ownerId: "owner-1", tookOverExpired: false }, owner: true, released: [], runs: [], maint: [], calls: [], maintFails: false, webhookFails: false, maintMode: "normal" });
     logs = [];
     for (const k of ["log", "warn", "error"] as const) vi.spyOn(console, k).mockImplementation((...a: unknown[]) => void logs.push(JSON.stringify(a)));
   });
@@ -240,6 +290,45 @@ describe("定期処理（/api/cron/maintenance）：段階・ロック", () => {
     expect(await res.json()).toMatchObject({ webhookRecovery: { status: "failed" }, recheckRecovery: { status: "completed" } });
     expect(st.calls).toEqual(["maintenance", "webhook", "recheck"]);
     expect(st.runs[0].r.phases.find((p) => p.name === "webhookRecovery")).toMatchObject({ status: "failed" });
+  });
+
+  it("メンテナンスが時間切れで止まらない：中止の合図を送り、後ろの段階は実行する。ロックは外さない（期限で外れる）。成功とは記録しない", async () => {
+    st.maintMode = "hang";
+    const cron = await load();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const p = cron();
+      await vi.advanceTimersByTimeAsync(200_000);
+      const res = await p;
+      expect(res.status).toBe(500);
+      expect(await res.json()).toEqual({ ok: false, error: "maintenance_failed" });
+      expect(st.calls).toEqual(["maintenance", "webhook", "recheck"]);
+      expect(st.maint).toEqual([{ ok: false, errorCode: "PhaseTimeout" }]);
+      expect(st.runs[0].r.status).toBe("timed_out");
+      expect(st.runs[0].r.phases[0]).toMatchObject({ name: "maintenance", status: "timed_out", abortSettled: false });
+      expect(st.runs[0].r.phases.slice(1).map((x) => x.status)).toEqual(["ok", "ok"]);
+      expect(st.released).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("メンテナンスが時間切れで、合図を受けて止まった：途中の結果でも成功とは記録しない。続いている処理は無いのでロックを外す", async () => {
+    st.maintMode = "cooperative";
+    const cron = await load();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const p = cron();
+      await vi.advanceTimersByTimeAsync(200_000);
+      const res = await p;
+      expect(res.status).toBe(500);
+      expect(st.maint).toEqual([{ ok: false, errorCode: "PhaseTimeout" }]);
+      expect(st.runs[0].r.phases[0]).toMatchObject({ name: "maintenance", status: "timed_out", abortSettled: true });
+      expect(st.calls).toEqual(["maintenance", "webhook", "recheck"]);
+      expect(st.released).toEqual(["owner-1"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("ロックを失ったら残りを始めない（メンテナンスを始める前に失えば、何も実行せず失敗を記録）", async () => {

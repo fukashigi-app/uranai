@@ -154,7 +154,7 @@ async function main() {
 
   // 時間の上限0：何も処理せず、すべての処理を打ち切りとして数える
   let m = await runMaintenance({ deadlineMs: 0 });
-  assert.deepEqual(m, { expiredSessions: 0, expiredCheckouts: 0, purgedResults: 0, purgedCheckouts: 0, truncatedTasks: 8 }); // 8つの処理すべて
+  assert.deepEqual(m, { expiredSessions: 0, expiredCheckouts: 0, purgedResults: 0, purgedCheckouts: 0, truncatedTasks: 8, tasksWithRemaining: 8, conflictsSkipped: 0 }); // 8つの処理すべて
   assert.equal((await db.collection(C.fortuneSessions).doc("paid_00").get()).get("status"), "PAID");
   // 件数の上限（1ページ5件・1処理10件）：期限が最近の PAID から処理し、打ち切りを数える
   m = await runMaintenance({ pageSize: 5, maxScanPerTask: 10 });
@@ -178,6 +178,126 @@ async function main() {
   m = await runMaintenance();
   assert.equal(m.truncatedTasks, 0);
   step("メンテナンス：時間の上限0では何も変えずに打ち切りを数える。件数の上限では期限が最近のものから処理して残りは次回。対象の条件（PAID だけ・期限内は対象外・決済済みの注文は残す・30日・7日・15分）は今までどおり");
+  const tasks = (await db.collection(C.system).doc("maintenanceTasks").get()).data()!;
+  assert.deepEqual(
+    (tasks.lastTasks as { task: string }[]).map((x) => x.task),
+    ["purgeResults", "purgeCheckouts", "purgeAuthSessions", "failStaleProcessing", "expireSessions", "expireCheckouts", "purgeWebhookEvents", "purgeRateLimits"],
+    "処理の順序（保存期間の削除が最初）が違います",
+  );
+  for (const x of tasks.lastTasks as Record<string, unknown>[]) for (const k of ["scanned", "processed", "conflicts", "truncated", "hasMore"]) assert.ok(k in x, `${String(x.task)} に ${k} がありません`);
+  step("処理ごとの件数・競合・打ち切り・残りの有無を system/maintenanceTasks に記録。保存期間の削除（占い結果・未決済の注文・ログイン）を最初に実行");
+
+  // ---- 5. 取り残しの防止：対象外の記録に埋もれた古い対象も、続きの位置から古い順に読んでいずれ処理する ----
+  await resetProject();
+  for (let i = 0; i < 15; i++) await db.collection(C.fortuneSessions).doc(`old_used_${String(i).padStart(2, "0")}`).set({ status: "USED", expiresAt: new Date(t - 30 * DAY + i * 60_000), transactionId: "x" });
+  await db.collection(C.fortuneSessions).doc("buried_paid").set({ status: "PAID", expiresAt: new Date(t - 20 * DAY), transactionId: "tx_buried" });
+  await db.collection(C.transactions).doc("tx_buried").set({ fortuneStatus: "PAID" });
+  for (let i = 0; i < 15; i++) await db.collection(C.fortuneSessions).doc(`new_used_${String(i).padStart(2, "0")}`).set({ status: "USED", expiresAt: new Date(t - DAY + i * 60_000), transactionId: "x" });
+  const LIM = { pageSize: 5, headScanPerTask: 10, maxScanPerTask: 20 };
+  m = await runMaintenance(LIM);
+  assert.equal((await db.collection(C.fortuneSessions).doc("buried_paid").get()).get("status"), "PAID", "1回目で届かないはずの記録が処理されました（検証の前提）");
+  assert.ok(m.tasksWithRemaining >= 1);
+  const cur1 = (await db.collection(C.system).doc("maintenanceCursors").get()).get("expireSessions") as { id: string };
+  assert.equal(cur1.id, "old_used_09", "続きの位置が古い順の10件目ではありません");
+  m = await runMaintenance(LIM);
+  assert.equal(m.expiredSessions, 1);
+  assert.equal((await db.collection(C.fortuneSessions).doc("buried_paid").get()).get("status"), "EXPIRED", "埋もれた期限切れの権利が2回目でも処理されません");
+  assert.equal((await db.collection(C.transactions).doc("tx_buried").get()).get("fortuneStatus"), "EXPIRED");
+  // 3回目：最後まで読み、続きの位置は最初に戻る
+  await runMaintenance(LIM);
+  await runMaintenance(LIM);
+  assert.equal((await db.collection(C.system).doc("maintenanceCursors").get()).get("expireSessions"), null, "一周した後に続きの位置が最初に戻りません");
+  // すべてが対象の削除は古い順（30日を過ぎた占い結果：古いものから消える）
+  for (let i = 0; i < 8; i++) await db.collection(C.fortuneResults).doc(`r_${i}`).set({ createdAt: new Date(t - 31 * DAY - i * DAY) }); // r_7 が最も古い
+  m = await runMaintenance({ pageSize: 3, maxScanPerTask: 3 });
+  const remain = (await db.collection(C.fortuneResults).get()).docs.map((d) => d.id).sort();
+  assert.deepEqual(remain, ["r_0", "r_1", "r_2", "r_3", "r_4"], "古い順に削除されていません");
+  step("取り残しの防止：対象外の記録に埋もれた期限切れの権利も、続きの位置から古い順に読んで2回目で処理。一周したら最初に戻る。すべてが対象の削除は古い順");
+
+  // ---- 6. 保存期間の境界（30日・7日・15分）は今までどおり ----
+  await resetProject();
+  const H = 3_600_000;
+  await db.collection(C.fortuneResults).doc("r_keep").set({ createdAt: new Date(t - 30 * DAY + H) });
+  await db.collection(C.fortuneResults).doc("r_del").set({ createdAt: new Date(t - 30 * DAY - H) });
+  await db.collection(C.checkouts).doc("c_keep").set({ status: "EXPIRED", createdAt: new Date(t - 7 * DAY + H), expiresAt: new Date(t - 7 * DAY + H) });
+  await db.collection(C.checkouts).doc("c_del").set({ status: "FAILED", createdAt: new Date(t - 7 * DAY - H), expiresAt: new Date(t - 7 * DAY - H) });
+  await db.collection(C.checkouts).doc("c_refunded").set({ status: "REFUNDED", providerPaymentId: "cs_test_r", createdAt: new Date(t - 8 * DAY), expiresAt: new Date(t - 8 * DAY) });
+  await db.collection(C.checkouts).doc("p_keep").set({ status: "PROCESSING", processingStartedAt: new Date(Date.now() - 14 * 60_000), createdAt: new Date(), expiresAt: new Date(t + H) });
+  await db.collection(C.checkouts).doc("p_fail").set({ status: "PROCESSING", processingStartedAt: new Date(Date.now() - 16 * 60_000), createdAt: new Date(), expiresAt: new Date(t + H) });
+  await db.collection(C.checkouts).doc("p_paid").set({ status: "PROCESSING", providerPaymentId: "cs_test_p", processingStartedAt: new Date(Date.now() - 60 * 60_000), createdAt: new Date(), expiresAt: new Date(t + H) });
+  await runMaintenance();
+  const ids = async (c: string) => (await db.collection(c).get()).docs.map((d) => d.id).sort();
+  assert.deepEqual(await ids(C.fortuneResults), ["r_keep"]);
+  assert.deepEqual(await ids(C.checkouts), ["c_keep", "c_refunded", "p_fail", "p_keep", "p_paid"]);
+  const st = async (id: string) => (await db.collection(C.checkouts).doc(id).get()).get("status");
+  assert.deepEqual([await st("c_refunded"), await st("p_keep"), await st("p_fail"), await st("p_paid")], ["REFUNDED", "PROCESSING", "FAILED", "PROCESSING"]);
+  step("保存期間・状態の区切り（占い結果30日・未決済の注文7日・課金不明の処理中15分）と、返金済み・決済済みの注文を残す条件は今までどおり");
+
+  // ---- 7. 競合の防止：読んだ後に Webhook の確定・利用で変わった記録は上書きしない（次の回に回す） ----
+  await resetProject();
+  for (let i = 0; i < 3; i++) await db.collection(C.checkouts).doc(`exp_${i}`).set({ status: "CREATED", createdAt: new Date(t - DAY), expiresAt: new Date(t - 60_000 * (i + 1)) });
+  await db.collection(C.fortuneSessions).doc("s_race").set({ status: "PAID", expiresAt: new Date(t - 60_000), transactionId: "tx_race" });
+  await db.collection(C.transactions).doc("tx_race").set({ fortuneStatus: "PAID", paymentStatus: "SUCCEEDED" });
+  await db.collection(C.fortuneSessions).doc("s_ok").set({ status: "PAID", expiresAt: new Date(t - 120_000), transactionId: "tx_ok" });
+  await db.collection(C.transactions).doc("tx_ok").set({ fortuneStatus: "PAID" });
+  // 書き込みの直前に、別の処理（Webhook の確定・占いの利用）が記録を変える
+  const batchProto = Object.getPrototypeOf(db.batch()) as { commit: () => Promise<unknown> };
+  const origCommit = batchProto.commit;
+  let raced = false;
+  // トランザクションの確定も内部でまとめての書き込みを使うので、権利のトランザクションが終わった後（注文を読んだ後）の最初の書き込みで変える
+  let txDone = 0;
+  batchProto.commit = async function (this: unknown) {
+    if (!raced && txDone >= 2 && pendingTx === 0) {
+      raced = true;
+      await db.collection(C.checkouts).doc("exp_0").update({ status: "SUCCEEDED", providerPaymentId: "cs_test_race", updatedAt: new Date() });
+    }
+    return origCommit.call(this);
+  };
+  const txProto = Object.getPrototypeOf(db) as { runTransaction: (...a: unknown[]) => Promise<unknown> };
+  const origTx = txProto.runTransaction;
+  let txRaced = false;
+  let pendingTx = 0;
+  txProto.runTransaction = async function (this: unknown, ...a: unknown[]) {
+    if (!txRaced) {
+      txRaced = true;
+      await db.collection(C.fortuneSessions).doc("s_race").update({ status: "USED" }); // 期限の直前に占いを使った
+    }
+    pendingTx++;
+    try {
+      return await origTx.apply(this, a);
+    } finally {
+      pendingTx--;
+      txDone++;
+    }
+  };
+  try {
+    m = await runMaintenance();
+  } finally {
+    batchProto.commit = origCommit;
+    txProto.runTransaction = origTx;
+  }
+  assert.ok(raced && txRaced, "競合を作れませんでした（検証の前提）");
+  assert.deepEqual([await st("exp_0"), (await db.collection(C.checkouts).doc("exp_0").get()).get("providerPaymentId")], ["SUCCEEDED", "cs_test_race"], "決済済みになった注文を EXPIRED で上書きしました");
+  assert.deepEqual([await st("exp_1"), await st("exp_2")], ["EXPIRED", "EXPIRED"], "競合していない注文が処理されていません");
+  assert.equal((await db.collection(C.fortuneSessions).doc("s_race").get()).get("status"), "USED", "利用済みになった権利を EXPIRED で上書きしました");
+  assert.equal((await db.collection(C.transactions).doc("tx_race").get()).get("fortuneStatus"), "PAID", "競合した権利の決済記録を変えました");
+  assert.equal((await db.collection(C.fortuneSessions).doc("s_ok").get()).get("status"), "EXPIRED");
+  assert.equal(m.conflictsSkipped, 2, JSON.stringify([m, (await db.collection(C.system).doc("maintenanceTasks").get()).get("lastTasks")]));
+  const lt = (await db.collection(C.system).doc("maintenanceTasks").get()).get("lastTasks") as { task: string; conflicts: number }[];
+  assert.deepEqual([lt.find((x) => x.task === "expireSessions")!.conflicts, lt.find((x) => x.task === "expireCheckouts")!.conflicts], [1, 1], "競合が想定の処理で数えられていません");
+  step("競合の防止：読んだ後に決済済みになった注文・利用された権利は上書きせず（conflictsSkipped=2）、ほかの記録は今までどおり処理");
+
+  // ---- 8. 中止の合図：中止の後は読み込み・書き込みを始めない ----
+  await resetProject();
+  await db.collection(C.fortuneResults).doc("r_old").set({ createdAt: new Date(t - 40 * DAY) });
+  await db.collection(C.fortuneSessions).doc("s_paid").set({ status: "PAID", expiresAt: new Date(t - 60_000), transactionId: "tx_a" });
+  const ac = new AbortController();
+  ac.abort();
+  m = await runMaintenance({}, Date.now, ac.signal);
+  assert.equal(m.truncatedTasks, 8);
+  assert.ok((await db.collection(C.fortuneResults).doc("r_old").get()).exists, "中止の後に削除しました");
+  assert.equal((await db.collection(C.fortuneSessions).doc("s_paid").get()).get("status"), "PAID", "中止の後に更新しました");
+  step("中止の合図の後は、読み込み・書き込みを始めない（すべての処理を打ち切りとして数える）");
 
   await resetProject();
   console.log("\nCRON PHASES E2E PASSED");

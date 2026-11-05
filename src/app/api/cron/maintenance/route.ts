@@ -40,6 +40,7 @@ type MaintenanceOutcome = { ok: true; result: Record<string, number> } | { ok: f
  *
  * 処理は段階に分けて順に実行する（src/lib/ops/cron-phases.ts）：メンテナンス → Webhook の通知の自動の復旧 → 決済記録の再確認の自動の回収。
  *  - 1つの段階が失敗・時間切れでも、次の段階は実行する（全体の締め切りを過ぎたら、新しい段階は始めない）
+ *  - 時間切れの段階には中止の合図を送る（メンテナンスはページ・書き込みのまとまりごと、復旧・回収は1件ごとに確かめ、新しい処理を始めない）
  *  - 定期処理全体は同時に1つだけ（Firestore のロック。所有者の ID・有効期限つき）。実行中なら何もせず 200（cron_busy）、
  *    ロックを取れない（Firestore の失敗）なら何もせず 503
  *  - 段階ごとの結果（成功・失敗・時間切れ・スキップ・実行時間）は system/cronRun に記録する。メンテナンスの結果は今までどおり system/maintenance
@@ -75,10 +76,12 @@ export async function GET(req: Request) {
       name: "maintenance",
       startNotAfterMs: MAINTENANCE_NOT_AFTER_MS,
       maxMs: MAINTENANCE_MAX_MS,
-      run: async () => {
+      run: async (signal) => {
         try {
-          const result = await runMaintenance();
+          const result = await runMaintenance(signal);
           maintenance = { ok: true, result };
+          // 中止の合図の後に終わった（時間切れ）：途中までの結果なので成功とは記録しない（下で時間切れの失敗として記録する）
+          if (signal.aborted) return;
           await recordMaintenanceRun({ ok: true, result }, startedAt);
           console.log("[cron] maintenance ok", { ...result, ms: Date.now() - startedAt.getTime() });
         } catch (e) {
@@ -95,11 +98,11 @@ export async function GET(req: Request) {
       name: "webhookRecovery",
       startNotAfterMs: WEBHOOK_RECOVERY_NOT_AFTER_MS,
       maxMs: WEBHOOK_RECOVERY_MAX_MS,
-      run: async () => {
+      run: async (signal) => {
         webhookRecovery = { status: "failed" };
         try {
           // Webhook の通知の自動の復旧（失敗してもメンテナンスの結果を変えない。結果はログと記録に残す）
-          webhookRecovery = await runCronWebhookRecovery();
+          webhookRecovery = await runCronWebhookRecovery(signal);
           console.log("[cron] webhook recovery", webhookRecovery);
         } catch (e) {
           console.error("[cron] webhook recovery failed", { errorCode: errorCodeOf(e) });
@@ -111,11 +114,11 @@ export async function GET(req: Request) {
       name: "recheckRecovery",
       startNotAfterMs: RECHECK_RECOVERY_NOT_AFTER_MS,
       maxMs: RECHECK_RECOVERY_MAX_MS,
-      run: async () => {
+      run: async (signal) => {
         recheckRecovery = { status: "failed" };
         try {
           // 決済記録の再確認の自動の回収（失敗してもメンテナンスの結果を変えない。結果はログと記録に残す）
-          recheckRecovery = await runCronRecheckRecovery(new Date(startedAt.getTime() + RECHECK_RECOVERY_NOT_AFTER_MS));
+          recheckRecovery = await runCronRecheckRecovery(new Date(startedAt.getTime() + RECHECK_RECOVERY_NOT_AFTER_MS), signal);
           console.log("[cron] recheck recovery", recheckRecovery);
         } catch (e) {
           console.error("[cron] recheck recovery failed", { errorCode: errorCodeOf(e) });
@@ -139,20 +142,22 @@ export async function GET(req: Request) {
     if (p.name === "recheckRecovery") recheckRecovery = r;
   }
 
-  // メンテナンスが時間切れ・スキップで結果が無い：失敗として記録する（時間切れの処理が後で終われば、その結果で上書きされる）
+  // メンテナンスの成否は段階の結果で決める（時間切れ・スキップは、途中で結果が出ていても失敗。成功とは記録しない）
   const m = maintenance as MaintenanceOutcome | null; // 段階の中で代入される（TypeScript の絞り込みは関数の中の代入を追わない）
-  if (!m) {
-    const mp = outcome.phases.find((p) => p.name === "maintenance");
-    await recordMaintenanceRun({ ok: false, errorCode: mp?.status === "timed_out" ? "PhaseTimeout" : `skipped_${mp?.reason ?? "unknown"}` }, startedAt);
+  const mp = outcome.phases.find((p) => p.name === "maintenance");
+  const maintenanceOk = mp?.status === "ok" && m?.ok === true;
+  if (mp?.status === "timed_out" || mp?.status === "skipped") {
+    await recordMaintenanceRun({ ok: false, errorCode: mp.status === "timed_out" ? "PhaseTimeout" : `skipped_${mp.reason ?? "unknown"}` }, startedAt);
   }
   const finishedAt = new Date();
   const status = cronRunStatusOf(outcome);
   console.log("[cron] run finished", { status, ms: finishedAt.getTime() - startedAt.getTime(), phases: outcome.phases.map((p) => `${p.name}:${p.status}${p.reason ? `(${p.reason})` : ""}:${p.durationMs}ms`) });
   if (ownerId) {
     await recordCronRunResult(ownerId, { status, startedAt, finishedAt, phases: outcome.phases });
-    // 時間切れの段階は裏で続いている可能性があるので、ロックは外さず期限（CRON_LOCK_TTL_MS）で外れるのを待つ
-    if (!outcome.timedOut) await releaseCronRunLock(ownerId);
+    // 中止の合図の後も止まらなかった段階は裏で続いている可能性があるので、ロックは外さず期限（CRON_LOCK_TTL_MS）で外れるのを待つ。
+    // 時間切れでも止まった（abortSettled）なら、続いている処理は無いので外す
+    if (!outcome.unsettled) await releaseCronRunLock(ownerId);
   }
-  if (!m || !m.ok) return NextResponse.json({ ok: false, error: "maintenance_failed" }, { status: 500 });
+  if (!maintenanceOk || !m || !m.ok) return NextResponse.json({ ok: false, error: "maintenance_failed" }, { status: 500 });
   return NextResponse.json({ ...m.result, webhookRecovery, recheckRecovery });
 }

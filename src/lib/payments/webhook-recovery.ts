@@ -103,7 +103,10 @@ export type WebhookRecoveryRunSummary = {
  * 定期処理が重なって起動しても、通知ごとの処理権で同じ通知は1つの処理だけが進む（結果の件数が分かれるだけ）。
  * 実行の結果（件数）は system/webhookRecovery に記録する（記録に失敗しても結果は返す）。
  */
-export async function runStripeWebhookRecovery(rt: StripeRuntime, opts: { source: "cron" | "admin"; now?: () => Date; deadlineMs?: number; maxEvents?: number; maxPages?: number; pageSize?: number } = { source: "cron" }): Promise<WebhookRecoveryRunSummary> {
+export async function runStripeWebhookRecovery(
+  rt: StripeRuntime,
+  opts: { source: "cron" | "admin"; now?: () => Date; deadlineMs?: number; maxEvents?: number; maxPages?: number; pageSize?: number; /** 中止の合図（定期処理の時間切れ）。1件ごとに確かめ、中止の後は新しい通知を始めない */ signal?: AbortSignal } = { source: "cron" },
+): Promise<WebhookRecoveryRunSummary> {
   const clock = opts.now ?? (() => new Date());
   const startedAt = clock();
   const results = Object.fromEntries(WEBHOOK_RECOVERY_RESULTS.map((k) => [k, 0])) as Record<WebhookRecoveryResult, number>;
@@ -124,7 +127,8 @@ export async function runStripeWebhookRecovery(rt: StripeRuntime, opts: { source
     summary.skipped = Object.values(sel.skipped).reduce((a, b) => a + b, 0);
     summary.overLimit = sel.overLimit;
     for (const [i, c] of sel.candidates.entries()) {
-      if (clock().getTime() - startedAt.getTime() >= (opts.deadlineMs ?? RECOVERY_DEADLINE_MS)) {
+      // 時間の区切り・中止の合図：始めた通知は最後まで処理し、新しい通知は始めない（残りは次回）
+      if (opts.signal?.aborted || clock().getTime() - startedAt.getTime() >= (opts.deadlineMs ?? RECOVERY_DEADLINE_MS)) {
         summary.deferred = sel.candidates.length - i;
         break;
       }
@@ -159,7 +163,7 @@ export type CronWebhookRecoveryResult =
  * 定期処理（/api/cron/maintenance）から呼ぶ自動の復旧。Stripe の接続（stripeRuntime）が使えない環境（今の Production は
  * テスト決済を拒否する）・Firestore ではない環境では何もしない。例外を投げない（定期処理のほかの結果を変えない）。
  */
-export async function runCronWebhookRecovery(): Promise<CronWebhookRecoveryResult> {
+export async function runCronWebhookRecovery(signal?: AbortSignal): Promise<CronWebhookRecoveryResult> {
   const { isFirestore } = await import("@/lib/data-provider");
   if (!isFirestore()) return { status: "skipped", reason: "not_firestore" };
   let rt: StripeRuntime;
@@ -168,7 +172,7 @@ export async function runCronWebhookRecovery(): Promise<CronWebhookRecoveryResul
   } catch {
     return { status: "skipped", reason: "stripe_unavailable" };
   }
-  const s = await runStripeWebhookRecovery(rt, { source: "cron" });
+  const s = await runStripeWebhookRecovery(rt, { source: "cron", ...(signal ? { signal } : {}) });
   const failed = s.results.failed + s.results.stripe_error + s.results.event_unavailable + s.results.event_mismatch;
   return { status: s.status, scanned: s.scanned, attempted: s.attempted, deferred: s.deferred, truncated: s.truncated, recovered: s.results.recovered + s.results.ignored_other_env, failed };
 }

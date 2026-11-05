@@ -1,5 +1,5 @@
 import "server-only";
-import { FieldValue, Timestamp, type QueryDocumentSnapshot } from "firebase-admin/firestore";
+import { FieldPath, FieldValue, Timestamp, type QueryDocumentSnapshot, type WriteBatch } from "firebase-admin/firestore";
 import type { FortuneTypeValue } from "@/lib/db/schema";
 import { sha256Hex } from "@/lib/security/crypto";
 import { C, fsdb, inBatches, mustDate, toDate } from "./admin";
@@ -34,101 +34,258 @@ export async function logTestFortune(storeCode: string, type: FortuneTypeValue, 
 /**
  * 定期メンテナンスの件数・時間の上限（後ろの段階の Webhook の復旧・再確認の時間を使い切らないように）。
  *  - 処理ごとに、最大 MAINTENANCE_MAX_SCAN_PER_TASK 件まで、MAINTENANCE_PAGE_SIZE 件ずつ読む
- *  - 開始から MAINTENANCE_DEADLINE_MS を過ぎたら、新しいページを読まずに終える（残りは次の定期処理で処理する）
- *  - 上限で打ち切った処理の数を truncatedTasks に返す（記録と応答に残る。0 なら全件を処理した）
+ *  - 処理は3つのまとまりに分け、この順に実行する。まとまりごとに、開始からの締め切りがある（前のまとまりが時間を使い切らない）
+ *      privacy      … 保存期間の削除（占い結果30日・未決済の注文7日・期限切れのログイン）。最優先で、開始から PRIVACY まで
+ *      state        … 状態の更新（課金不明の処理中15分・期限切れの占い権利・期限切れの注文）。開始から STATE まで
+ *      housekeeping … 不要な記録の削除（処理済みの通知90日・アクセス回数1日）。開始から DEADLINE まで
+ *  - 中止の合図（定期処理の時間切れ）があれば、次のページ・次の書き込みを始めない（書き込み中のまとまりは壊さない）
  */
 export const MAINTENANCE_PAGE_SIZE = 300;
 export const MAINTENANCE_MAX_SCAN_PER_TASK = 3000;
+/** 条件で絞る処理で、最初に新しい順に読む件数（直近に対象になったものを先に処理する。残りは続きの位置から古い順に読む） */
+export const MAINTENANCE_HEAD_SCAN_PER_TASK = 1000;
+export const MAINTENANCE_PRIVACY_UNTIL_MS = 30 * 1000;
+export const MAINTENANCE_STATE_UNTIL_MS = 50 * 1000;
 export const MAINTENANCE_DEADLINE_MS = 60 * 1000;
 
-export type MaintenanceLimits = { pageSize: number; maxScanPerTask: number; deadlineMs: number };
+export type MaintenanceLimits = { pageSize: number; maxScanPerTask: number; headScanPerTask: number; privacyUntilMs: number; stateUntilMs: number; deadlineMs: number };
+
+/** 処理ごとの結果（system/maintenanceTasks に記録。件数・打ち切り・残りの有無だけ） */
+export type MaintenanceTaskStat = { task: string; scanned: number; processed: number; conflicts: number; truncated: boolean; hasMore: boolean };
+
+const cursorsRef = () => fsdb().collection(C.system).doc("maintenanceCursors");
+const tasksRef = () => fsdb().collection(C.system).doc("maintenanceTasks");
+
+/** Firestore の事前条件の不一致（読んだ後に更新・削除された）か */
+const isPreconditionFailure = (e: unknown) => {
+  const code = (e as { code?: unknown })?.code;
+  return code === 9 || code === 5 || code === "failed-precondition" || code === "not-found";
+};
 
 /**
- * 定期メンテナンス（期限切れ処理・不要データの削除）。PostgreSQL 版と同じ内容（対象の条件は変えない）。
- * 読み込みは「日時の項目 < 区切り」を新しい順に（単一の項目のインデックスだけで動く。複合インデックスは不要）。
- * 新しい順なので、件数・時間の上限で打ち切っても、直近に期限が来たもの（毎日の定期処理で新しく対象になるもの）から処理する。
+ * 定期メンテナンス（期限切れ処理・不要データの削除）。PostgreSQL 版と同じ内容（対象の条件・保存期間は変えない）。
+ *
+ * 取り残しの防止：
+ *  - すべてが対象の削除（占い結果・ログイン・アクセス回数）は古い順に読む。消した分は次から読まないので、上限で打ち切っても次の回に続きを処理する
+ *  - 条件で絞る処理（決済済みの注文・使用済みの権利など、対象外の記録が残る）は、①新しい順に一定の件数（直近に対象になったもの）と、
+ *    ②続きの位置（system/maintenanceCursors）から古い順に残りの件数を読む。②は最後まで読んだら最初に戻るので、すべての記録をいずれ読む
+ * 競合の防止：
+ *  - 状態の更新・注文の削除は、読んだときの更新の時刻を事前条件にする（読んだ後に Webhook の確定・返金などで変わった記録は書き込まない）。
+ *    期限切れの占い権利は、トランザクションの中で状態（PAID・期限）を確かめ直してから更新する。競合した記録は次の回に回す（conflicts に数える）
+ * 単一の項目のインデックスだけで動く（複合インデックス・TTL の設定は不要）。
  */
-export async function runMaintenance(limits: Partial<MaintenanceLimits> = {}, clock: () => number = Date.now) {
-  const L: MaintenanceLimits = { pageSize: MAINTENANCE_PAGE_SIZE, maxScanPerTask: MAINTENANCE_MAX_SCAN_PER_TASK, deadlineMs: MAINTENANCE_DEADLINE_MS, ...limits };
+export async function runMaintenance(limits: Partial<MaintenanceLimits> = {}, clock: () => number = Date.now, signal?: AbortSignal) {
+  const L: MaintenanceLimits = {
+    pageSize: MAINTENANCE_PAGE_SIZE,
+    maxScanPerTask: MAINTENANCE_MAX_SCAN_PER_TASK,
+    headScanPerTask: MAINTENANCE_HEAD_SCAN_PER_TASK,
+    privacyUntilMs: MAINTENANCE_PRIVACY_UNTIL_MS,
+    stateUntilMs: MAINTENANCE_STATE_UNTIL_MS,
+    deadlineMs: MAINTENANCE_DEADLINE_MS,
+    ...limits,
+  };
   const db = fsdb();
   const now = new Date();
   const t0 = clock();
-  const timeUp = () => clock() - t0 >= L.deadlineMs;
   const ts = (d: Date) => Timestamp.fromDate(d);
-  let truncatedTasks = 0;
+  let untilMs = L.privacyUntilMs;
+  const stop = () => signal?.aborted === true || clock() - t0 >= Math.min(untilMs, L.deadlineMs);
+  const stats: MaintenanceTaskStat[] = [];
+  const savedCursors = ((await cursorsRef().get()).data() ?? {}) as Record<string, { at?: Timestamp; id?: string } | null>;
+  const nextCursors: Record<string, { at: Timestamp; id: string } | null> = {};
 
-  /** collection の field < cut を新しい順にページで読み、onPage で処理する。上限で打ち切ったら truncatedTasks を数える */
-  async function scan(collection: string, field: string, cut: Date, onPage: (docs: QueryDocumentSnapshot[]) => Promise<void>): Promise<void> {
-    let cursor: QueryDocumentSnapshot | null = null;
+  /** 1つの処理を、上限・締め切り・中止の合図の中で読む。onPage は処理した件数と競合の件数を返す */
+  type PageFn = (docs: QueryDocumentSnapshot[]) => Promise<{ processed: number; conflicts: number }>;
+  async function scanRange(
+    st: MaintenanceTaskStat,
+    o: { collection: string; field: string; cut: Date; dir: "asc" | "desc"; cap: number; after?: { at: Timestamp; id: string } | null; onPage: PageFn },
+  ): Promise<{ reachedEnd: boolean; last: QueryDocumentSnapshot | null }> {
     let scanned = 0;
+    let last: QueryDocumentSnapshot | null = null;
     for (;;) {
-      if (timeUp() || scanned >= L.maxScanPerTask) {
-        truncatedTasks++;
-        return;
+      if (stop() || scanned >= o.cap) {
+        st.truncated = true;
+        return { reachedEnd: false, last };
       }
-      let q = db.collection(collection).where(field, "<", ts(cut)).orderBy(field, "desc").limit(Math.min(L.pageSize, L.maxScanPerTask - scanned));
-      if (cursor) q = q.startAfter(cursor);
+      let q = db.collection(o.collection).where(o.field, "<", ts(o.cut)).orderBy(o.field, o.dir).orderBy(FieldPath.documentId(), o.dir).limit(Math.min(L.pageSize, o.cap - scanned));
+      if (last) q = q.startAfter(last);
+      else if (o.after?.at && o.after.id) q = q.startAfter(o.after.at, o.after.id);
       const snap = await q.get();
-      if (snap.empty) return;
-      await onPage(snap.docs);
+      if (snap.empty) return { reachedEnd: true, last };
+      const r = await o.onPage(snap.docs);
+      st.scanned += snap.size;
+      st.processed += r.processed;
+      st.conflicts += r.conflicts;
       scanned += snap.size;
-      cursor = snap.docs[snap.docs.length - 1];
-      if (snap.size < L.pageSize && scanned < L.maxScanPerTask) return;
+      last = snap.docs[snap.docs.length - 1];
+      if (snap.size < Math.min(L.pageSize, o.cap - (scanned - snap.size))) return { reachedEnd: true, last };
     }
   }
 
-  // 期限切れの占い権利
-  let expiredSessions = 0;
-  await scan(C.fortuneSessions, "expiresAt", now, async (docs) => {
-    const sessions = docs.filter((d) => d.get("status") === "PAID");
-    expiredSessions += sessions.length;
-    await inBatches(sessions, (b, d) => {
-      b.update(d.ref, { status: "EXPIRED" });
-      b.update(db.collection(C.transactions).doc(String(d.get("transactionId"))), { fortuneStatus: "EXPIRED" });
-    });
-  });
-
-  // 期限切れの注文（未払いの CREATED・FAILED だけ。返金済み・チャージバックの REFUNDED は決済記録があるので上書きしない）
-  let expiredCheckouts = 0;
-  await scan(C.checkouts, "expiresAt", now, async (docs) => {
-    const expired = docs.filter((d) => ["CREATED", "FAILED"].includes(d.get("status")));
-    expiredCheckouts += expired.length;
-    await inBatches(expired, (b, d) => b.update(d.ref, { status: "EXPIRED", updatedAt: FieldValue.serverTimestamp() }));
-  });
-
-  // 課金されたか不明なまま放置された処理中（Charge IDなし）。処理中の注文は少ないので、上限の件数まで1回で読む
-  const staleCut = new Date(now.getTime() - 15 * 60 * 1000);
-  if (timeUp()) truncatedTasks++;
-  else {
-    const processing = await db.collection(C.checkouts).where("status", "==", "PROCESSING").limit(L.maxScanPerTask).get();
-    if (processing.size >= L.maxScanPerTask) truncatedTasks++;
-    const stale = processing.docs.filter((d) => !d.get("providerPaymentId") && mustDate(d.get("processingStartedAt")) < staleCut);
-    await inBatches(stale, (b, d) => b.update(d.ref, { status: "FAILED", failureCode: "stale_processing", updatedAt: FieldValue.serverTimestamp() }));
+  /** すべてが対象の削除：古い順。打ち切ったら残りがある（次の回は残りの古いものから） */
+  async function allMatch(task: string, collection: string, field: string, cut: Date, onPage: PageFn) {
+    const st: MaintenanceTaskStat = { task, scanned: 0, processed: 0, conflicts: 0, truncated: false, hasMore: false };
+    stats.push(st);
+    const r = await scanRange(st, { collection, field, cut, dir: "asc", cap: L.maxScanPerTask, onPage });
+    st.hasMore = !r.reachedEnd;
+    return st;
   }
 
-  // プライバシー: 結果本文は30日、未決済の注文は7日で削除
-  let purgedResults = 0;
-  await scan(C.fortuneResults, "createdAt", new Date(now.getTime() - 30 * 86_400_000), async (docs) => {
-    purgedResults += docs.length;
-    await inBatches(docs, (b, d) => b.delete(d.ref));
-  });
-  let purgedCheckouts = 0;
-  await scan(C.checkouts, "createdAt", new Date(now.getTime() - 7 * 86_400_000), async (docs) => {
-    const old = docs.filter((d) => ["EXPIRED", "FAILED", "CREATED"].includes(d.get("status")) && !d.get("providerPaymentId"));
-    purgedCheckouts += old.length;
-    await inBatches(old, (b, d) => b.delete(d.ref));
-  });
+  /** 条件で絞る処理：新しい順に一定の件数 → 続きの位置から古い順に残りの件数（最後まで読んだら次の回は最初から） */
+  async function filtered(task: string, collection: string, field: string, cut: Date, onPage: PageFn) {
+    const st: MaintenanceTaskStat = { task, scanned: 0, processed: 0, conflicts: 0, truncated: false, hasMore: false };
+    stats.push(st);
+    const headCap = Math.min(L.headScanPerTask, L.maxScanPerTask);
+    const head = await scanRange(st, { collection, field, cut, dir: "desc", cap: headCap, onPage });
+    if (head.reachedEnd) {
+      // 新しい順で最後まで読めた：対象の範囲はすべて読んだ。続きの位置は最初に戻す
+      st.truncated = false;
+      nextCursors[task] = null;
+      return st;
+    }
+    st.truncated = false;
+    const saved = savedCursors[task];
+    const after = saved?.at && saved.id ? { at: saved.at, id: saved.id } : null;
+    const sweep = await scanRange(st, { collection, field, cut, dir: "asc", cap: L.maxScanPerTask - headCap, after, onPage });
+    if (sweep.reachedEnd) nextCursors[task] = null; // 最後まで読んだ：次の回は最初から
+    else if (sweep.last) nextCursors[task] = { at: sweep.last.get(field) as Timestamp, id: sweep.last.id };
+    else nextCursors[task] = after; // 何も読めなかった（締め切り）：位置はそのまま
+    st.hasMore = true; // 条件に合わない記録が残る範囲：一周するまで、読んでいない記録がある
+    return st;
+  }
 
-  await scan(C.authSessions, "expiresAt", now, (docs) => inBatches(docs, (b, d) => b.delete(d.ref)));
-  await scan(C.webhookEvents, "createdAt", new Date(now.getTime() - 90 * 86_400_000), (docs) =>
-    inBatches(
-      docs.filter((d) => d.get("processedAt")),
-      (b, d) => b.delete(d.ref),
+  /** 読んだときの更新の時刻を事前条件にして書き込む（変わっていた記録は書き込まない） */
+  async function writeIfUnchanged(docs: QueryDocumentSnapshot[], op: (b: WriteBatch, d: QueryDocumentSnapshot) => void, single: (d: QueryDocumentSnapshot) => Promise<unknown>) {
+    let processed = 0;
+    let conflicts = 0;
+    for (let i = 0; i < docs.length; i += 400) {
+      if (signal?.aborted) break; // 中止：次のまとまりを始めない（書き込み済みのまとまりはそのまま）
+      const chunk = docs.slice(i, i + 400);
+      const b = db.batch();
+      for (const d of chunk) op(b, d);
+      try {
+        await b.commit();
+        processed += chunk.length;
+      } catch (e) {
+        if (!isPreconditionFailure(e)) throw e;
+        // まとまりの中に変わった記録がある：1件ずつ書き込み、変わったものだけを残す
+        for (const d of chunk) {
+          try {
+            await single(d);
+            processed++;
+          } catch (e2) {
+            if (!isPreconditionFailure(e2)) throw e2;
+            conflicts++;
+          }
+        }
+      }
+    }
+    return { processed, conflicts };
+  }
+  const deleteIfUnchanged = (docs: QueryDocumentSnapshot[]) =>
+    writeIfUnchanged(
+      docs,
+      (b, d) => b.delete(d.ref, { lastUpdateTime: d.updateTime }),
+      (d) => d.ref.delete({ lastUpdateTime: d.updateTime }),
+    );
+  const updateIfUnchanged = (docs: QueryDocumentSnapshot[], data: Record<string, unknown>) =>
+    writeIfUnchanged(
+      docs,
+      (b, d) => b.update(d.ref, data, { lastUpdateTime: d.updateTime }),
+      (d) => d.ref.update(data, { lastUpdateTime: d.updateTime }),
+    );
+  const deleteAll = async (docs: QueryDocumentSnapshot[]) => {
+    await inBatches(docs, (b, d) => b.delete(d.ref));
+    return { processed: docs.length, conflicts: 0 };
+  };
+
+  // ===== privacy：保存期間の削除（最優先） =====
+  // 占い結果の本文は30日
+  const results = await allMatch("purgeResults", C.fortuneResults, "createdAt", new Date(now.getTime() - 30 * 86_400_000), deleteAll);
+  // 未決済の注文は7日（決済済み・処理中のものは残す。読んだ後に決済が紐付いた注文は消さない）
+  const oldCheckouts = await filtered("purgeCheckouts", C.checkouts, "createdAt", new Date(now.getTime() - 7 * 86_400_000), (docs) =>
+    deleteIfUnchanged(docs.filter((d) => ["EXPIRED", "FAILED", "CREATED"].includes(d.get("status")) && !d.get("providerPaymentId"))),
+  );
+  // 期限切れのログイン
+  await allMatch("purgeAuthSessions", C.authSessions, "expiresAt", now, deleteAll);
+
+  // ===== state：状態の更新 =====
+  untilMs = L.stateUntilMs;
+  // 課金されたか不明なまま放置された処理中（Charge IDなし）。処理中の注文は少ないので、上限の件数まで1回で読む
+  {
+    const st: MaintenanceTaskStat = { task: "failStaleProcessing", scanned: 0, processed: 0, conflicts: 0, truncated: false, hasMore: false };
+    stats.push(st);
+    if (stop()) st.truncated = st.hasMore = true;
+    else {
+      const staleCut = new Date(now.getTime() - 15 * 60 * 1000);
+      const processing = await db.collection(C.checkouts).where("status", "==", "PROCESSING").limit(L.maxScanPerTask).get();
+      st.scanned = processing.size;
+      if (processing.size >= L.maxScanPerTask) st.truncated = st.hasMore = true;
+      const stale = processing.docs.filter((d) => !d.get("providerPaymentId") && mustDate(d.get("processingStartedAt")) < staleCut);
+      const r = await updateIfUnchanged(stale, { status: "FAILED", failureCode: "stale_processing", updatedAt: FieldValue.serverTimestamp() });
+      st.processed = r.processed;
+      st.conflicts = r.conflicts;
+    }
+  }
+  // 期限切れの占い権利（PAID だけ）。トランザクションの中で状態と期限を確かめ直す（返金で止めた権利・使用済みの権利は変えない）
+  const sessions = await filtered("expireSessions", C.fortuneSessions, "expiresAt", now, async (docs) => {
+    let processed = 0;
+    let conflicts = 0;
+    const cands = docs.filter((d) => d.get("status") === "PAID");
+    for (let i = 0; i < cands.length; i += 10) {
+      if (signal?.aborted) break;
+      const rs = await Promise.all(
+        cands.slice(i, i + 10).map((d) =>
+          db.runTransaction(async (tx) => {
+            const cur = await tx.get(d.ref);
+            const exp = cur.exists ? toDate(cur.get("expiresAt")) : null;
+            if (!cur.exists || cur.get("status") !== "PAID" || !exp || exp >= now) return false;
+            const txRef = db.collection(C.transactions).doc(String(cur.get("transactionId")));
+            const t = await tx.get(txRef);
+            tx.update(d.ref, { status: "EXPIRED" });
+            if (t.exists) tx.update(txRef, { fortuneStatus: "EXPIRED" });
+            return true;
+          }),
+        ),
+      );
+      for (const ok of rs) {
+        if (ok) processed++;
+        else conflicts++;
+      }
+    }
+    return { processed, conflicts };
+  });
+  // 期限切れの注文（未払いの CREATED・FAILED だけ。返金済み・チャージバックの REFUNDED は決済記録があるので上書きしない）
+  const checkouts = await filtered("expireCheckouts", C.checkouts, "expiresAt", now, (docs) =>
+    updateIfUnchanged(
+      docs.filter((d) => ["CREATED", "FAILED"].includes(d.get("status"))),
+      { status: "EXPIRED", updatedAt: FieldValue.serverTimestamp() },
     ),
   );
-  await scan(C.rateLimits, "windowStart", new Date(now.getTime() - 86_400_000), (docs) => inBatches(docs, (b, d) => b.delete(d.ref)));
 
-  return { expiredSessions, expiredCheckouts, purgedResults, purgedCheckouts, truncatedTasks };
+  // ===== housekeeping：不要な記録の削除 =====
+  untilMs = L.deadlineMs;
+  await filtered("purgeWebhookEvents", C.webhookEvents, "createdAt", new Date(now.getTime() - 90 * 86_400_000), (docs) => deleteIfUnchanged(docs.filter((d) => d.get("processedAt"))));
+  await allMatch("purgeRateLimits", C.rateLimits, "windowStart", new Date(now.getTime() - 86_400_000), deleteAll);
+
+  // 続きの位置と、処理ごとの結果を記録する（失敗してもメンテナンスの結果は変えない）
+  try {
+    const merged = { ...savedCursors, ...nextCursors };
+    await cursorsRef().set({ ...merged, updatedAt: FieldValue.serverTimestamp() });
+    await tasksRef().set({ lastTasks: stats, lastRunAt: new Date(), updatedAt: FieldValue.serverTimestamp() });
+  } catch (e) {
+    console.error("[maintenance] failed to record cursors or task stats", { error: (e as Error)?.name });
+  }
+
+  return {
+    expiredSessions: sessions.processed,
+    expiredCheckouts: checkouts.processed,
+    purgedResults: results.processed,
+    purgedCheckouts: oldCheckouts.processed,
+    truncatedTasks: stats.filter((t) => t.truncated).length,
+    tasksWithRemaining: stats.filter((t) => t.hasMore && t.truncated).length,
+    conflictsSkipped: stats.reduce((a, t) => a + t.conflicts, 0),
+  };
 }
 
 /** 接続確認（/api/health）。読み取り1回のみ */

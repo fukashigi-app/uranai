@@ -55,7 +55,17 @@ const errorNameOf = (e: unknown) => {
 export async function runPendingRecheckRecovery(
   rt: Pick<StripeRuntime, "mode">,
   deps: RecheckRecoveryDeps,
-  opts: { now?: () => Date; deadlineMs?: number; notAfter?: Date; maxItems?: number; pageSize?: number; maxPages?: number; isSessionId: (v: unknown) => boolean },
+  opts: {
+    now?: () => Date;
+    deadlineMs?: number;
+    notAfter?: Date;
+    maxItems?: number;
+    pageSize?: number;
+    maxPages?: number;
+    isSessionId: (v: unknown) => boolean;
+    /** 中止の合図（定期処理の時間切れ）。1件ごとに確かめ、中止の後は新しい回収を始めない（時間の区切りと同じ扱い。残りは次回） */
+    signal?: AbortSignal;
+  },
 ): Promise<RecheckRecoveryRunSummary> {
   const clock = opts.now ?? (() => new Date());
   const startedAt = clock();
@@ -68,7 +78,7 @@ export async function runPendingRecheckRecovery(
   const skip = (reason: string) => void (summary.skipped[reason] = (summary.skipped[reason] ?? 0) + 1);
   const timeUp = () => {
     const t = clock();
-    return t.getTime() - startedAt.getTime() >= deadlineMs || (opts.notAfter !== undefined && t.getTime() >= opts.notAfter.getTime());
+    return opts.signal?.aborted === true || t.getTime() - startedAt.getTime() >= deadlineMs || (opts.notAfter !== undefined && t.getTime() >= opts.notAfter.getTime());
   };
 
   const startCursor = await deps.readCursor().catch(() => null);
@@ -157,7 +167,7 @@ export type CronRecheckRecoveryResult =
   | { status: RecheckRecoveryRunSummary["status"]; scanned: number; attempted: number; done: number; pending: number; rejected: number; error: number; deferred: boolean };
 
 /** 定期処理から呼ぶ（Stripe との接続が無い環境では何もしない）。notAfter を過ぎたら新しい回収を始めない */
-export async function runCronRecheckRecovery(notAfter?: Date): Promise<CronRecheckRecoveryResult> {
+export async function runCronRecheckRecovery(notAfter?: Date, signal?: AbortSignal): Promise<CronRecheckRecoveryResult> {
   const { isFirestore } = await import("@/lib/data-provider");
   if (!isFirestore()) return { status: "skipped", reason: "not_firestore" };
   const { stripeRuntime, isStripeSessionId } = await import("./stripe-checkout");
@@ -167,7 +177,7 @@ export async function runCronRecheckRecovery(notAfter?: Date): Promise<CronReche
   } catch {
     return { status: "skipped", reason: "stripe_unavailable" };
   }
-  const s = await runPendingRecheckRecovery(rt, await defaultRecheckRecoveryDeps(rt), { notAfter, isSessionId: (v) => isStripeSessionId(v, rt.mode) });
+  const s = await runPendingRecheckRecovery(rt, await defaultRecheckRecoveryDeps(rt), { notAfter, isSessionId: (v) => isStripeSessionId(v, rt.mode), ...(signal ? { signal } : {}) });
   return { status: s.status, scanned: s.scanned, attempted: s.attempted, done: s.results.done, pending: s.results.pending, rejected: s.results.rejected, error: s.results.error, deferred: s.deferred };
 }
 
