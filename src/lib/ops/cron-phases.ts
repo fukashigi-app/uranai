@@ -14,7 +14,11 @@
  */
 
 export type CronPhaseStatus = "ok" | "failed" | "timed_out" | "skipped";
-export type CronPhaseSkipReason = "deadline" | "lock_lost";
+/**
+ * スキップの理由：deadline … 開始してよい時刻・全体の締め切りを過ぎた／lock_lost … 定期処理のロックを失った／
+ * busy … 段階が自分で開始しなかった（同じ処理が別の場所で実行中）／unsupported … この構成では実行できない
+ */
+export type CronPhaseSkipReason = "deadline" | "lock_lost" | "busy" | "unsupported";
 
 export type CronPhaseRecord = {
   name: string;
@@ -36,8 +40,11 @@ export type CronPhase = {
   /** この段階を待つ上限（全体の締め切りまでの残りの方が短ければ、そちらを使う） */
   maxMs: number;
   /** signal … 時間切れのときに中止の合図が送られる。処理はページ・1件ごとに確かめ、中止の後は新しい処理を始めない */
-  run: (signal: AbortSignal) => Promise<void>;
+  run: (signal: AbortSignal) => Promise<void | CronPhaseSelfSkip>;
 };
+
+/** 段階が自分で開始しなかったことを返す値（正常の実行・失敗と区別して skipped として記録する） */
+export type CronPhaseSelfSkip = { skipped: Extract<CronPhaseSkipReason, "busy" | "unsupported"> };
 
 /** 中止の合図を送った後、段階が止まるのを待つ上限（全体の締め切りまでの残りの方が短ければ、そちらを使う） */
 export const ABORT_GRACE_MS = 10 * 1000;
@@ -111,13 +118,15 @@ export async function runCronPhases(
     const limitMs = Math.max(0, Math.min(phase.maxMs, opts.hardDeadlineMs - (t0 - opts.startedAt)));
     const controller = new AbortController();
     let settled = false;
-    const work = Promise.resolve()
+    const work: Promise<void | CronPhaseSelfSkip> = Promise.resolve()
       .then(() => phase.run(controller.signal))
       .finally(() => void (settled = true));
     work.catch(() => undefined); // 待つのをやめた後の失敗を、未処理の例外にしない
     const base = { name: phase.name, reason: null, startedAtMs: t0 - opts.startedAt };
     const r = await waitFor(work, limitMs);
-    if (r.kind === "ok") records.push({ ...base, status: "ok", errorCode: null, durationMs: clock() - t0, abortSettled: null });
+    if (r.kind === "ok" && r.value && typeof r.value === "object" && "skipped" in r.value) {
+      records.push({ ...base, status: "skipped", reason: r.value.skipped, errorCode: null, durationMs: clock() - t0, abortSettled: null });
+    } else if (r.kind === "ok") records.push({ ...base, status: "ok", errorCode: null, durationMs: clock() - t0, abortSettled: null });
     else if (r.kind === "error") records.push({ ...base, status: "failed", errorCode: opts.errorCodeOf(r.error), durationMs: clock() - t0, abortSettled: null });
     else {
       // 時間切れ：中止の合図を送り、止まるのを少しだけ待つ（全体の締め切りは超えない）。止まっても timed_out のまま
@@ -133,12 +142,12 @@ export async function runCronPhases(
 }
 
 /** work を最大 ms だけ待つ（待つのをやめても work は止めない） */
-async function waitFor(work: Promise<void>, ms: number): Promise<{ kind: "ok" } | { kind: "error"; error: unknown } | { kind: "timeout" }> {
+async function waitFor<T>(work: Promise<T>, ms: number): Promise<{ kind: "ok"; value: T } | { kind: "error"; error: unknown } | { kind: "timeout" }> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       work.then(
-        () => ({ kind: "ok" as const }),
+        (value) => ({ kind: "ok" as const, value }),
         (error: unknown) => ({ kind: "error" as const, error }),
       ),
       new Promise<{ kind: "timeout" }>((ok) => {

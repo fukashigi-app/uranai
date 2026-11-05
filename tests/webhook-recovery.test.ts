@@ -106,6 +106,7 @@ describe("定期処理（/api/cron/maintenance）の自動の復旧", () => {
     vi.doUnmock("@/lib/services/maintenance");
     vi.doUnmock("@/lib/services/maintenance-status");
     vi.doUnmock("@/lib/services/cron-run");
+    vi.doUnmock("@/lib/payments/payment-monitor");
   });
   const load = async (maintenanceFails = false) => {
     vi.resetModules();
@@ -116,6 +117,8 @@ describe("定期処理（/api/cron/maintenance）の自動の復旧", () => {
       releaseCronRunLock: async () => {},
       recordCronRunResult: async () => {},
     }));
+    // 決済監視の点検（Firestore）は模擬。点検の段階は tests/cron-phases.test.ts と E2E で確かめる
+    vi.doMock("@/lib/payments/payment-monitor", () => ({ runPaymentMonitor: async () => ({ started: true, runId: "r", report: { result: "ok", found: 0, unchecked: [], checks: {}, stripeMode: null, openReviews: 0 } }) }));
     const recovery = vi.fn(async () => ({ status: "completed", scanned: 1, attempted: 1, deferred: 0, truncated: false, recovered: 1, failed: 0 }));
     vi.doMock("@/lib/payments/webhook-recovery", () => ({ runCronWebhookRecovery: recovery }));
     vi.doMock("@/lib/services/maintenance", () => ({ runMaintenance: async () => (maintenanceFails ? Promise.reject(new Error("x")) : { expiredSessions: 0, expiredCheckouts: 0, purgedResults: 0, purgedCheckouts: 0 }) }));

@@ -82,7 +82,21 @@ export async function releaseCronLock(ownerId: string): Promise<boolean> {
   });
 }
 
-export type CronRunRecord = { status: CronRunStatus; startedAt: Date; finishedAt: Date; phases: CronPhaseRecord[] };
+/**
+ * 決済監視の段階の要約（件数・状態・時刻だけ。決済の ID・店舗・個人情報・確認できなかった項目の文面は含めない）。
+ * status … ok・issues・partial（点検の結果）／failed（点検の失敗）／busy（別の点検が実行中）／lock_failed（点検のロックを取れない）／
+ *          skipped_time（時間不足で始めなかった）／skipped_lock_lost（定期処理のロックを失った）／timed_out（待つ上限を過ぎた）／unsupported
+ */
+export type CronPaymentMonitorSummary = {
+  status: string;
+  found: number | null;
+  uncheckedCount: number | null;
+  openReviews: number | null;
+  stripeMode: "test" | "live" | null;
+  finishedAt: Date | null;
+};
+
+export type CronRunRecord = { status: CronRunStatus; startedAt: Date; finishedAt: Date; phases: CronPhaseRecord[]; paymentMonitor?: CronPaymentMonitorSummary };
 
 /** 終了の記録：最後に開始したのが自分のときだけ（古い定期処理が新しい記録を上書きしない） */
 export async function recordCronRun(ownerId: string, r: CronRunRecord): Promise<boolean> {
@@ -100,6 +114,7 @@ export async function recordCronRun(ownerId: string, r: CronRunRecord): Promise<
         lastDurationMs: r.finishedAt.getTime() - r.startedAt.getTime(),
         lastStatus: r.status,
         lastPhases: r.phases.map((p) => ({ ...p, errorCode: p.errorCode ? p.errorCode.slice(0, 80) : null })),
+        ...(r.paymentMonitor ? { lastPaymentMonitor: { ...r.paymentMonitor, status: r.paymentMonitor.status.slice(0, 40) } } : {}),
         updatedAt: FieldValue.serverTimestamp(),
       },
       { merge: true },

@@ -185,6 +185,10 @@ describe("定期処理（/api/cron/maintenance）：段階・ロック", () => {
     webhookFails: false,
     /** hang … 中止の合図を無視して止まらない・cooperative … 合図を受けて途中の結果を返す */
     maintMode: "normal" as "normal" | "hang" | "cooperative",
+    /** 決済監視：ok … 異常なし・issues … 異常2件・failed … 点検の失敗・throws … 例外・busy … 実行中・lock_failed … ロックを取れない・hang … 止まらない */
+    monitorMode: "ok" as "ok" | "issues" | "failed" | "throws" | "busy" | "lock_failed" | "hang",
+    firestore: true,
+    webhookHang: false,
   };
   let logs: string[];
   const load = async () => {
@@ -211,33 +215,61 @@ describe("定期処理（/api/cron/maintenance）：段階・ロック", () => {
     vi.doMock("@/lib/payments/webhook-recovery", () => ({
       runCronWebhookRecovery: async () => {
         st.calls.push("webhook");
+        if (st.webhookHang) return new Promise(() => undefined);
         if (st.webhookFails) throw Object.assign(new Error("x"), { name: "SimulatedRecoveryError" });
         return { status: "completed", recovered: 0 };
       },
     }));
     vi.doMock("@/lib/payments/recheck-recovery", () => ({ runCronRecheckRecovery: async () => (st.calls.push("recheck"), { status: "completed", done: 0 }) }));
+    vi.doMock("@/lib/data-provider", async (orig) => ({ ...(await orig<object>()), isFirestore: () => st.firestore }));
+    vi.doMock("@/lib/payments/payment-monitor", () => ({
+      runPaymentMonitor: async (opts: { source?: string }) => {
+        st.calls.push(`monitor:${opts.source}`);
+        const report = (result: string, found: number) => ({ started: true, runId: "run-1", report: { result, found, unchecked: result === "ok" || result === "issues" ? [] : ["Stripe での支払いの照合"], checks: {}, stripeMode: "test", openReviews: 0 } });
+        switch (st.monitorMode) {
+          case "ok":
+            return report("ok", 0);
+          case "issues":
+            return report("issues", 2);
+          case "failed":
+            return report("failed", 0);
+          case "throws":
+            throw Object.assign(new Error("monitor exploded"), { name: "SimulatedMonitorError" });
+          case "busy":
+            return { started: false, reason: "busy", heldUntil: new Date(), source: "admin" };
+          case "lock_failed":
+            return { started: false, reason: "lock_failed" };
+          case "hang":
+            return new Promise(() => undefined);
+        }
+      },
+    }));
     const { GET } = await import("@/app/api/cron/maintenance/route");
     return () => GET(new Request("http://localhost/api/cron/maintenance", { headers: { authorization: `Bearer ${SECRET}` } }));
   };
   beforeEach(() => {
     vi.stubEnv("SESSION_SECRET", "unit-test-session-secret-Qx7v2Lr9Tm4Kp8Zw");
     vi.stubEnv("CRON_SECRET", SECRET);
-    Object.assign(st, { lock: { status: "acquired", ownerId: "owner-1", tookOverExpired: false }, owner: true, released: [], runs: [], maint: [], calls: [], maintFails: false, webhookFails: false, maintMode: "normal" });
+    Object.assign(st, { lock: { status: "acquired", ownerId: "owner-1", tookOverExpired: false }, owner: true, released: [], runs: [], maint: [], calls: [], maintFails: false, webhookFails: false, maintMode: "normal", monitorMode: "ok", firestore: true, webhookHang: false });
     logs = [];
     for (const k of ["log", "warn", "error"] as const) vi.spyOn(console, k).mockImplementation((...a: unknown[]) => void logs.push(JSON.stringify(a)));
   });
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
-    for (const m of ["@/lib/services/cron-run", "@/lib/services/maintenance", "@/lib/services/maintenance-status", "@/lib/payments/webhook-recovery", "@/lib/payments/recheck-recovery"]) vi.doUnmock(m);
+    for (const m of ["@/lib/services/cron-run", "@/lib/services/maintenance", "@/lib/services/maintenance-status", "@/lib/payments/webhook-recovery", "@/lib/payments/recheck-recovery", "@/lib/payments/payment-monitor", "@/lib/data-provider"]) vi.doUnmock(m);
   });
 
-  it("正常：3段階を順に実行し、応答は今までどおり（メンテナンスの結果＋復旧・回収）。段階の結果を記録し、ロックを外す", async () => {
+  it("正常：4段階を順に実行し、応答はメンテナンスの結果＋復旧・回収・決済監視の要約。段階の結果を記録し、ロックを外す", async () => {
     const cron = await load();
     const res = await cron();
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ expiredSessions: 0, expiredCheckouts: 0, purgedResults: 1, purgedCheckouts: 0, truncatedTasks: 0, webhookRecovery: { status: "completed", recovered: 0 }, recheckRecovery: { status: "completed", done: 0 } });
-    expect(st.calls).toEqual(["maintenance", "webhook", "recheck"]);
+    const body = (await res.json()) as Record<string, unknown>;
+    const { paymentMonitor, ...rest } = body;
+    expect(rest).toEqual({ expiredSessions: 0, expiredCheckouts: 0, purgedResults: 1, purgedCheckouts: 0, truncatedTasks: 0, webhookRecovery: { status: "completed", recovered: 0 }, recheckRecovery: { status: "completed", done: 0 } });
+    expect(paymentMonitor).toMatchObject({ status: "ok", found: 0, uncheckedCount: 0, openReviews: 0, stripeMode: "test" });
+    expect(typeof (paymentMonitor as { finishedAt: unknown }).finishedAt).toBe("string");
+    expect(st.calls).toEqual(["maintenance", "webhook", "recheck", "monitor:cron"]);
     expect(st.runs).toHaveLength(1);
     expect(st.runs[0].ownerId).toBe("owner-1");
     expect(st.runs[0].r.status).toBe("completed");
@@ -245,7 +277,9 @@ describe("定期処理（/api/cron/maintenance）：段階・ロック", () => {
       ["maintenance", "ok"],
       ["webhookRecovery", "ok"],
       ["recheckRecovery", "ok"],
+      ["paymentMonitor", "ok"],
     ]);
+    expect(st.runs[0].r).toMatchObject({ paymentMonitor: { status: "ok", found: 0 } });
     expect(st.released).toEqual(["owner-1"]);
     expect(logs.join(" ")).not.toContain(SECRET);
   });
@@ -276,7 +310,7 @@ describe("定期処理（/api/cron/maintenance）：段階・ロック", () => {
     const res = await cron();
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ ok: false, error: "maintenance_failed" });
-    expect(st.calls).toEqual(["maintenance", "webhook", "recheck"]);
+    expect(st.calls).toEqual(["maintenance", "webhook", "recheck", "monitor:cron"]);
     expect(st.maint).toEqual([{ ok: false, errorCode: "SimulatedMaintenanceError" }]);
     expect(st.runs[0].r.status).toBe("partial");
     expect(st.released).toEqual(["owner-1"]);
@@ -288,7 +322,7 @@ describe("定期処理（/api/cron/maintenance）：段階・ロック", () => {
     const res = await cron();
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ webhookRecovery: { status: "failed" }, recheckRecovery: { status: "completed" } });
-    expect(st.calls).toEqual(["maintenance", "webhook", "recheck"]);
+    expect(st.calls).toEqual(["maintenance", "webhook", "recheck", "monitor:cron"]);
     expect(st.runs[0].r.phases.find((p) => p.name === "webhookRecovery")).toMatchObject({ status: "failed" });
   });
 
@@ -302,11 +336,11 @@ describe("定期処理（/api/cron/maintenance）：段階・ロック", () => {
       const res = await p;
       expect(res.status).toBe(500);
       expect(await res.json()).toEqual({ ok: false, error: "maintenance_failed" });
-      expect(st.calls).toEqual(["maintenance", "webhook", "recheck"]);
+      expect(st.calls).toEqual(["maintenance", "webhook", "recheck", "monitor:cron"]);
       expect(st.maint).toEqual([{ ok: false, errorCode: "PhaseTimeout" }]);
       expect(st.runs[0].r.status).toBe("timed_out");
       expect(st.runs[0].r.phases[0]).toMatchObject({ name: "maintenance", status: "timed_out", abortSettled: false });
-      expect(st.runs[0].r.phases.slice(1).map((x) => x.status)).toEqual(["ok", "ok"]);
+      expect(st.runs[0].r.phases.slice(1).map((x) => x.status)).toEqual(["ok", "ok", "ok"]);
       expect(st.released).toEqual([]);
     } finally {
       vi.useRealTimers();
@@ -324,11 +358,122 @@ describe("定期処理（/api/cron/maintenance）：段階・ロック", () => {
       expect(res.status).toBe(500);
       expect(st.maint).toEqual([{ ok: false, errorCode: "PhaseTimeout" }]);
       expect(st.runs[0].r.phases[0]).toMatchObject({ name: "maintenance", status: "timed_out", abortSettled: true });
-      expect(st.calls).toEqual(["maintenance", "webhook", "recheck"]);
+      expect(st.calls).toEqual(["maintenance", "webhook", "recheck", "monitor:cron"]);
       expect(st.released).toEqual(["owner-1"]);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("決済監視：異常あり（issues）は段階としては成功。件数を記録する", async () => {
+    st.monitorMode = "issues";
+    const cron = await load();
+    const res = await cron();
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { paymentMonitor: unknown }).paymentMonitor).toMatchObject({ status: "issues", found: 2 });
+    expect(st.runs[0].r.phases.find((p) => p.name === "paymentMonitor")).toMatchObject({ status: "ok" });
+    expect(st.runs[0].r.status).toBe("completed");
+  });
+
+  it("決済監視：例外・点検の失敗は段階の失敗。ほかの段階の結果と応答（200）はそのまま", async () => {
+    for (const mode of ["throws", "failed"] as const) {
+      st.runs = [];
+      st.calls = [];
+      st.monitorMode = mode;
+      const cron = await load();
+      const res = await cron();
+      expect(res.status, mode).toBe(200);
+      const body = (await res.json()) as { webhookRecovery: unknown; recheckRecovery: unknown; paymentMonitor: { status: string }; purgedResults: number };
+      expect(body.purgedResults).toBe(1);
+      expect(body.webhookRecovery).toEqual({ status: "completed", recovered: 0 });
+      expect(body.recheckRecovery).toEqual({ status: "completed", done: 0 });
+      expect(body.paymentMonitor.status).toBe(mode === "throws" ? "failed" : "failed");
+      const mp = st.runs[0].r.phases.find((p) => p.name === "paymentMonitor") as unknown as { status: string; errorCode: string };
+      expect(mp).toMatchObject({ status: "failed", errorCode: mode === "throws" ? "SimulatedMonitorError" : "MonitorChecksFailed" });
+      expect(st.runs[0].r.phases.filter((p) => p.name !== "paymentMonitor").map((p) => p.status)).toEqual(["ok", "ok", "ok"]);
+      expect(st.runs[0].r.status).toBe("partial");
+      expect(JSON.stringify(st.runs[0])).not.toContain("monitor exploded");
+    }
+  });
+
+  it("決済監視：別の点検が実行中（busy）は、正常の実行と区別して skipped（busy）。ロックを取れないときは失敗", async () => {
+    st.monitorMode = "busy";
+    let cron = await load();
+    let body = (await (await cron()).json()) as { paymentMonitor: { status: string; finishedAt: unknown } };
+    expect(body.paymentMonitor).toMatchObject({ status: "busy", found: null, finishedAt: null });
+    expect(st.runs[0].r.phases.find((p) => p.name === "paymentMonitor")).toMatchObject({ status: "skipped", reason: "busy" });
+    expect(st.runs[0].r.status).toBe("partial");
+    st.runs = [];
+    st.monitorMode = "lock_failed";
+    cron = await load();
+    body = (await (await cron()).json()) as { paymentMonitor: { status: string; finishedAt: unknown } };
+    expect(body.paymentMonitor.status).toBe("lock_failed");
+    expect(st.runs[0].r.phases.find((p) => p.name === "paymentMonitor")).toMatchObject({ status: "failed", errorCode: "MonitorLockFailed" });
+  });
+
+  it("前の段階が失敗しても、決済監視は実行する", async () => {
+    st.maintFails = true;
+    st.webhookFails = true;
+    const cron = await load();
+    const res = await cron();
+    expect(res.status).toBe(500);
+    expect(st.calls).toEqual(["maintenance", "webhook", "recheck", "monitor:cron"]);
+    expect(st.runs[0].r.phases.map((p) => [p.name, p.status])).toEqual([
+      ["maintenance", "failed"],
+      ["webhookRecovery", "failed"],
+      ["recheckRecovery", "ok"],
+      ["paymentMonitor", "ok"],
+    ]);
+    expect(st.runs[0].r).toMatchObject({ paymentMonitor: { status: "ok" } });
+  });
+
+  it("時間不足（前の段階が長引いた）なら決済監視を始めず skipped_time と記録する", async () => {
+    st.maintMode = "hang";
+    st.webhookHang = true;
+    const cron = await load();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const p = cron();
+      await vi.advanceTimersByTimeAsync(300_000);
+      await p;
+      // メンテナンス 120秒＋10秒、Webhook の復旧 120秒＋10秒 → 260秒：再確認（180秒まで）・監視（210秒まで）は始めない
+      expect(st.calls).toEqual(["maintenance", "webhook"]);
+      expect(st.runs[0].r.phases.map((x) => [x.name, x.status, x.reason])).toEqual([
+        ["maintenance", "timed_out", null],
+        ["webhookRecovery", "timed_out", null],
+        ["recheckRecovery", "skipped", "deadline"],
+        ["paymentMonitor", "skipped", "deadline"],
+      ]);
+      expect(st.runs[0].r).toMatchObject({ paymentMonitor: { status: "skipped_time", found: null, finishedAt: null } });
+      expect(st.released).toEqual([]); // 止まらなかった段階がある：ロックは期限で外れる
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("決済監視が待つ上限（60秒）を過ぎたら timed_out と記録する（監視自身のロックは監視の期限で外れる）", async () => {
+    st.monitorMode = "hang";
+    const cron = await load();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const p = cron();
+      await vi.advanceTimersByTimeAsync(300_000);
+      const res = await p;
+      expect(res.status).toBe(200);
+      expect(st.runs[0].r.phases.find((x) => x.name === "paymentMonitor")).toMatchObject({ status: "timed_out" });
+      expect(st.runs[0].r).toMatchObject({ paymentMonitor: { status: "timed_out" } });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("Firestore ではない構成（以前の PostgreSQL）では、決済監視を unsupported として始めない", async () => {
+    st.firestore = false;
+    const cron = await load();
+    const body = (await (await cron()).json()) as { paymentMonitor: { status: string } };
+    expect(body.paymentMonitor.status).toBe("unsupported");
+    expect(st.calls).not.toContain("monitor:cron");
+    expect(st.runs[0].r.phases.find((p) => p.name === "paymentMonitor")).toMatchObject({ status: "skipped", reason: "unsupported" });
   });
 
   it("ロックを失ったら残りを始めない（メンテナンスを始める前に失えば、何も実行せず失敗を記録）", async () => {

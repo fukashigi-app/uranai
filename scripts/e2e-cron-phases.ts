@@ -92,19 +92,30 @@ async function main() {
       ["maintenance", "ok"],
       ["webhookRecovery", "ok"],
       ["recheckRecovery", "ok"],
+      ["paymentMonitor", "ok"],
     ],
   );
+  // 決済監視の点検（Stripe の設定が無いので Firestore の点検だけ）：結果・件数・時刻を記録し、点検の記録（system/paymentMonitor）も更新
+  const pm = run.lastPaymentMonitor as { status: string; found: number; uncheckedCount: number; finishedAt: { toDate(): Date } };
+  assert.ok(["ok", "issues", "partial"].includes(pm.status), JSON.stringify(pm));
+  assert.ok(typeof pm.found === "number" && typeof pm.uncheckedCount === "number" && pm.finishedAt);
+  const mon = (await fsdb().collection(C.system).doc("paymentMonitor").get()).data()!;
+  assert.equal(mon.currentSource, "cron");
+  assert.equal(mon.lastResult, pm.status);
+  assert.ok(mon.lastFinishedAt.toDate().getTime() <= pm.finishedAt.toDate().getTime() + 1000);
+  assert.equal((await fsdb().collection(C.system).doc("paymentMonitorLock").get()).exists, false, "点検のロックが残っています");
+  assert.deepEqual((body.paymentMonitor as { status: string }).status, pm.status);
   assert.equal(run.currentStatus, "finished");
   assert.ok(typeof run.lastDurationMs === "number" && run.lastDurationMs >= 0);
   for (const p of run.lastPhases as { durationMs: number; startedAtMs: number }[]) assert.ok(p.durationMs >= 0 && p.startedAtMs >= 0);
   assert.equal((await lockDoc().get()).exists, false, "終了の後にロックが残っています");
   const maint = (await fsdb().collection(C.system).doc("maintenance").get()).data()!;
   assert.equal(maint.lastStatus, "success");
-  const { webhookRecovery: _w, recheckRecovery: _r, ...maintResult } = body;
+  const { webhookRecovery: _w, recheckRecovery: _r, paymentMonitor: _p, ...maintResult } = body;
   assert.deepEqual(maintResult, maint.lastResult, "応答のメンテナンスの結果が記録と一致しません");
   const saved = JSON.stringify(run);
   assert.ok(!saved.includes(process.env.CRON_SECRET!) && !saved.includes(process.env.SESSION_SECRET!), "秘密の値が記録されました");
-  step("定期処理：メンテナンス → Webhook の復旧 → 再確認の回収を段階として実行し、段階ごとの結果・時間を system/cronRun に記録。終了の後にロックを外す");
+  step("定期処理：メンテナンス → Webhook の復旧 → 再確認の回収 → 決済監視を段階として実行し、段階ごとの結果・時間と監視の要約（結果・件数・時刻）を system/cronRun に記録。終了の後にロックを外す");
 
   // 同時に呼ばれても、実行は1つだけ（ほかは cron_busy）。メンテナンスに数秒かかるよう、対象外の古い記録を入れて実行を重ねる
   for (let b = 0; b < 4; b++) {
@@ -131,6 +142,26 @@ async function main() {
   assert.ok("webhookRecovery" in ((await res.json()) as object));
   assert.equal((await lockDoc().get()).exists, false);
   step("期限内のロックがある間は実行せず、期限が過ぎたら次の定期処理が実行する（強制終了からの回復）");
+
+  // 決済監視の点検が別の場所（運営画面の「今すぐ点検」）で実行中：点検は始めず busy と記録。ほかの段階はそのまま
+  await fsdb().collection(C.system).doc("paymentMonitorLock").set({ runId: "admin-run", source: "admin", acquiredAt: new Date(), expiresAt: new Date(Date.now() + 60_000) });
+  res = await call();
+  assert.equal(res.status, 200);
+  assert.equal(((await res.json()) as { paymentMonitor: { status: string } }).paymentMonitor.status, "busy");
+  const runBusy = (await runDoc().get()).data()!;
+  assert.deepEqual(
+    (runBusy.lastPhases as { name: string; status: string; reason: string | null }[]).map((p) => [p.name, p.status, p.reason]),
+    [
+      ["maintenance", "ok", null],
+      ["webhookRecovery", "ok", null],
+      ["recheckRecovery", "ok", null],
+      ["paymentMonitor", "skipped", "busy"],
+    ],
+  );
+  assert.deepEqual([runBusy.lastStatus, runBusy.lastPaymentMonitor.status], ["partial", "busy"]);
+  assert.equal((await fsdb().collection(C.system).doc("paymentMonitorLock").get()).get("runId"), "admin-run", "実行中の点検のロックを外しました");
+  await fsdb().collection(C.system).doc("paymentMonitorLock").delete();
+  step("決済監視の点検が実行中（運営画面など）：点検を始めず busy（正常の実行と区別）。実行中の点検のロックは外さない。ほかの段階は実行");
 
   // ---- 4. メンテナンスの件数・時間の上限（対象の条件は変えない） ----
   await resetProject();

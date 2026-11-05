@@ -516,13 +516,17 @@ async function main() {
     assert.equal(maint.lastStatus, "success");
     assert.ok(ms(maint.lastRunAt) <= ms(wr.startedAt), "Webhook の復旧がメンテナンスの終了より前に始まりました");
     assert.ok(ms(wr.finishedAt) <= ms(rr.startedAt), "PENDING の回収が Webhook の復旧の終了より前に始まりました");
+    // 決済監視の点検は最後（PENDING の回収の後）
+    const monDoc = (await fsdb().collection(C.system).doc("paymentMonitor").get()).data()!;
+    assert.equal(monDoc.currentSource, "cron");
+    assert.ok(ms(rr.finishedAt) <= ms(monDoc.lastStartedAt), "決済監視の点検が PENDING の回収の終了より前に始まりました");
     assert.equal((await txData(p.txId))!.recheckState, "DONE");
     const lm = (await txData("stripe_pi_zz_livemode"))!;
     assert.deepEqual([lm.recheckState, lm.recheckRecoveryAttempts], ["PENDING", 0], "本番の決済記録をテストの接続の定期処理で回収しました");
     assert.equal(rr.counts.skipped_mode_mismatch, 1);
-    const { webhookRecovery: _w, recheckRecovery: _r, ...maintResult } = body;
+    const { webhookRecovery: _w, recheckRecovery: _r, paymentMonitor: _p, ...maintResult } = body;
     assert.deepEqual(maintResult, maint.lastResult, "応答のメンテナンスの結果が記録と一致しません");
-    step("13. 定期処理はメンテナンス → Webhook の復旧 → PENDING の回収の順（記録の時刻で確認）。テストの接続では本番の決済記録を回収しない");
+    step("13. 定期処理はメンテナンス → Webhook の復旧 → PENDING の回収 → 決済監視の点検の順（記録の時刻で確認）。テストの接続では本番の決済記録を回収しない");
 
     // 14. 回収の失敗（PENDING の一覧の読み込みの失敗）でも、メンテナンスの結果・応答の状態コードは変わらない
     await makePending(trt, testFake, store);
@@ -534,7 +538,7 @@ async function main() {
     assert.equal(body2.recheckRecovery.status, "failed");
     const maint2 = (await fsdb().collection(C.system).doc("maintenance").get()).data()!;
     assert.equal(maint2.lastStatus, "success");
-    const { webhookRecovery: _w2, recheckRecovery: _r2, ...maintResult2 } = body2;
+    const { webhookRecovery: _w2, recheckRecovery: _r2, paymentMonitor: _p2, ...maintResult2 } = body2;
     assert.deepEqual(maintResult2, maint2.lastResult);
     const rr2 = (await runDoc())!;
     assert.deepEqual([rr2.status, rr2.errorName], ["failed", "SimulatedFirestoreError"]);
