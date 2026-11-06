@@ -187,12 +187,12 @@ describe("事業者情報の開示請求（特定商取引法第11条ただし�
 });
 
 describe("文書ごとの最終更新日", () => {
-  it("内容を変えた文書だけ日付を更新する（利用規約は変更なし）", async () => {
+  it("内容を変えた文書だけ日付を更新する（利用規約は第4条を変えた2026年10月27日のまま）", async () => {
     const { LEGAL_UPDATED } = await import("@/lib/legal/policy");
-    expect(LEGAL_UPDATED).toEqual({ commercialTransaction: "2026年11月7日", terms: "2026年10月16日", privacy: "2026年11月7日" });
+    expect(LEGAL_UPDATED).toEqual({ commercialTransaction: "2026年11月7日", terms: "2026年10月27日", privacy: "2026年11月7日" });
     expect(page(CommercialTransactionPage)).toContain("最終更新日: 2026年11月7日");
     expect(page(PrivacyPage)).toContain("最終更新日: 2026年11月7日");
-    expect(page(TermsPage)).toContain("最終更新日: 2026年10月16日");
+    expect(page(TermsPage)).toContain("最終更新日: 2026年10月27日");
     expect(page(TermsPage)).not.toContain("2026年11月7日");
   });
 });
