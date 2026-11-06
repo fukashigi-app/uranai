@@ -4,11 +4,11 @@ import { siteConfig } from "@/config/site";
 import { PAY_BUTTON_LABEL } from "@/lib/legal/labels";
 import {
   CHECKOUT_MINUTES,
-  DISCLOSE_ON_REQUEST,
-  DISCLOSURE_CONDITIONS,
-  DISCLOSURE_REPLY_NOTE,
+  DISCLOSURE_REQUEST_SUBJECT,
+  disclosureStatement,
   FORTUNE_USE_HOURS,
   LEGAL_UPDATED,
+  omittedOperatorItems,
   operatorInfo,
   PAYMENT_METHODS_LABEL,
   PAYMENT_PROCESSOR,
@@ -33,40 +33,35 @@ function mailTo(email: string, marker: "data-operator-email" | "data-disclosure-
 export default function CommercialTransactionPage() {
   const op = operatorInfo();
   const mail = mailTo(op.email, "data-operator-email");
+  const omitted = omittedOperatorItems(op);
+  // 表示している項目だけを行にする（省略している項目は、下の1か所の説明にまとめる。同じ説明をくり返さない）
+  const shown: [string, React.ReactNode][] = [
+    ...(op.ownerName ? ([["事業者の氏名（運営統括責任者）", op.ownerName]] as [string, React.ReactNode][]) : []),
+    ...(op.address ? ([["所在地", op.address]] as [string, React.ReactNode][]) : []),
+    ...(op.phone ? ([["電話番号", op.phone]] as [string, React.ReactNode][]) : []),
+  ];
   const rows: [string, React.ReactNode][] = [
-    [
-      "販売事業者",
-      `${op.tradeName}（${op.businessType}）`,
-    ],
-    ["事業者の氏名（運営統括責任者）", op.ownerName ?? DISCLOSE_ON_REQUEST],
-    ["所在地", op.address ?? DISCLOSE_ON_REQUEST],
-    [
-      "電話番号",
-      <>
-        {op.phone ?? DISCLOSE_ON_REQUEST}
-        <span className="mt-1 block">お問い合わせは、下記のメールアドレスにお願いいたします。</span>
-      </>,
-    ],
-    ...(op.ownerName && op.address && op.phone
-      ? []
-      : ([
+    ["販売事業者", `${op.tradeName}（${op.businessType}）`],
+    ...shown,
+    ...(omitted.length
+      ? ([
           [
-            "開示のご請求方法",
-            <>
-              <p className="!mt-0">
-                事業者の氏名・所在地・電話番号は、{mailTo(op.email, "data-disclosure-email")}
-                宛てに、件名または本文に「特定商取引法に基づく表記の開示請求」と記載してご請求ください。
+            `販売事業者の${omitted.join("・")}`,
+            <div key="disclosure" data-disclosure-statement="">
+              <p className="!mt-0">{disclosureStatement(omitted)}</p>
+              <p>
+                開示のご請求先：{mailTo(op.email, "data-disclosure-email")}
+                <span className="mt-1 block text-[12px]">件名に「{DISCLOSURE_REQUEST_SUBJECT}」とご記載いただくと、確認が早くなります。</span>
               </p>
-              <p>{DISCLOSURE_CONDITIONS}</p>
-              <p>{DISCLOSURE_REPLY_NOTE}</p>
-            </>,
+            </div>,
           ],
-        ] as [string, React.ReactNode][])),
+        ] as [string, React.ReactNode][])
+      : []),
     [
-      "メールアドレス",
+      "お問い合わせ先（メールアドレス）",
       <>
         {mail}
-        <span className="mt-1 block">一般のお問い合わせ：{REPLY_NOTE}</span>
+        <span className="mt-1 block">お問い合わせは、このメールアドレスにお願いいたします。{REPLY_NOTE}</span>
       </>,
     ],
     ["サービス名", siteConfig.name],
@@ -105,7 +100,7 @@ export default function CommercialTransactionPage() {
     ],
   ];
   return (
-    <LegalPage title="特定商取引法に基づく表記" updated={LEGAL_UPDATED}>
+    <LegalPage title="特定商取引法に基づく表記" updated={LEGAL_UPDATED.commercialTransaction}>
       <dl className="mt-5 divide-y divide-white/10">
         {rows.map(([k, v]) => (
           <div key={k} className="grid gap-1 py-3 sm:grid-cols-[200px_1fr]">

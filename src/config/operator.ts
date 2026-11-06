@@ -93,7 +93,7 @@ export function readOperatorInfo(env: Env = process.env): { info: OperatorInfo; 
     issues.push({
       level: "notice",
       key: "disclosure",
-      message: `${undisclosed.join("・")}は「ご請求があれば遅滞なく開示」と表示しています。この方式が法令上の条件を満たすか（特定商取引法・個人情報保護法）は未確認です。公開前に確認してください。`,
+      message: `${undisclosed.join("・")}は、特定商取引法第11条ただし書きに基づく請求時開示（ご請求があれば遅滞なく電子メール等で提供）と表示しています。この方式が法令上の条件を満たすか（特定商取引法・個人情報保護法）は未確認です。公開前に確認してください。`,
     });
   }
   return { info, issues };

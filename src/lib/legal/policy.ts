@@ -7,8 +7,18 @@ import { readOperatorInfo } from "@/config/operator";
  * 期限・価格はサーバーの実装値（config/pricing.ts）から作り、文書と実際の動作がずれないようにする。
  */
 
-/** 3文書の最終更新日 */
-export const LEGAL_UPDATED = "2026年10月16日";
+/**
+ * 文書ごとの最終更新日。その文書の表示内容を変えたときだけ、その文書の日付を更新する
+ * （ほかの文書の修正に合わせて一律に変えない）。
+ */
+export const LEGAL_UPDATED = {
+  /** 特定商取引法に基づく表記（2026年11月7日：氏名・住所・電話番号の請求時開示の説明を統一） */
+  commercialTransaction: "2026年11月7日",
+  /** 利用規約（今回は変更なし） */
+  terms: "2026年10月16日",
+  /** プライバシーポリシー（2026年11月7日：事業者の情報の開示の案内を特定商取引法に基づく表記へ集約） */
+  privacy: "2026年11月7日",
+} as const;
 
 /**
  * 決済代行サービス（実装: src/lib/payments/stripe-*.ts。Stripe Checkout）。PAY.JP は廃止した。
@@ -56,16 +66,29 @@ export const REFUND_REQUEST_NOTE = `返金のお申し出は、決済日から${
 /** 回答の目安と、法令上の対応を優先する旨 */
 export const REPLY_NOTE = `原則として${REPLY_BUSINESS_DAYS}営業日以内に返信します。法令により遅滞なく対応すべき場合は、それに従います。`;
 
-/** 氏名・住所・電話番号を表示していない場合の文言（この方式が法令上の条件を満たすかは未確認：公開前に要確認） */
-export const DISCLOSE_ON_REQUEST = "ご請求があれば、遅滞なく開示いたします。";
+/**
+ * 販売事業者の氏名・住所・電話番号の請求時開示（特定商取引法第11条ただし書き）の説明。
+ * 個人事業主のため、これらの値は画面・コードに埋め込まない（環境変数で設定したものだけを表示する）。
+ * omitted … 表示を省略している項目（「氏名」「住所」「電話番号」の順）。説明は特定商取引法に基づく表記の1か所だけに出す
+ * （この方式が法令上の条件を満たすかは、運営者が外部で確認する）。
+ */
+export function disclosureStatement(omitted: readonly string[]): string {
+  const items = omitted.length <= 1 ? omitted.join("") : `${omitted.slice(0, -1).join("、")}および${omitted[omitted.length - 1]}`;
+  const these = omitted.length <= 1 ? "この情報" : "これらの情報";
+  return (
+    `特定商取引法第11条ただし書きに基づき、販売事業者の${items}の表示を省略しております。` +
+    `${these}について開示をご希望の場合は、本ページ記載のお問い合わせ先メールアドレスまでご連絡ください。` +
+    "商品の購入前でもご請求いただけます。ご請求があった場合、遅滞なく電子メール等により情報を提供いたします。"
+  );
+}
 
-/** 事業者情報（氏名・住所・電話番号）の開示請求への回答の目標（一般の問い合わせより早く対応する） */
-export const DISCLOSURE_REPLY_NOTE =
-  "原則として受付当日中、遅くとも翌営業日中に、ご請求いただいたメールアドレスへ回答することを目標としています。法令により遅滞なく対応すべき場合は、それに従います。";
+/** 開示の請求のメールの件名の目安（請求の受付を見落とさないため） */
+export const DISCLOSURE_REQUEST_SUBJECT = "特定商取引法に基づく表記の開示請求";
 
-/** 事業者情報の開示請求の条件（購入や本人確認を一律の条件にしない） */
-export const DISCLOSURE_CONDITIONS =
-  "ご購入の前後を問わず、どなたでもご請求いただけます。ご請求にあたって、ご購入や本人確認書類の提出は必要ありません。";
+/** 表示を省略している販売事業者の情報（氏名・住所・電話番号の順。すべて表示していれば空） */
+export function omittedOperatorItems(op: { ownerName: string | null; address: string | null; phone: string | null }): string[] {
+  return [op.ownerName ? null : "氏名", op.address ? null : "住所", op.phone ? null : "電話番号"].filter((v): v is string => v !== null);
+}
 
 export function operatorInfo() {
   return readOperatorInfo().info;

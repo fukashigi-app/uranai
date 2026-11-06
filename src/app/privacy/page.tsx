@@ -2,9 +2,7 @@ import Link from "next/link";
 import { LegalPage } from "@/components/public/legal";
 import { siteConfig } from "@/config/site";
 import {
-  DISCLOSE_ON_REQUEST,
-  DISCLOSURE_CONDITIONS,
-  DISCLOSURE_REPLY_NOTE,
+  omittedOperatorItems,
   FORTUNE_USE_HOURS,
   LEGAL_UPDATED,
   operatorInfo,
@@ -31,7 +29,7 @@ export default function PrivacyPage() {
     ["ブラウザの保存領域（localStorage）", "占い結果の演出を表示済みかどうかの印を保存するため（結果の内容は保存しません）", "ブラウザで削除するまで"],
   ];
   return (
-    <LegalPage title="プライバシーポリシー" updated={LEGAL_UPDATED}>
+    <LegalPage title="プライバシーポリシー" updated={LEGAL_UPDATED.privacy}>
       <p>
         {op.tradeName}（以下「運営者」）は、「{siteConfig.name}」（以下「本サービス」）で取り扱う利用者および提携店舗の情報について、個人情報の保護に関する法律その他の法令を守り、次のとおり取り扱います。
       </p>
@@ -41,16 +39,15 @@ export default function PrivacyPage() {
         <li>
           名称：{op.tradeName}（{op.businessType}）
         </li>
-        <li>事業者の氏名：{op.ownerName ?? DISCLOSE_ON_REQUEST}</li>
-        <li>住所：{op.address ?? DISCLOSE_ON_REQUEST}</li>
-        {op.ownerName && op.address ? null : (
+        {op.ownerName ? <li>事業者の氏名：{op.ownerName}</li> : null}
+        {op.address ? <li>住所：{op.address}</li> : null}
+        {omittedOperatorItems(op).length ? (
           <li data-disclosure-guide>
-            事業者の氏名・住所のご請求は、<a href={`mailto:${op.email}`}>{op.email}</a>
-            宛てにお送りください。{DISCLOSURE_CONDITIONS}
-            {DISCLOSURE_REPLY_NOTE}（ご請求の方法は<Link href="/commercial-transaction">特定商取引法に基づく表記</Link>
-            もご覧ください。）
+            事業者の{omittedOperatorItems(op).join("・")}：表示を省略しています。ご請求の方法は
+            <Link href="/commercial-transaction">特定商取引法に基づく表記</Link>
+            をご覧ください（ご購入の前でもご請求いただけます）。
           </li>
-        )}
+        ) : null}
         <li>
           お問い合わせ先：<a href={`mailto:${op.email}`}>{op.email}</a>
         </li>

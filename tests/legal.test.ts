@@ -84,8 +84,8 @@ describe("運営者情報の設定", () => {
     expect(t).toContain("山田 太郎");
     expect(t).toContain("東京都千代田区1-1-1");
     expect(t).toContain("03-0000-0000");
-    expect(t).not.toContain("開示のご請求方法");
-    expect(t).not.toContain("ご請求があれば");
+    expect(t).not.toContain("第11条ただし書き");
+    expect(t).not.toContain("表示を省略");
   });
 });
 
@@ -110,8 +110,7 @@ describe("特定商取引法に基づく表記", () => {
       "法令上お客様に認められる返金・解除などの権利を制限するものではありません",
       "原則として3営業日以内",
       "遅滞なく対応すべき場合は、それに従います",
-      "ご請求があれば、遅滞なく開示いたします。",
-      "開示のご請求方法",
+      "特定商取引法第11条ただし書きに基づき",
       "販売事業者は上記の運営者",
     ]) {
       expect(t, s).toContain(s);
@@ -120,37 +119,49 @@ describe("特定商取引法に基づく表記", () => {
   });
 });
 
-describe("事業者情報の開示請求", () => {
+describe("事業者情報の開示請求（特定商取引法第11条ただし書きの請求時開示）", () => {
   const html = (Page: () => React.ReactElement) => renderToStaticMarkup(createElement(Page));
-  const DISCLOSURE_MUST = [
-    "ご購入の前後を問わず、どなたでもご請求いただけます",
-    "ご購入や本人確認書類の提出は必要ありません",
-    "原則として受付当日中、遅くとも翌営業日中",
-    "目標としています",
-    "法令により遅滞なく対応すべき場合は、それに従います",
-  ];
-  // 購入・本人確認を一律の条件にする表現、法令上の条件を満たしていると断定する表現は使わない
-  const DISCLOSURE_FORBIDDEN = ["購入者に限り", "ご購入者のみ", "本人確認が必要", "本人確認書類をご提出", "ご本人であることを確認したうえで", "法令上認められて", "省略が認められ", "省略しています"];
+  const STATEMENT =
+    "特定商取引法第11条ただし書きに基づき、販売事業者の氏名、住所および電話番号の表示を省略しております。これらの情報について開示をご希望の場合は、本ページ記載のお問い合わせ先メールアドレスまでご連絡ください。商品の購入前でもご請求いただけます。ご請求があった場合、遅滞なく電子メール等により情報を提供いたします。";
+  // 購入・本人確認を一律の条件にする表現は使わない
+  const DISCLOSURE_FORBIDDEN = ["購入者に限り", "ご購入者のみ", "本人確認が必要", "本人確認書類をご提出", "ご本人であることを確認したうえで", "法令上認められて", "省略が認められ"];
+  const count = (t: string, s: string) => t.split(s).length - 1;
 
-  it("特商法表記：開示請求先・条件・回答の目標を表示する", () => {
+  it("特商法表記：指定の説明を1回だけ表示し、請求先のメールアドレスのリンクが機能する", () => {
     const h = html(CommercialTransactionPage);
     const t = page(CommercialTransactionPage);
+    expect(t).toContain(STATEMENT);
+    expect(count(t, "第11条ただし書き")).toBe(1);
+    expect(count(t, "商品の購入前でもご請求いただけます")).toBe(1);
+    expect(count(t, "遅滞なく電子メール等により")).toBe(1);
+    // 以前の重複した説明は出さない
+    for (const s of ["ご請求があれば、遅滞なく開示いたします", "開示のご請求方法", "ご購入の前後を問わず", "原則として受付当日中"]) expect(t, s).not.toContain(s);
     expect(h).toMatch(/<a href="mailto:koyomi100yen@gmail.com" data-disclosure-email="">koyomi100yen@gmail.com<\/a>/);
-    expect(t).toContain("事業者の氏名・所在地・電話番号は、koyomi100yen@gmail.com宛てに");
-    expect(t).toContain("「特定商取引法に基づく表記の開示請求」と記載");
-    for (const s of DISCLOSURE_MUST) expect(t, s).toContain(s);
+    expect(h).toMatch(/<a href="mailto:koyomi100yen@gmail.com" data-operator-email="">koyomi100yen@gmail.com<\/a>/);
+    expect(t).toContain("販売事業者Hobby shop FUKASHIGI（個人事業主）");
+    expect(t).toContain("「特定商取引法に基づく表記の開示請求」");
     for (const s of DISCLOSURE_FORBIDDEN) expect(t, s).not.toContain(s);
-    // 一般の問い合わせは3営業日の目安
-    expect(t).toContain("一般のお問い合わせ：原則として3営業日以内");
+    expect(t).toContain("原則として3営業日以内");
   });
 
-  it("プライバシーポリシー：事業者情報の開示請求の案内が特商法表記と一致し、個人情報の開示請求も購入・本人確認を一律の条件にしない", () => {
+  it("一部だけ表示しているときは、省略している項目だけを説明する", () => {
+    vi.stubEnv("OPERATOR_OWNER_NAME", "山田 太郎");
+    const t = page(CommercialTransactionPage);
+    expect(t).toContain("山田 太郎");
+    expect(t).toContain("販売事業者の住所および電話番号の表示を省略しております。これらの情報について");
+    expect(t).not.toContain("氏名、住所");
+    vi.stubEnv("OPERATOR_ADDRESS", "東京都千代田区1-1-1");
+    expect(page(CommercialTransactionPage)).toContain("販売事業者の電話番号の表示を省略しております。この情報について");
+  });
+
+  it("プライバシーポリシー：説明はくり返さず、特商法表記の請求方法へ案内する", () => {
     const h = html(PrivacyPage);
     const t = page(PrivacyPage);
-    expect(h).toContain('data-disclosure-guide');
+    expect(h).toContain("data-disclosure-guide");
     expect(h).toContain('href="mailto:koyomi100yen@gmail.com"');
     expect(h).toContain('href="/commercial-transaction"');
-    for (const s of DISCLOSURE_MUST) expect(t, s).toContain(s);
+    expect(t).toContain("事業者の氏名・住所・電話番号：表示を省略しています。ご請求の方法は特定商取引法に基づく表記をご覧ください（ご購入の前でもご請求いただけます）");
+    expect(t).not.toContain("第11条ただし書き");
     expect(t).toContain("占いのご購入はご請求の条件ではありません");
     expect(t).toContain("確認に必要な範囲で情報をお伺いすることがあります");
     expect(t).toContain("回答の目安：原則として3営業日以内");
@@ -172,6 +183,17 @@ describe("事業者情報の開示請求", () => {
     vi.stubEnv("OPERATOR_PHONE", "03-0000-0000");
     expect(html(CommercialTransactionPage)).not.toContain("data-disclosure-email");
     expect(html(PrivacyPage)).not.toContain("data-disclosure-guide");
+  });
+});
+
+describe("文書ごとの最終更新日", () => {
+  it("内容を変えた文書だけ日付を更新する（利用規約は変更なし）", async () => {
+    const { LEGAL_UPDATED } = await import("@/lib/legal/policy");
+    expect(LEGAL_UPDATED).toEqual({ commercialTransaction: "2026年11月7日", terms: "2026年10月16日", privacy: "2026年11月7日" });
+    expect(page(CommercialTransactionPage)).toContain("最終更新日: 2026年11月7日");
+    expect(page(PrivacyPage)).toContain("最終更新日: 2026年11月7日");
+    expect(page(TermsPage)).toContain("最終更新日: 2026年10月16日");
+    expect(page(TermsPage)).not.toContain("2026年11月7日");
   });
 });
 

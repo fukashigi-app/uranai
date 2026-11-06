@@ -22,7 +22,7 @@ export const metadata = { title: "利用規約" };
 export default function TermsPage() {
   const op = operatorInfo();
   return (
-    <LegalPage title="利用規約" updated={LEGAL_UPDATED}>
+    <LegalPage title="利用規約" updated={LEGAL_UPDATED.terms}>
       <p>
         この利用規約（以下「本規約」）は、{op.tradeName}（以下「運営者」）が提供する「{siteConfig.name}」（以下「本サービス」）の利用条件を定めるものです。
       </p>
