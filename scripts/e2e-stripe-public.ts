@@ -202,6 +202,7 @@ async function main() {
   assert.deepEqual([co.provider, co.amount, co.storeId, co.status, co.providerPaymentId], ["stripe", 100, storeA.id, "PROCESSING", p1.sessionId]);
   const s1 = fake.sessions.get(p1.sessionId)!;
   assert.equal(s1.amount_total, 100);
+  assert.equal(s1.product_name, "100円占い 星座占い（テスト決済）"); // Sandbox（test）の決済画面は「（テスト決済）」を付ける
   // 環境を表す値（アプリと同じ FIREBASE_PROJECT_ID から決まる）。Session と PaymentIntent の両方に入れる
   const envMd = { uranaiEnv: stripeEnvTag(process.env.FIREBASE_PROJECT_ID!) };
   assert.deepEqual(s1.metadata, { checkoutId: p1.checkoutId, storeId: storeA.id, fortuneType: "ZODIAC", ...envMd });

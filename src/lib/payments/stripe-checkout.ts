@@ -255,6 +255,14 @@ export const STRIPE_ALLOWED_PAYMENT_METHOD_TYPES = ["card", "paypay"] as const;
 /** 受け付ける支払い方法（決済記録に残す） */
 export type StripePaymentMethod = "card" | "apple_pay" | "google_pay" | "paypay";
 
+/**
+ * Checkout の決済画面・レシートに表示する商品名。決済のモード（StripeRuntime.mode：接続のキーで決まり、作成した Session の livemode で確かめる）で決める。
+ * test（Sandbox）だけ「（テスト決済）」を付ける。live（本番。実際に請求される）には付けない。Vercel の環境の名前では判定しない。
+ */
+export function stripeProductName(serviceName: string, fortuneLabel: string, mode: StripeMode): string {
+  return `${serviceName} ${fortuneLabel}${mode === "test" ? "（テスト決済）" : ""}`;
+}
+
 export type StripeSessionInput = {
   checkoutId: string;
   storeId: string;

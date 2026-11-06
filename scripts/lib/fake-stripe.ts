@@ -173,6 +173,7 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
         expires_at: Number(f.get("expires_at")),
         payment_intent: null,
         allowed_payment_method_types: allowed.length ? allowed : null,
+        product_name: f.get("line_items[0][price_data][product_data][name]"),
         managed_payments_param: f.get("managed_payments[enabled]"),
         managed_payments: { enabled: fake.forceManagedResponse ? true : managed },
         // allowed_payment_method_types は「表示できる支払い方法」を絞り込む（指定が無ければ有効なものすべて）

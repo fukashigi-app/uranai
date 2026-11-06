@@ -62,6 +62,7 @@ import {
   validateStripeSession,
   type StripePaidRejection,
   type StripeRuntime,
+  stripeProductName,
 } from "./stripe-checkout";
 
 /**
@@ -186,7 +187,7 @@ export async function startStripeCheckout(token: string | null, origin: string, 
     checkoutId: found.id,
     storeId: String(d.storeId),
     fortuneType: String(d.fortuneType),
-    productName: `${siteConfig.name} ${FORTUNE_CATALOG[d.fortuneType as keyof typeof FORTUNE_CATALOG]?.label ?? "占い"}（テスト決済）`,
+    productName: stripeProductName(siteConfig.name, FORTUNE_CATALOG[d.fortuneType as keyof typeof FORTUNE_CATALOG]?.label ?? "占い", r0.mode),
     origin,
     expiresAt: stripeSessionExpiry(),
   }, r0);

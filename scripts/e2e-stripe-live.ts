@@ -86,10 +86,13 @@ async function main() {
   const p1 = await begin(live, store.storeCode);
   assert.match(p1.sessionId, /^cs_live_/);
   assert.equal(liveStripe.fake.sessions.get(p1.sessionId)!.livemode, true);
+  // 本番の決済画面の商品名に「テスト決済」を付けない（請求額は100円のまま）
+  assert.equal(liveStripe.fake.sessions.get(p1.sessionId)!.product_name, "100円占い 星座占い");
+  assert.equal(liveStripe.fake.sessions.get(p1.sessionId)!.amount_total, 100);
   assert.equal((await fsdb().collection(C.checkouts).doc(p1.checkoutId).get()).get("stripeLivemode"), true);
   assert.equal((await confirmStripeReturn(p1.accessToken, p1.sessionId, live)).status, "not_paid"); // 支払い前は確定しない
   assert.equal((await txOf(p1.checkoutId)).length, 0);
-  step("本番モード：Session は cs_live_・livemode=true、注文に stripeLivemode=true。支払い前は確定しない");
+  step("本番モード：Session は cs_live_・livemode=true・商品名に「テスト決済」なし・100円、注文に stripeLivemode=true。支払い前は確定しない");
 
   // ---- 2. 支払い → Webhook 2通（重複を含む）・戻り先・状態の確認が同時でも、記録と占い権利は1件 ----
   await liveStripe.ctl(`pay/${p1.sessionId}`, { fee: 4 });
@@ -127,6 +130,8 @@ async function main() {
   // ---- 4. テストモードの決済は、同じ店舗でも売上に入らない ----
   const pt = await begin(test, store.storeCode);
   assert.match(pt.sessionId, /^cs_test_/);
+  assert.equal(testStripe.fake.sessions.get(pt.sessionId)!.product_name, "100円占い 星座占い（テスト決済）");
+  assert.equal(testStripe.fake.sessions.get(pt.sessionId)!.amount_total, 100);
   await testStripe.ctl(`pay/${pt.sessionId}`);
   assert.equal(outcomeOf(await webhook(test, "checkout.session.completed", { id: pt.sessionId, object: "checkout.session" })), "confirmed");
   const [tt] = await txOf(pt.checkoutId);
