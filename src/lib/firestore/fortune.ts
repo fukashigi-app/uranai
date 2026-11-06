@@ -35,7 +35,7 @@ export async function getFortuneSession(token: string | null): Promise<FortuneSe
   }
   const expiresAt = mustDate(s.get("expiresAt"));
   if (status === "EXPIRED" || expiresAt <= new Date()) return { state: "expired" };
-  return { state: "paid", fortuneType, storeName, expiresAt };
+  return { state: "paid", fortuneType, storeName, expiresAt, paidAt: toDate(s.get("createdAt")), restored: s.get("restoredAt") != null };
 }
 
 /** 1つの権利につき1回だけ占える（PAID → USED をトランザクションで切り替え）。生年月日は保存しない */

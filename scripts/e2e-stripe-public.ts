@@ -277,6 +277,54 @@ async function main() {
   assert.equal(r.status, 409);
   step("支払い：戻り先と Webhook 2通が同時でも決済記録・占い権利は1件。100円 → 店舗A（古い配分率40%が残っている）でも店舗30円・運営70円・手数料4円・Sandbox（売上対象外）。再送・再訪問も1件のまま。支払い済みの間は新しい注文を作らない");
 
+  // ---- 5b. 未使用の占い権利があるとき：新しい支払いは作らず、「購入済みの占い権利があります」と案内する（支払い完了と誤認させない） ----
+  {
+    const PAID = "お支払いが完了しました";
+    const EXISTING = "購入済みの占い権利があります";
+    const EXISTING_BODY = "以前のお支払いで取得した未使用の占い権利を利用できます。今回は新しいお支払いは発生しません。";
+    // 決済の確定の直後に入力画面へ進んだ：支払い完了の表示（実際の支払い）
+    html = await (await guest.req("/fortune/input")).text();
+    assert.ok(html.includes(PAID) && html.includes('data-entitlement-notice="payment_completed"'), "決済の直後に「お支払いが完了しました」が表示されません");
+    assert.ok(!html.includes(EXISTING), "決済の直後に購入済みの権利の案内が出ています");
+    const createsBefore = fake.createCalls;
+    const checkoutsBefore = (await fsdb().collection(C.checkouts).count().get()).data().count;
+    // 別の占い（血液型）を選んだ：新しい注文は作らず 409 → 画面は再利用の導線（?entitlement=existing）へ進む
+    r = await guest.req("/api/checkout", { method: "POST", json: { fortuneType: "BLOOD" } });
+    assert.equal(r.status, 409);
+    assert.equal(((await r.json()) as { error: { code: string } }).error.code, "paid_session_exists");
+    for (let i = 0; i < 2; i++) {
+      // 再読み込み・戻る（同じ URL を開き直す）でも同じ案内
+      html = await (await guest.req("/fortune/input?entitlement=existing")).text();
+      assert.ok(html.includes(EXISTING) && html.includes(EXISTING_BODY), "購入済みの権利の案内がありません");
+      assert.ok(!html.includes(PAID), "既存の権利の再利用で「お支払いが完了しました」が表示されました");
+      assert.ok(html.replace(/<!-- -->/g, "").includes("この権利で占えるのは「星座占い」です"), "権利の占いの種類が案内されていません");
+    }
+    // 別の店舗の QR を読んでから選んでも、元の店舗・元の種類の権利のまま（新しい注文・決済は作らない）
+    await guest.req(`/s/${storeB.storeCode}`);
+    r = await guest.req("/api/checkout", { method: "POST", json: { fortuneType: "ZODIAC" } });
+    assert.equal(r.status, 409);
+    html = await (await guest.req("/fortune/input?entitlement=existing")).text();
+    assert.ok(html.includes(storeA.name) && !html.includes(storeB.name), "権利の店舗が入れ替わりました");
+    await guest.req(`/s/${storeA.storeCode}`);
+    // 種類の違う占いはこの権利では占えない（権利は消費されない）
+    r = await guest.req("/api/fortune", { method: "POST", json: { type: "BLOOD", bloodType: "A", birthMonth: 4 } });
+    assert.equal(r.status, 400);
+    assert.equal((await fsdb().collection(C.fortuneSessions).doc(t1.id).get()).get("status"), "PAID");
+    assert.equal(fake.createCalls, createsBefore, "既存の権利があるのに Checkout Session を作りました");
+    assert.equal((await fsdb().collection(C.checkouts).count().get()).data().count, checkoutsBefore, "既存の権利があるのに注文を作りました");
+    assert.equal((await txOf(p1.checkoutId)).length, 1);
+    // URL の値を書き換えても支払い完了には上がらない（下げる方向だけ）。時間がたってから直接開いたら、支払い完了とは表示しない
+    const fsRef = fsdb().collection(C.fortuneSessions).doc(t1.id);
+    const createdAt = (await fsRef.get()).get("createdAt");
+    await fsRef.update({ createdAt: new Date(Date.now() - 11 * 60_000) });
+    for (const path of ["/fortune/input", "/fortune/input?entitlement=paid", "/fortune/input?entitlement=completed"]) {
+      html = await (await guest.req(path)).text();
+      assert.ok(html.includes(EXISTING) && !html.includes(PAID), `${path}：時間がたった権利で「お支払いが完了しました」が表示されました`);
+    }
+    await fsRef.update({ createdAt }); // 元に戻す（Emulator の検証用の値だけ）
+  }
+  step("未使用の占い権利があるとき：決済の直後だけ「お支払いが完了しました」。別の占い・別の店舗の QR を選んでも新しい注文・決済は作らず、「購入済みの占い権利があります（今回は新しいお支払いは発生しません）」と権利の種類を案内。再読み込み・直接のアクセス・URL の書き換えでも支払い完了と表示しない。種類の違う占いには使えず、権利は消費されない");
+
   // ---- 6. 入力 → 結果。二重送信は同じ結果。24時間の再表示 ----
   html = await (await guest.req("/fortune/input")).text();
   assert.ok(!html.includes("テストモードのため決済をスキップしました"), "有料の入力画面ではありません");

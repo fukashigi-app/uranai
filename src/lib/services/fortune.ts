@@ -11,7 +11,8 @@ import { sha256Hex } from "@/lib/security/crypto";
 
 export type FortuneSessionView =
   | { state: "none" }
-  | { state: "paid"; fortuneType: FortuneInput["type"]; storeName: string; expiresAt: Date }
+  /** paidAt … 権利の作成時刻（決済の確定の時刻）。restored … 運営が戻した権利。どちらも表示の案内だけに使う（fortune/entitlement-notice.ts） */
+  | { state: "paid"; fortuneType: FortuneInput["type"]; storeName: string; expiresAt: Date; paidAt: Date | null; restored: boolean }
   | { state: "used"; fortuneType: FortuneInput["type"]; storeName: string; result: FortuneResultData | null }
   | { state: "expired" };
 
@@ -37,7 +38,7 @@ export async function getFortuneSession(token: string | null): Promise<FortuneSe
     return { state: "used", fortuneType: s.fortuneType, storeName: row.storeName, result: result?.result ?? null };
   }
   if (s.status === "EXPIRED" || s.expiresAt <= new Date()) return { state: "expired" };
-  return { state: "paid", fortuneType: s.fortuneType, storeName: row.storeName, expiresAt: s.expiresAt };
+  return { state: "paid", fortuneType: s.fortuneType, storeName: row.storeName, expiresAt: s.expiresAt, paidAt: s.createdAt ?? null, restored: false };
 }
 
 export { FortuneError } from "@/lib/errors";

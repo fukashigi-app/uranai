@@ -5,8 +5,13 @@ import { FortuneInputForm } from "@/components/public/fortune-input-form";
 import { getAccessToken } from "@/lib/cookies";
 import { getFortuneSession } from "@/lib/services/fortune";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
+import { entitlementNoticeFor, EXISTING_ENTITLEMENT_BODY, EXISTING_ENTITLEMENT_PARAM, EXISTING_ENTITLEMENT_TITLE, isExistingEntitlementHint } from "@/lib/fortune/entitlement-notice";
+import { formatDateTimeJa } from "@/lib/time";
 
-export default async function FortuneInputPage() {
+// 権利の状態・時刻で案内が変わるため毎回サーバーで描画する
+export const dynamic = "force-dynamic";
+
+export default async function FortuneInputPage(props: PageProps<"/fortune/input">) {
   // テストモード（決済スキップ）で開始した占い
   const test = await getTestSession();
   if (test) {
@@ -45,11 +50,28 @@ export default async function FortuneInputPage() {
     );
   }
   const item = FORTUNE_CATALOG[session.fortuneType];
+  // 「お支払いが完了しました」は、この権利の決済の確定の直後だけ（サーバーの記録で判定）。以前の支払いの権利を使うときは、新しい支払いが無いことを案内する
+  const notice = entitlementNoticeFor({
+    paidAt: session.paidAt,
+    restored: session.restored,
+    reuseHint: isExistingEntitlementHint((await props.searchParams)[EXISTING_ENTITLEMENT_PARAM]),
+    now: new Date(),
+  });
   return (
     <PublicShell storeName={session.storeName} step={3}>
-      <div className="mb-5 flex items-center gap-2 rounded-2xl border border-success/25 bg-success/10 px-4 py-2.5 text-[13px] text-success fade-up">
-        <span aria-hidden>✓</span> お支払いが完了しました
-      </div>
+      {notice === "payment_completed" ? (
+        <div data-entitlement-notice="payment_completed" className="mb-5 flex items-center gap-2 rounded-2xl border border-success/25 bg-success/10 px-4 py-2.5 text-[13px] text-success fade-up">
+          <span aria-hidden>✓</span> お支払いが完了しました
+        </div>
+      ) : (
+        <div data-entitlement-notice="existing_entitlement" role="status" className="mb-5 rounded-2xl border border-sky-400/30 bg-sky-500/10 px-4 py-3 text-[13px] leading-relaxed text-sky-200 fade-up">
+          <p className="font-bold">{EXISTING_ENTITLEMENT_TITLE}</p>
+          <p className="mt-1">{EXISTING_ENTITLEMENT_BODY}</p>
+          <p className="mt-1 text-[12px] text-sky-200/80">
+            この権利で占えるのは「{item.label}」です（有効期限：{formatDateTimeJa(session.expiresAt)}）。
+          </p>
+        </div>
+      )}
       <h1 className="mb-1 font-serif text-2xl font-bold tracking-wide">{item.label}</h1>
       <p className="mb-5 text-[13px] text-ink-muted">{item.inputLabel}を選んで「占ってみる」を押してください。</p>
       <FortuneInputForm type={session.fortuneType} />

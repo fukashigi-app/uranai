@@ -7,6 +7,7 @@ import { FORTUNE_CATALOG, FORTUNE_ORDER } from "@/lib/fortune/catalog";
 import { DISPLAY_PRICE_JPY } from "@/config/site";
 import { FortuneIcon } from "./fortune-icons";
 import { Spinner } from "@/components/ui/spinner";
+import { EXISTING_ENTITLEMENT_PATH } from "@/lib/fortune/entitlement-notice";
 
 
 /**
@@ -35,7 +36,8 @@ export function FortuneSelector({ testMode: testModeProp = false, stripeTest = f
       });
       if (!res.ok) {
         const data = await res.json().catch(() => null);
-        if (data?.error?.code === "paid_session_exists") return router.push("/fortune/input");
+        // 支払い済みで未使用の占い権利がある（新しい注文・支払いは作らない）：入力画面で「購入済みの占い権利があります」と案内する
+        if (data?.error?.code === "paid_session_exists") return router.push(EXISTING_ENTITLEMENT_PATH);
         if (data?.error?.code === "payment_processing") return router.push("/payment");
         setError(data?.error?.message ?? "エラーが発生しました。もう一度お試しください。");
         setLoading(false);
