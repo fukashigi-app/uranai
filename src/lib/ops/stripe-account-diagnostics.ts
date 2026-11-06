@@ -1,18 +1,22 @@
 /**
- * Sandbox v2 専用：Stripe のアカウントの照合の診断（運営画面の「設定」→ POST /api/admin/stripe-account-diagnostics）。
+ * Stripe のアカウントの照合の診断（運営画面の「設定」→ POST /api/admin/stripe-account-diagnostics）。Sandbox v2 の Preview と本番（Production）で使える。
  *
  * 決済画面の作成で StripeAccountMismatchError（キーの持ち主 ≠ STRIPE_ACCOUNT_ID）が出たときに、原因を安全に切り分けるためのもの。
  *  - Stripe には GET /v1/account（キーの持ち主のアカウントの取得）だけを送る。決済画面・PaymentIntent の作成、返金、Webhook の再送はしない
  *  - Firestore には接続しない（読み書きしない）。レート制限も Firestore を使わず、実行中のサーバーのメモリだけで数える
  *  - 結果は真偽値・固定の分類だけ。キー・Webhook の秘密・アカウントの ID の値（一部を含む）・Stripe のエラーの文言は返さない。
  *    不一致のときだけ、アカウントの ID の末尾4文字（返ってきた ID と設定の ID）を返す（どの Sandbox のキーかの見分け用）
- *  - 使えるのは Sandbox v2 の Preview（VERCEL_ENV=preview・Firebase の接続先が uranai-stripe-sandbox-v2・
- *    そのプロジェクトに固定したブランチ preview/stripe-sandbox-v2）だけ。判定はデータベースの接続の判定（target-guard.ts）と、
- *    テスト決済の判定（stripe-guard.ts の stripeTestConfig）をそのまま使う
+ *  - 使えるのは次の2つの環境だけ（stripeAccountDiagnosticsEnvironment。旧 Preview・ローカル・Development では使えない）
+ *      sandbox_v2 … Sandbox v2 の Preview（VERCEL_ENV=preview・Firebase の接続先が uranai-stripe-sandbox-v2・
+ *                   そのプロジェクトに固定したブランチ preview/stripe-sandbox-v2）。判定はデータベースの接続の判定（target-guard.ts）と、
+ *                   テスト決済の判定（stripe-guard.ts の stripeTestConfig）をそのまま使う
+ *      production … Vercel の Production。本番の接続の判定（stripe-guard.ts の stripeLiveConfig）をそのまま使う。
+ *                   本番の接続の条件（sk_live_・whsec_・acct_・STRIPE_LIVE_CHECKOUT=on・本番の Firebase など）がそろっているときだけ Stripe に問い合わせる。
+ *                   新規の決済の受付（STRIPE_NEW_CHECKOUT）は見ない（止めていても診断できる。受付の状態は表示だけ）
  * route や単体テストから読み込めるよう、server-only・env.ts・Firestore・Stripe SDK に依存しない（Stripe への問い合わせは引数で受け取る）。
  */
 import { checkFirestoreTarget, previewFirebaseTargetOf, SANDBOX_V2_FIREBASE_PROJECT_ID } from "@/lib/firestore/target-guard";
-import { stripeTestConfig, type StripeTestDenyReason } from "@/lib/payments/stripe-guard";
+import { stripeLiveConfig, stripeTestConfig, type StripeLiveDenyReason, type StripeNewCheckoutDenyReason, type StripeTestDenyReason } from "@/lib/payments/stripe-guard";
 
 type Env = Record<string, string | undefined>;
 
@@ -24,9 +28,19 @@ export function isSandboxV2Environment(e: Env = process.env): boolean {
   return previewFirebaseTargetOf(e.FIREBASE_PROJECT_ID)?.projectId === SANDBOX_V2_FIREBASE_PROJECT_ID;
 }
 
+/** 診断を使える環境（それ以外では使えない：画面に出さず、API は 404） */
+export type StripeAccountDiagnosticsEnvironment = "sandbox_v2" | "production";
+
+export function stripeAccountDiagnosticsEnvironment(e: Env = process.env): StripeAccountDiagnosticsEnvironment | null {
+  if (isSandboxV2Environment(e)) return "sandbox_v2";
+  if (e.VERCEL_ENV === "production") return "production";
+  return null;
+}
+
 /** 画面に出してよいエラーの分類（固定の値だけ。Stripe のエラーの文言・リクエストの ID は含めない） */
 export type StripeAccountDiagnosticsError =
   | `config_${StripeTestDenyReason}`
+  | `config_live_${StripeLiveDenyReason}`
   | "runtime_unavailable"
   | "stripe_authentication"
   | "stripe_permission"
@@ -38,11 +52,15 @@ export type StripeAccountDiagnosticsError =
   | "unknown";
 
 export type StripeAccountDiagnosticsResult = {
-  /** 実行環境（この結果は Sandbox v2 でしか作らない） */
-  environment: "sandbox_v2";
+  /** 実行環境（sandbox_v2 … Sandbox v2 の Preview・production … 本番） */
+  environment: StripeAccountDiagnosticsEnvironment;
   secretKeySet: boolean;
   /** STRIPE_SECRET_KEY がテスト用（sk_test_） */
   secretKeyIsTest: boolean;
+  /** STRIPE_SECRET_KEY が本番用の秘密鍵（sk_live_） */
+  secretKeyIsLive: boolean;
+  /** 本番だけ：新規の決済の受付の状態（表示だけ。診断は受付を止めていても行う）。Sandbox v2 は null */
+  newCheckout: { accepting: true } | { accepting: false; reason: StripeNewCheckoutDenyReason } | null;
   accountIdSet: boolean;
   webhookSecretSet: boolean;
   /** STRIPE_ACCOUNT_ID の前後に空白・改行がある（アプリは取り除いて使う。登録の手がかり） */
@@ -81,7 +99,8 @@ export function classifyStripeError(err: unknown): StripeAccountDiagnosticsError
 }
 
 /**
- * 診断の本体。呼ぶ前に、運営の認証と isSandboxV2Environment を確かめること（route で行う）。
+ * 診断の本体。呼ぶ前に、運営の認証と stripeAccountDiagnosticsEnvironment を確かめること（route で行う）。
+ * 本番（VERCEL_ENV=production）は stripeLiveConfig、それ以外は今までどおり stripeTestConfig で判定する。
  * retrieveAccount … 決済の処理と同じ接続（stripeRuntime）で GET /v1/account を呼ぶ関数。設定がそろっているときだけ、1回だけ呼ぶ
  */
 export async function runStripeAccountDiagnostics(
@@ -91,10 +110,14 @@ export async function runStripeAccountDiagnostics(
 ): Promise<StripeAccountDiagnosticsResult> {
   const secretKey = (e.STRIPE_SECRET_KEY ?? "").trim();
   const accountRaw = e.STRIPE_ACCOUNT_ID ?? "";
+  const production = e.VERCEL_ENV === "production";
+  const live = production ? stripeLiveConfig(e) : null;
   const base = {
-    environment: "sandbox_v2" as const,
+    environment: (production ? "production" : "sandbox_v2") as StripeAccountDiagnosticsEnvironment,
     secretKeySet: secretKey !== "",
     secretKeyIsTest: secretKey.startsWith("sk_test_"),
+    secretKeyIsLive: secretKey.startsWith("sk_live_"),
+    newCheckout: live?.ok ? (live.newCheckout.ok ? ({ accepting: true } as const) : ({ accepting: false, reason: live.newCheckout.reason } as const)) : null,
     accountIdSet: accountRaw.trim() !== "",
     webhookSecretSet: (e.STRIPE_WEBHOOK_SECRET ?? "").trim() !== "",
     accountIdHasSurroundingWhitespace: accountRaw !== "" && accountRaw !== accountRaw.trim(),
@@ -105,11 +128,19 @@ export async function runStripeAccountDiagnostics(
     checkedAt: now().toISOString(),
   });
 
-  // テスト決済の判定（決済の処理と同じ。テストモード・必要な変数・本番の値の混入なし）。満たさなければ Stripe に問い合わせない
-  const cfg = stripeTestConfig(e);
-  if (!cfg.ok) return done({ apiAuth: "not_run", accountMatch: "not_run", mismatchHint: null, error: `config_${cfg.reason}` });
-  if (!cfg.accountId) return done({ apiAuth: "not_run", accountMatch: "not_run", mismatchHint: null, error: "config_test_account_id_missing" });
-  const expected = cfg.accountId;
+  let expected: string;
+  if (live) {
+    // 本番：本番の接続の判定（決済の処理と同じ。sk_live_・whsec_・acct_・本番の Firebase・テストの設定の混入なし）。満たさなければ Stripe に問い合わせない。
+    // 新規の決済の受付（STRIPE_NEW_CHECKOUT・公開状態）は接続の条件ではないので、止めていても診断する
+    if (!live.ok) return done({ apiAuth: "not_run", accountMatch: "not_run", mismatchHint: null, error: `config_live_${live.reason}` });
+    expected = live.accountId;
+  } else {
+    // テスト決済の判定（決済の処理と同じ。テストモード・必要な変数・本番の値の混入なし）。満たさなければ Stripe に問い合わせない
+    const cfg = stripeTestConfig(e);
+    if (!cfg.ok) return done({ apiAuth: "not_run", accountMatch: "not_run", mismatchHint: null, error: `config_${cfg.reason}` });
+    if (!cfg.accountId) return done({ apiAuth: "not_run", accountMatch: "not_run", mismatchHint: null, error: "config_test_account_id_missing" });
+    expected = cfg.accountId;
+  }
 
   let account: unknown;
   try {

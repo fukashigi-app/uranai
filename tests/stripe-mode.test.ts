@@ -166,6 +166,7 @@ describe("テスト（Sandbox）の判定の追加の条件", () => {
         "lib/payments/stripe-access.ts", // 運営だけの本番決済テストの利用者の判定
         "app/admin/(console)/settings/page.tsx", // 表示だけ
         "app/api/health/route.ts", // 表示だけ
+        "lib/ops/stripe-account-diagnostics.ts", // 照合の診断の前の設定の確認だけ（接続は stripeRuntime）
       ].map((f) => path.join(src, f)),
     );
     const users = files.filter((f) => !allowed.has(f) && /\bstripe(Live)?Config\(/.test(readFileSync(f, "utf8")));

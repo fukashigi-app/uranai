@@ -22,12 +22,16 @@ import {
   DiagnosticsRateLimiter,
   isSandboxV2Environment,
   runStripeAccountDiagnostics,
+  stripeAccountDiagnosticsEnvironment,
 } from "@/lib/ops/stripe-account-diagnostics";
 
 const SECRET = ["sk", "test", "51DiagUnitSecretKeyMaterialZx8Lq2Vm7Rt4Np9Kw3"].join("_");
 const WHSEC = ["whsec", "DiagUnitWebhookSecretMaterial9Kw3Hy6"].join("_");
 const ACCOUNT = "acct_1DiagUnitAcctAb12";
 const OTHER_ACCOUNT = "acct_1OldSandboxAcctZz99";
+const LIVE_SECRET = ["sk", "live", "51DiagUnitLiveKeyMaterialQw7Er4Ty1Ui8Op5As2"].join("_");
+const LIVE_WHSEC = ["whsec", "DiagUnitLiveWebhookMaterial3Df6Gh9"].join("_");
+const LIVE_ACCOUNT = "acct_1DiagLiveAcctCd34";
 const PRIVATE_KEY = "-----BEGIN PRIVATE KEY-----\nSECRETKEYMATERIAL\n-----END PRIVATE KEY-----\n";
 
 const V2 = {
@@ -58,11 +62,23 @@ const PRODUCTION = {
   FIREBASE_PROJECT_ID: "uranai-b6edf",
   PRODUCTION_FIREBASE_PROJECT_ID: "uranai-b6edf",
   FIREBASE_CLIENT_EMAIL: "firebase-adminsdk-ab12c@uranai-b6edf.iam.gserviceaccount.com",
-  STRIPE_SECRET_KEY: ["sk", "live", "DiagUnitLiveKey"].join("_"),
-  STRIPE_WEBHOOK_SECRET: WHSEC,
-  STRIPE_ACCOUNT_ID: ACCOUNT,
+  STRIPE_SECRET_KEY: LIVE_SECRET,
+  STRIPE_WEBHOOK_SECRET: LIVE_WHSEC,
+  STRIPE_ACCOUNT_ID: LIVE_ACCOUNT,
 };
-const SECRETS = [SECRET, WHSEC, ACCOUNT, OTHER_ACCOUNT, PRIVATE_KEY, "SECRETKEYMATERIAL", SECRET.slice(-4), SECRET.slice(-8)];
+/** 本番の接続の条件がそろい、新規の決済の受付は停止（今の本番の想定：開発モード・STRIPE_NEW_CHECKOUT=off） */
+const LIVE = {
+  ...PRODUCTION,
+  FIREBASE_PRIVATE_KEY: PRIVATE_KEY,
+  PAYMENT_PROVIDER: "stripe",
+  STRIPE_LIVE_CHECKOUT: "on",
+  STRIPE_NEW_CHECKOUT: "off",
+  SITE_STATUS: "development",
+};
+const SECRETS = [
+  SECRET, WHSEC, ACCOUNT, OTHER_ACCOUNT, PRIVATE_KEY, "SECRETKEYMATERIAL", SECRET.slice(-4), SECRET.slice(-8),
+  LIVE_SECRET, LIVE_WHSEC, LIVE_ACCOUNT, LIVE_SECRET.slice(-4), LIVE_SECRET.slice(-8), LIVE_WHSEC.slice(-8),
+];
 const ok = (id: string) => async () => ({ id, object: "account" });
 
 describe("実行環境の判定（Sandbox v2 だけ）", () => {
@@ -92,6 +108,103 @@ describe("実行環境の判定（Sandbox v2 だけ）", () => {
   });
 });
 
+describe("診断を使える環境（Sandbox v2 と本番だけ）", () => {
+  it("Sandbox v2 の Preview は sandbox_v2、Vercel の Production は production", () => {
+    expect(stripeAccountDiagnosticsEnvironment(V2)).toBe("sandbox_v2");
+    expect(stripeAccountDiagnosticsEnvironment(PRODUCTION)).toBe("production");
+    expect(stripeAccountDiagnosticsEnvironment(LIVE)).toBe("production");
+    // 本番の接続の設定が不足していても、診断の画面は出す（不足を結果で知らせる）
+    expect(stripeAccountDiagnosticsEnvironment({ VERCEL_ENV: "production" })).toBe("production");
+  });
+
+  it("旧 Preview・ローカル・Development・未設定では使えない", () => {
+    for (const e of [OLD_PREVIEW, { ...V2, VERCEL_ENV: undefined }, { ...V2, VERCEL_ENV: "development" }, { ...V2, VERCEL_GIT_COMMIT_REF: "main" }, {}]) {
+      expect(stripeAccountDiagnosticsEnvironment(e)).toBeNull();
+    }
+  });
+});
+
+describe("診断の本体（本番）", () => {
+  const now = () => new Date("2026-11-06T05:00:00.000Z");
+
+  it("一致：本番の接続で認証は成功・照合は一致。新規決済の受付を止めていても診断する", async () => {
+    const retrieve = vi.fn(ok(LIVE_ACCOUNT));
+    const r = await runStripeAccountDiagnostics(retrieve, LIVE, now);
+    expect(retrieve).toHaveBeenCalledTimes(1);
+    expect(r).toEqual({
+      environment: "production",
+      secretKeySet: true,
+      secretKeyIsTest: false,
+      secretKeyIsLive: true,
+      newCheckout: { accepting: false, reason: "live_not_open" },
+      accountIdSet: true,
+      webhookSecretSet: true,
+      accountIdHasSurroundingWhitespace: false,
+      apiAuth: "success",
+      accountMatch: "match",
+      mismatchHint: null,
+      error: null,
+      checkedAt: "2026-11-06T05:00:00.000Z",
+    });
+    const json = JSON.stringify(r);
+    for (const sec of SECRETS) expect(json).not.toContain(sec);
+  });
+
+  it("受付の状態はどれでも診断は行う（off・未設定・運営テスト中の off・受付中）", async () => {
+    const cases: [Record<string, string | undefined>, unknown][] = [
+      [{ STRIPE_NEW_CHECKOUT: "off", STRIPE_LIVE_OPERATOR_TEST: "on" }, { accepting: false, reason: "new_checkout_off" }],
+      [{ STRIPE_NEW_CHECKOUT: undefined, STRIPE_LIVE_OPERATOR_TEST: "on" }, { accepting: false, reason: "new_checkout_not_set" }],
+      [{ STRIPE_NEW_CHECKOUT: "on", STRIPE_LIVE_OPERATOR_TEST: "on" }, { accepting: true }],
+      [{ STRIPE_NEW_CHECKOUT: "off", SITE_STATUS: "open" }, { accepting: false, reason: "new_checkout_off" }],
+    ];
+    for (const [patch, newCheckout] of cases) {
+      const retrieve = vi.fn(ok(LIVE_ACCOUNT));
+      const r = await runStripeAccountDiagnostics(retrieve, { ...LIVE, ...patch }, now);
+      expect(retrieve).toHaveBeenCalledTimes(1);
+      expect(r).toMatchObject({ environment: "production", apiAuth: "success", accountMatch: "match", newCheckout, error: null });
+    }
+  });
+
+  it("不一致：末尾4文字だけを返す", async () => {
+    const r = await runStripeAccountDiagnostics(ok(ACCOUNT), LIVE, now);
+    expect(r).toMatchObject({ environment: "production", apiAuth: "success", accountMatch: "mismatch", mismatchHint: { returnedLast4: "Ab12", configuredLast4: "Cd34", differsOnlyByCase: false } });
+    const json = JSON.stringify(r);
+    for (const sec of [LIVE_SECRET, LIVE_WHSEC, LIVE_ACCOUNT, LIVE_SECRET.slice(-4)]) expect(json).not.toContain(sec);
+  });
+
+  it("API キーの認証の失敗：分類だけを返す（Stripe のエラーの文言・キーは返さない）", async () => {
+    const err = new Stripe.errors.StripeAuthenticationError({ message: `Invalid API Key provided: sk_live_****${LIVE_SECRET.slice(-4)} ${LIVE_SECRET}`, type: "invalid_request_error" });
+    const r = await runStripeAccountDiagnostics(async () => { throw err; }, LIVE, now);
+    expect(r).toMatchObject({ environment: "production", apiAuth: "failure", accountMatch: "not_run", error: "stripe_authentication" });
+    const json = JSON.stringify(r);
+    for (const sec of SECRETS) expect(json).not.toContain(sec);
+    expect(json).not.toContain("Invalid API Key");
+  });
+
+  it("本番の接続の設定が不足していれば Stripe に問い合わせない（config_live_*）", async () => {
+    const cases: [Record<string, string | undefined>, string, Record<string, unknown>][] = [
+      [{ STRIPE_LIVE_CHECKOUT: undefined }, "config_live_not_enabled", { newCheckout: null }],
+      [{ STRIPE_SECRET_KEY: undefined }, "config_live_secret_key_missing", { secretKeySet: false, secretKeyIsLive: false }],
+      [{ STRIPE_SECRET_KEY: SECRET }, "config_live_secret_key_not_live", { secretKeyIsTest: true, secretKeyIsLive: false }],
+      [{ STRIPE_WEBHOOK_SECRET: undefined }, "config_live_webhook_secret_missing", { webhookSecretSet: false }],
+      [{ STRIPE_ACCOUNT_ID: undefined }, "config_live_account_id_missing", { accountIdSet: false }],
+      [{ STRIPE_ACCOUNT_ID: "acct_bad!" }, "config_live_account_id_missing", { accountIdSet: true }],
+      [{ STRIPE_TEST_CHECKOUT: "on" }, "config_live_test_flag_in_production", {}],
+      [{ FIREBASE_PROJECT_ID: "uranai-stripe-sandbox-v2" }, "config_live_production_project_mismatch", {}],
+      [{ PAYMENT_PROVIDER: "mock" }, "config_live_dangerous_config", {}],
+      [{ STRIPE_API_BASE: "http://127.0.0.1:12111" }, "config_live_api_base_not_allowed", {}],
+    ];
+    for (const [patch, error, flags] of cases) {
+      const retrieve = vi.fn(ok(LIVE_ACCOUNT));
+      const r = await runStripeAccountDiagnostics(retrieve, { ...LIVE, ...patch }, now);
+      expect(retrieve, error).not.toHaveBeenCalled();
+      expect(r, error).toMatchObject({ environment: "production", apiAuth: "not_run", accountMatch: "not_run", error, ...flags });
+      const json = JSON.stringify(r);
+      for (const sec of SECRETS) expect(json).not.toContain(sec);
+    }
+  });
+});
+
 describe("診断の本体", () => {
   const now = () => new Date("2026-11-04T01:11:00.000Z");
 
@@ -101,6 +214,8 @@ describe("診断の本体", () => {
       environment: "sandbox_v2",
       secretKeySet: true,
       secretKeyIsTest: true,
+      secretKeyIsLive: false,
+      newCheckout: null,
       accountIdSet: true,
       webhookSecretSet: true,
       accountIdHasSurroundingWhitespace: false,
@@ -224,7 +339,7 @@ describe("POST /api/admin/stripe-account-diagnostics", () => {
   });
 
   const stub = (e: Record<string, string | undefined>) => {
-    for (const k of new Set([...Object.keys(V2), ...Object.keys(PRODUCTION), "STRIPE_LIVE_CHECKOUT", "STRIPE_LIVE_OPERATOR_TEST", "STRIPE_API_BASE", "FIRESTORE_EMULATOR_HOST"])) vi.stubEnv(k, e[k] as string);
+    for (const k of new Set([...Object.keys(V2), ...Object.keys(PRODUCTION), ...Object.keys(LIVE), "STRIPE_LIVE_CHECKOUT", "STRIPE_LIVE_OPERATOR_TEST", "STRIPE_NEW_CHECKOUT", "STRIPE_TEST_CHECKOUT", "SITE_STATUS", "PAYMENT_PROVIDER", "STRIPE_API_BASE", "FIRESTORE_EMULATOR_HOST"])) vi.stubEnv(k, e[k] as string);
   };
   const call = async () => {
     const { POST } = await import("@/app/api/admin/stripe-account-diagnostics/route");
@@ -293,8 +408,72 @@ describe("POST /api/admin/stripe-account-diagnostics", () => {
     expect(state.runtimeCalls).toBe(0);
   });
 
-  it("本番・旧 Preview・ローカルでは拒否（404。Stripe に問い合わせない）", async () => {
-    for (const e of [PRODUCTION, OLD_PREVIEW, { ...V2, VERCEL_ENV: undefined }, { ...V2, VERCEL_GIT_COMMIT_REF: "preview/stripe-verification" }]) {
+  it("本番・運営：一致を返す（新規決済の受付は停止のまま）。応答・ログに秘密を出さない", async () => {
+    stub(LIVE);
+    state.retrieve = ok(LIVE_ACCOUNT);
+    const res = await call();
+    await noSecrets(res);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ environment: "production", secretKeyIsLive: true, apiAuth: "success", accountMatch: "match", newCheckout: { accepting: false }, error: null });
+    expect(state.runtimeCalls).toBe(1);
+    expect(logs.some((l) => l.includes('"environment":"production"'))).toBe(true);
+  });
+
+  it("本番・運営：不一致を返す（末尾4文字だけ）", async () => {
+    stub(LIVE);
+    state.retrieve = ok(OTHER_ACCOUNT);
+    const res = await call();
+    await noSecrets(res);
+    expect(await res.json()).toMatchObject({ environment: "production", accountMatch: "mismatch", mismatchHint: { returnedLast4: "Zz99", configuredLast4: "Cd34" } });
+  });
+
+  it("本番・運営：API キーの認証の失敗は分類だけ（文言・キーは応答・ログに出さない）", async () => {
+    stub(LIVE);
+    state.retrieve = async () => {
+      throw new Stripe.errors.StripeAuthenticationError({ message: `Invalid API Key provided: ${LIVE_SECRET}` });
+    };
+    const res = await call();
+    await noSecrets(res);
+    expect(await res.json()).toMatchObject({ environment: "production", apiAuth: "failure", error: "stripe_authentication" });
+    for (const line of logs) expect(line).not.toContain("Invalid API Key");
+  });
+
+  it("本番・運営：本番の接続の設定が無ければ Stripe の接続を作らずに不足を返す", async () => {
+    stub(PRODUCTION); // STRIPE_LIVE_CHECKOUT 無し（今の本番の状態）
+    const res = await call();
+    await noSecrets(res);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ environment: "production", apiAuth: "not_run", accountMatch: "not_run", error: "config_live_not_enabled", newCheckout: null });
+    expect(state.runtimeCalls).toBe(0);
+  });
+
+  it("本番：ログインしていない・店舗アカウントは 404、別のサイトからの送信は 403（Stripe に問い合わせない）", async () => {
+    stub(LIVE);
+    for (const u of [null, { ...OPERATOR, role: "STORE" as const }]) {
+      state.user = u;
+      const res = await call();
+      expect(res.status).toBe(404);
+      await noSecrets(res);
+    }
+    state.user = OPERATOR;
+    state.sameOrigin = false;
+    const res = await call();
+    expect(res.status).toBe(403);
+    expect(state.runtimeCalls).toBe(0);
+  });
+
+  it("本番：レート制限は Sandbox v2 と同じ（運営ごとに1分3回まで）", async () => {
+    stub(LIVE);
+    state.retrieve = ok(LIVE_ACCOUNT);
+    const { POST } = await import("@/app/api/admin/stripe-account-diagnostics/route");
+    const req = () => new Request("https://uranai.example.test/api/admin/stripe-account-diagnostics", { method: "POST" });
+    for (let i = 0; i < 3; i++) expect((await POST(req())).status).toBe(200);
+    expect((await POST(req())).status).toBe(429);
+    expect(state.runtimeCalls).toBe(3);
+  });
+
+  it("旧 Preview・ローカル・Development では拒否（404。Stripe に問い合わせない）", async () => {
+    for (const e of [OLD_PREVIEW, { ...V2, VERCEL_ENV: "development" }, { ...V2, VERCEL_ENV: undefined }, { ...V2, VERCEL_GIT_COMMIT_REF: "preview/stripe-verification" }]) {
       stub(e);
       const res = await call();
       await noSecrets(res);

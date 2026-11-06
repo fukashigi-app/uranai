@@ -8,8 +8,8 @@ import { describeProtection, getProtectionStatus } from "@/lib/services/vercel-p
 import { STORE_SHARE_BPS, PRICE_JPY, defaultFeeRateBps } from "@/config/pricing";
 import { siteConfig } from "@/config/site";
 import { changeAdminPasswordAction } from "../../actions";
-import { isSandboxV2Environment, STRIPE_ACCOUNT_DIAGNOSTICS_ERROR_LABEL } from "@/lib/ops/stripe-account-diagnostics";
-import { STRIPE_TEST_DENY_MESSAGE } from "@/lib/payments/stripe-guard";
+import { STRIPE_ACCOUNT_DIAGNOSTICS_ERROR_LABEL, stripeAccountDiagnosticsEnvironment } from "@/lib/ops/stripe-account-diagnostics";
+import { STRIPE_LIVE_DENY_MESSAGE, STRIPE_NEW_CHECKOUT_DENY_MESSAGE, STRIPE_TEST_DENY_MESSAGE } from "@/lib/payments/stripe-guard";
 import { StripeAccountDiagnosticsPanel } from "@/components/console/stripe-account-diagnostics";
 import { TestAlertPanel } from "@/components/console/test-alert-panel";
 import { isTestAlertAllowed } from "@/lib/ops/test-alert";
@@ -26,6 +26,7 @@ function stripeStateLabel(): string {
 
 export default async function AdminSettingsPage() {
   const user = await requireOperator();
+  const diagnosticsEnvironment = stripeAccountDiagnosticsEnvironment();
   const e = env();
   const status = siteStatus().status;
   const live = stripeLiveConfig();
@@ -83,13 +84,16 @@ export default async function AdminSettingsPage() {
           ))}
         </dl>
       </Card>
-      {isSandboxV2Environment() ? (
-        <Card title="Stripe アカウントの照合の診断（Sandbox v2 専用）" className="mt-4">
+      {diagnosticsEnvironment ? (
+        <Card title={diagnosticsEnvironment === "production" ? "Stripe アカウントの照合の診断（本番・Live）" : "Stripe アカウントの照合の診断（Sandbox v2 専用）"} className="mt-4">
           <StripeAccountDiagnosticsPanel
+            environment={diagnosticsEnvironment}
             errorLabels={{
               ...STRIPE_ACCOUNT_DIAGNOSTICS_ERROR_LABEL,
               ...Object.fromEntries(Object.entries(STRIPE_TEST_DENY_MESSAGE).map(([k, v]) => [`config_${k}`, v])),
+              ...Object.fromEntries(Object.entries(STRIPE_LIVE_DENY_MESSAGE).map(([k, v]) => [`config_live_${k}`, v])),
             }}
+            newCheckoutLabels={STRIPE_NEW_CHECKOUT_DENY_MESSAGE}
           />
         </Card>
       ) : null}
