@@ -295,7 +295,13 @@ Stripe の決済（PaymentIntent）の一覧を起点に、この環境の支払
 - 処理待ち：支払いから60分以内で記録がまだ無いものは異常にしません。支払いが完了していない PaymentIntent（処理中など）は照合しません
 - 未完了：Stripe・Firestore の取得の失敗、1回の実行の上限（約40秒・30ページ＝3,000件）で止まったら「未完了」。**すべてのページを読み終えるまで「異常なし」と表示しません**。「続きから照合する」で再開（開始から2時間まで）。再開用の値はサーバーが署名し、期間・モード・環境・アカウント・運営者を含むので、再開のときに変えられません
 - 期間は日本時間の日付で最長31日。終わりは実行の開始の時刻まで
-- 返金・異議申し立て・精算の照合、定期実行（Cron）、決済要確認への自動の登録は**未実装**（第2段階）。返金済み・異議申し立て中の決済は、注文・取引があれば「一致」と数えます
+- 返金・異議申し立て・確定済みの精算の調整（第2段階a）：決済の一覧の後に、期間の中に作られた返金の一覧・異議申し立ての一覧（`created` で期間・ページ送り）を読みます。元の決済が期間の外でも、PaymentIntent を取り直して環境・モードを確かめ、取引を ID で読んで照合します。決済の一覧では `data.latest_charge` を展開し、返金・異議申し立てがある（または取引に記録がある）Charge だけ、Charge ごとの返金・異議申し立ての一覧を取り直します。同じ Charge は二重に数えません
+  - 返金（`refund_mismatch`）：取引の返金の記録が、Webhook の反映（`syncStripeRefunds`）と同じ規則で今の Stripe の返金から求めた値（`refundKeyOf`）と一致するか。取引にだけ記録がある・決済の状態（返金済み）が違うのも異常。返金の作成から60分以内の食い違いは処理待ち。処理中を反映済みなら正常な一時状態、部分返金・返金の失敗は「要確認」（返金の確認の画面）
+  - 異議申し立て（`dispute_mismatch`）：同じく `disputeKeyOf` と、敗訴（全額）ならチャージバックであること。結果が出た申し立てが Stripe で対応中に戻ったものは時間によらず異常。複数・内容の異常は「要確認」
+  - 精算の調整（`settlement_adjustment_mismatch`）：確定済み（lockedAt あり）の精算に含めた取引で「今の取り分 = 支払った額（settledShare）＋調整の合計（adjustmentTotal）」か。あわせて調整の記録（`settlementAdjustments/{取引ID}_1〜n`）がすべてあり、取引・店舗・精算が一致し、合計が adjustmentTotal と一致し、n+1 番目が無いこと。**過去の精算に含めた取引が後から返金されても、調整が正しければ異常にしません**。以前の仕組みで確定した月は判定せず「要確認」。確定済みの月の、精算に含めていない取引は「精算への取り込み待ち（要確認）」
+  - 返金・異議申し立ての状態の変化（処理中→成功・対応中→勝訴など）には Stripe の日時が無いため、変化の直後は反映の前に異常として出ることがあります（時間をおいて照合し直す）
+  - 取得の失敗（返金・異議申し立ての一覧、Charge ごとの取り直し）は照合全体を「未完了」にします。1回の実行で確かめる Charge は60件まで（超えたら続きから）
+- Firestore にだけある取引の照合（第2段階b）、定期実行（Cron）、決済要確認への自動の登録は**未実装**です
 - 異常が見つかったら：表示された PaymentIntent・Charge の ID で Stripe の Dashboard を、注文・取引の ID で Firestore（決済履歴）を確かめ、運営が判断します（復旧・返金は既存の手順）
 
 ### 4.6 エラー・確認待ちが残ったとき
@@ -414,6 +420,7 @@ Stripe の決済（PaymentIntent）の一覧を起点に、この環境の支払
 | `npm run e2e:stripe-ordering` | 通知の順序・同時実行・再送・復旧の競合・API の障害からの回復（各操作の後に不変条件を確認） |
 | `npm run e2e:admin-restore-browser` | 運営画面のブラウザの操作（Chromium。Playwright が入った環境と、起動中のアプリが必要） |
 | `npx tsx --conditions=react-server scripts/e2e-payment-reconcile.ts` | Stripe 起点の決済照合（ページ送り・取得の失敗・再開・読み取り専用） |
+| `npx tsx --conditions=react-server scripts/e2e-payment-reconcile-adjustments.ts` | 決済照合の返金・異議申し立て・精算の調整（期間より前の決済・取得の失敗・再開・読み取り専用） |
 | `npx tsx --conditions=react-server scripts/e2e-payment-reconcile-browser.ts` | 決済照合の運営画面（Chromium。起動中のアプリが必要） |
 
 どの E2E も、Firestore Emulator の `demo-` プロジェクトと localhost の模擬 Stripe だけを使います（本物の Stripe・本番の Firebase には接続しない）。

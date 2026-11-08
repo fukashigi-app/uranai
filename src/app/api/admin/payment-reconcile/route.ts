@@ -91,6 +91,8 @@ export async function POST(req: Request): Promise<Response> {
         pendingItems: s.pendingItems,
         reviewItems: s.reviewItems,
         truncated: s.truncated,
+        phase: s.phase,
+        metrics: s.metrics,
         token: run.token,
       },
       { headers: HEADERS },

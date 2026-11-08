@@ -145,21 +145,27 @@ async function main() {
   const to = nowSec() + 3600; // 今より後は今の時刻に切り詰める
 
   // ===== 照合（読み取り専用であることも確かめる） =====
+  // 期間の終わり（to）は照合の開始の時刻（秒）で、その秒に作られたものは含まない。データを作った秒が過ぎてから照合する
+  await new Promise((ok) => setTimeout(ok, 1100));
   const before = await snapshotAll();
   const callsBefore = stripe.fake.callLog.length;
   const { run, segments } = await runAll(rt, from, to);
   assert.equal(await snapshotAll(), before, "照合で Firestore の文書が変わりました");
   const calls = stripe.fake.callLog.slice(callsBefore);
   assert.ok(calls.length > 0 && calls.every((c) => c.startsWith("GET ")), `GET 以外の要求があります：${calls.filter((c) => !c.startsWith("GET ")).join(",")}`);
-  assert.ok(calls.every((c) => c === "GET /v1/payment_intents" || c === "GET /v1/account"), `一覧・アカウント以外の要求：${calls.join(",")}`);
+  assert.ok(calls.every((c) => /^GET \/v1\/(payment_intents(\/pi_[A-Za-z0-9_]+)?|account|refunds|disputes)$/.test(c)), `一覧・個別の確認・アカウント以外の要求：${calls.join(",")}`);
   step(`読み取り専用：Firestore の全文書が不変・Stripe への要求は GET だけ（${[...new Set(calls)].join("・")}）`);
 
   const s = run.state;
   assert.equal(segments.length, 1);
   assert.deepEqual([run.verdict, run.stoppedBy, run.token, s.done], ["issues", null, null, true]);
   assert.equal(s.to <= nowSec(), true, "期間の終わりが今の時刻に切り詰められていません");
-  assert.deepEqual(s.counts, { scanned: 15, inScope: 11, matched: 3, notPaid: 1, pending: 1, anomalyPayments: 6, anomalies: 6, otherMode: 1, otherEnv: 1, untagged: 1, badTag: 1, needsReview: 3 });
-  assert.deepEqual(s.byKind, { stripe_paid_no_checkout: 3, stripe_paid_no_transaction: 1, amount_or_mode_mismatch: 1, duplicate_or_bad_link: 1 });
+  assert.deepEqual(s.counts, {
+    scanned: 15, inScope: 11, matched: 3, notPaid: 1, pending: 1, anomalyPayments: 6, anomalies: 6, otherMode: 1, otherEnv: 1, untagged: 1, badTag: 1, needsReview: 3,
+    // 第2段階a：返金済み（H）・異議申し立て中（I）の Charge を確かめ、一致（返金・異議申し立ての一覧の同じ Charge は二重に数えない）
+    adjustmentChecks: 2, adjustmentIssues: 0, refundsSeen: 1, disputesSeen: 1, refundInProgress: 0, disputeOpen: 1, settlementChecked: 0,
+  });
+  assert.deepEqual(s.byKind, { stripe_paid_no_checkout: 3, stripe_paid_no_transaction: 1, amount_or_mode_mismatch: 1, duplicate_or_bad_link: 1, refund_mismatch: 0, dispute_mismatch: 0, settlement_adjustment_mismatch: 0 });
   step("件数：読んだ15件（期間外は数えない）・この環境11件・一致3件（正常・返金済み・異議申し立て中）・異常6件・処理待ち1件・未払い1件");
 
   assert.deepEqual(byKindOf(run, B.pi), ["stripe_paid_no_checkout"]);
@@ -215,19 +221,19 @@ async function main() {
     for (let i = 0; i < 230; i++) await raw({ created: base - i, status: "canceled", metadata: { checkoutId: `co_bulk_${i}`, uranaiEnv: tag } });
     const full = await runAll(rt, from, to);
     assert.equal(full.segments.length, 1);
-    assert.deepEqual([full.run.state.counts.scanned, full.run.state.pages, full.run.state.counts.notPaid], [245, 3, 231]);
+    assert.deepEqual([full.run.state.counts.scanned, full.run.state.pages, full.run.state.counts.notPaid], [245, 5, 231]); // 決済3ページ＋返金1＋異議申し立て1
     const paged = await runAll(rt, from, to, { maxPagesPerSegment: 1 });
-    assert.equal(paged.segments.length, 3);
-    assert.deepEqual(paged.segments.map((x) => [x.verdict, x.stoppedBy]), [["incomplete", "page_limit"], ["incomplete", "page_limit"], ["issues", null]]);
+    assert.equal(paged.segments.length, 5);
+    assert.deepEqual(paged.segments.map((x) => [x.verdict, x.stoppedBy]), [...Array(4).fill(["incomplete", "page_limit"]), ["issues", null]]);
     assert.deepEqual(paged.run.state.counts, full.run.state.counts);
-    step("ページ送り：245件を3ページで読む。1回1ページで区切って再開しても、同じ件数（二重に数えない）");
+    step("ページ送り：245件を3ページ（＋返金・異議申し立ての一覧1ページずつ）で読む。1回1ページで区切って再開しても、同じ件数（二重に数えない）");
 
     stripe.fake.failCalls.push({ path: /^\/v1\/payment_intents$/, method: "GET", skip: 1, count: 1 });
     const failed = await startReconcile({ rt, userId: USER, fromSec: from, toSec: to });
     assert.deepEqual([failed.verdict, failed.stoppedBy, failed.state.pages, failed.state.done], ["incomplete", "stripe_error", 1, false]);
     assert.ok(failed.token);
     const resumed = await resumeReconcile({ rt, userId: USER, token: failed.token });
-    assert.deepEqual([resumed.verdict, resumed.state.pages], ["issues", 3]);
+    assert.deepEqual([resumed.verdict, resumed.state.pages], ["issues", 5]);
     assert.deepEqual(resumed.state.counts, full.run.state.counts);
     step("Stripe の取得の失敗：未完了（「異常なし」にしない・続きの位置は進めない）→ 再開で完了し、件数は失敗しなかったときと同じ");
 
@@ -276,7 +282,7 @@ async function main() {
     step("重複（60分以内・別のページ）：2件とも「重複」の異常（処理待ちにしない。同じページのときと同じ）");
     assert.deepEqual([kinds(W1.pi), kinds(W2)], [[], ["duplicate_or_bad_link:checkout_linked_to_other_payment"]]);
     step("片方だけ確定済み：確定済みの1件目は一致・2件目は「注文は別の決済と紐付いている」（重複として二重に数えない）");
-    assert.deepEqual(r.state.byKind, { stripe_paid_no_checkout: 0, stripe_paid_no_transaction: 2, amount_or_mode_mismatch: 0, duplicate_or_bad_link: 5 });
+    assert.deepEqual(r.state.byKind, { stripe_paid_no_checkout: 0, stripe_paid_no_transaction: 2, amount_or_mode_mismatch: 0, duplicate_or_bad_link: 5, refund_mismatch: 0, dispute_mismatch: 0, settlement_adjustment_mismatch: 0 });
     assert.deepEqual([r.state.counts.anomalyPayments, r.state.counts.anomalies, r.state.counts.matched], [5, 7, 1]);
     assert.equal(r.state.truncated.dupIndex, false);
 

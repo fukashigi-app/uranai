@@ -37,7 +37,7 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
      * 指定した API の呼び出しだけを失敗させる（一致する呼び出しのうち、skip 件を通した後の count 件を 500。使い終わったら何もしない）。
      * SDK が自動で再試行しないよう stripe-should-retry: false を付ける（1回の呼び出しの失敗を正確に再現する）
      */
-    failCalls: [] as { path: RegExp; method?: string; skip: number; count: number }[],
+    failCalls: [] as { path: RegExp; method?: string; query?: RegExp; skip: number; count: number }[],
     /** 受け付けた API の呼び出し（"GET /v1/refunds" の形。呼び出しの有無・回数の確認用） */
     callLog: [] as string[],
     /** 作成時の expires_at（ID ごと）と作成時刻 */
@@ -75,16 +75,41 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
     res.end(JSON.stringify(body));
   }
 
+  /** 本物の Stripe の一覧と同じ：created の範囲で絞り、新しい順・limit（1〜100）・starting_after でページ送り。不正な値は 400 */
+  function listPage(res: ServerResponse, url: URL, path: string, items: Record<string, unknown>[], what: string, map: (x: Record<string, unknown>) => unknown = (x) => x) {
+    const q = url.searchParams;
+    const limit = q.has("limit") ? Number(q.get("limit")) : 10;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) return stripeError(res, 400, "invalid_request_error", "Invalid limit", "limit");
+    const num = (k: string) => (q.has(k) ? Number(q.get(k)) : null);
+    const [gte, gt, lt, lte] = [num("created[gte]"), num("created[gt]"), num("created[lt]"), num("created[lte]")];
+    const all = items
+      .map((p, i) => ({ p, i }))
+      .filter(({ p }) => {
+        const c = Number(p.created ?? 0);
+        return (gte === null || c >= gte) && (gt === null || c > gt) && (lt === null || c < lt) && (lte === null || c <= lte);
+      })
+      .sort((a, b) => Number(b.p.created ?? 0) - Number(a.p.created ?? 0) || b.i - a.i)
+      .map(({ p }) => p);
+    let startIdx = 0;
+    const after = q.get("starting_after");
+    if (after) {
+      const k = all.findIndex((p) => p.id === after);
+      if (k < 0) return stripeError(res, 400, "invalid_request_error", `No such ${what}: '${after}'`, "starting_after", "resource_missing");
+      startIdx = k + 1;
+    }
+    return send(res, 200, { object: "list", url: path, has_more: startIdx + limit < all.length, data: all.slice(startIdx, startIdx + limit).map(map) });
+  }
+
   const syncCharge = (chId: string) => {
     const ch = fake.charges.get(chId)!;
     const sum = [...fake.refunds.values()].filter((x) => x.charge === chId && (x.status === "succeeded" || x.status === "pending")).reduce((a, x) => a + Number(x.amount), 0);
     Object.assign(ch, { amount_refunded: sum, refunded: sum >= Number(ch.amount) });
   };
   /** 返金の発生（status：succeeded（既定）・pending など。amount：一部の返金） */
-  function addRefund(chId: string, o: { amount?: number; status?: string } = {}) {
+  function addRefund(chId: string, o: { amount?: number; status?: string; created?: number } = {}) {
     const ch = fake.charges.get(chId)!;
     const reId = id("re");
-    fake.refunds.set(reId, { id: reId, object: "refund", charge: chId, payment_intent: ch.payment_intent, currency: "jpy", amount: o.amount ?? ch.amount, status: o.status ?? "succeeded" });
+    fake.refunds.set(reId, { id: reId, object: "refund", charge: chId, payment_intent: ch.payment_intent, currency: "jpy", amount: o.amount ?? ch.amount, status: o.status ?? "succeeded", created: o.created ?? Math.floor(Date.now() / 1000) });
     syncCharge(chId);
     return reId;
   }
@@ -94,10 +119,10 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
     syncCharge(String(re.charge));
   }
   /** 異議申し立て（チャージバック）の発生。status: needs_response（既定）・under_review・won・lost など */
-  function addDispute(chId: string, o: { amount?: number; status?: string; currency?: string } = {}) {
+  function addDispute(chId: string, o: { amount?: number; status?: string; currency?: string; created?: number } = {}) {
     const ch = fake.charges.get(chId)!;
     const dpId = id("dp");
-    fake.disputes.set(dpId, { id: dpId, object: "dispute", livemode: LIVE, charge: chId, payment_intent: ch.payment_intent, currency: o.currency ?? "jpy", amount: o.amount ?? ch.amount, status: o.status ?? "needs_response", reason: "fraudulent" });
+    fake.disputes.set(dpId, { id: dpId, object: "dispute", livemode: LIVE, charge: chId, payment_intent: ch.payment_intent, currency: o.currency ?? "jpy", amount: o.amount ?? ch.amount, status: o.status ?? "needs_response", reason: "fraudulent", created: o.created ?? Math.floor(Date.now() / 1000) });
     Object.assign(ch, { disputed: true });
     return dpId;
   }
@@ -109,7 +134,7 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
     if (url.pathname.startsWith("/v1/") && fake.failPaths.some((re) => re.test(url.pathname))) return stripeError(res, 500, "api_error", "simulated failure");
     if (url.pathname.startsWith("/v1/")) {
       fake.callLog.push(`${req.method} ${url.pathname}`);
-      const rule = fake.failCalls.find((f) => f.path.test(url.pathname) && (!f.method || f.method === req.method) && (f.skip > 0 || f.count > 0));
+      const rule = fake.failCalls.find((f) => f.path.test(url.pathname) && (!f.method || f.method === req.method) && (!f.query || f.query.test(decodeURIComponent(url.search))) && (f.skip > 0 || f.count > 0));
       if (rule) {
         if (rule.skip > 0) rule.skip--;
         else {
@@ -195,30 +220,11 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
       return fake.charges.has(r[1]) ? send(res, 200, chargeView(r[1])) : send(res, 404, { error: { type: "invalid_request_error", message: "No such charge" } });
     }
     if (req.method === "GET" && url.pathname === "/v1/payment_intents") {
-      // 一覧（本物の Stripe と同じく新しい順・created の範囲・limit は 1〜100・starting_after でページ送り。expand は受け付けない）
-      const q = url.searchParams;
-      if ([...q.keys()].some((k) => k.startsWith("expand"))) return stripeError(res, 400, "invalid_request_error", "expand is not supported by the fake list", "expand");
-      const limit = q.has("limit") ? Number(q.get("limit")) : 10;
-      if (!Number.isInteger(limit) || limit < 1 || limit > 100) return stripeError(res, 400, "invalid_request_error", "Invalid limit", "limit");
-      const num = (k: string) => (q.has(k) ? Number(q.get(k)) : null);
-      const [gte, gt, lt, lte] = [num("created[gte]"), num("created[gt]"), num("created[lt]"), num("created[lte]")];
-      const all = [...fake.pis.values()]
-        .map((p, i) => ({ p, i }))
-        .filter(({ p }) => {
-          const c = Number(p.created ?? 0);
-          return (gte === null || c >= gte) && (gt === null || c > gt) && (lt === null || c < lt) && (lte === null || c <= lte);
-        })
-        .sort((a, b) => Number(b.p.created ?? 0) - Number(a.p.created ?? 0) || b.i - a.i)
-        .map(({ p }) => p);
-      let startIdx = 0;
-      const after = q.get("starting_after");
-      if (after) {
-        const k = all.findIndex((p) => p.id === after);
-        if (k < 0) return stripeError(res, 400, "invalid_request_error", `No such payment_intent: '${after}'`, "starting_after", "resource_missing");
-        startIdx = k + 1;
-      }
-      const data = all.slice(startIdx, startIdx + limit);
-      return send(res, 200, { object: "list", url: "/v1/payment_intents", has_more: startIdx + limit < all.length, data });
+      // 一覧（本物の Stripe と同じく新しい順・created の範囲・limit は 1〜100・starting_after でページ送り）。展開は data.latest_charge だけ受け付ける
+      const expands = [...url.searchParams.entries()].filter(([k]) => k.startsWith("expand")).map(([, v]) => v);
+      if (expands.some((e) => e !== "data.latest_charge")) return stripeError(res, 400, "invalid_request_error", "unsupported expand in the fake list", "expand");
+      const expand = expands.includes("data.latest_charge");
+      return listPage(res, url, "/v1/payment_intents", [...fake.pis.values()], "payment_intent", (p) => (expand && p.latest_charge ? { ...p, latest_charge: chargeView(String(p.latest_charge)) } : p));
     }
     r = m(/^\/v1\/payment_intents\/([^/]+)$/);
     if (req.method === "GET" && r) {
@@ -232,6 +238,7 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
     }
     if (req.method === "GET" && url.pathname === "/v1/refunds") {
       const charge = url.searchParams.get("charge");
+      if (!charge) return listPage(res, url, "/v1/refunds", [...fake.refunds.values()], "refund");
       send(res, 200, { object: "list", url: "/v1/refunds", has_more: false, data: [...fake.refunds.values()].filter((x) => x.charge === charge) });
       const hook = charge ? fake.afterRefundListOnce.get(charge) : undefined;
       if (hook) {
@@ -242,6 +249,7 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
     }
     if (req.method === "GET" && url.pathname === "/v1/disputes") {
       const charge = url.searchParams.get("charge");
+      if (!charge) return listPage(res, url, "/v1/disputes", [...fake.disputes.values()], "dispute");
       send(res, 200, { object: "list", url: "/v1/disputes", has_more: false, data: [...fake.disputes.values()].filter((x) => !charge || x.charge === charge) });
       const hook = charge ? fake.afterDisputeListOnce.get(charge) : undefined;
       if (hook) {

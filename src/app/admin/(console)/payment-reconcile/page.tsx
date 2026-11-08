@@ -2,7 +2,7 @@ import { Card, PageHeader } from "@/components/console/shell";
 import { PaymentReconcilePanel, type ReconcileLabels } from "@/components/console/payment-reconcile-panel";
 import { requireOperator } from "@/lib/auth/session";
 import { isFirestore } from "@/lib/data-provider";
-import { RECONCILE_ANOMALY_LABEL, RECONCILE_DETAIL_LABEL, RECONCILE_GRACE_MS } from "@/lib/payments/reconcile-rules";
+import { RECONCILE_ANOMALY_LABEL, RECONCILE_DETAIL_LABEL, RECONCILE_GRACE_MS, RECONCILE_PENDING_LABEL, RECONCILE_REVIEW_LABEL } from "@/lib/payments/reconcile-rules";
 import { RECONCILE_STOP_LABEL } from "@/lib/payments/stripe-reconcile";
 
 export const metadata = { title: "決済照合" };
@@ -50,12 +50,12 @@ export default async function PaymentReconcilePage() {
   } catch {
     mode = null;
   }
-  const labels: ReconcileLabels = { kind: RECONCILE_ANOMALY_LABEL, detail: RECONCILE_DETAIL_LABEL, stop: RECONCILE_STOP_LABEL, error: ERROR_LABEL };
+  const labels: ReconcileLabels = { kind: RECONCILE_ANOMALY_LABEL, detail: RECONCILE_DETAIL_LABEL, stop: RECONCILE_STOP_LABEL, error: ERROR_LABEL, review: RECONCILE_REVIEW_LABEL, pending: RECONCILE_PENDING_LABEL };
   return (
     <>
       <PageHeader
         title="決済照合"
-        description={`Stripe の決済（PaymentIntent）の一覧を起点に、この環境の支払い済みの決済が、注文・取引の記録と一致しているかを照合します（読み取りのみ）。支払いから${Math.round(RECONCILE_GRACE_MS / 60_000)}分以内で記録がまだ無いものは「処理待ち」として異常にしません。異常が見つかっても自動では修正・返金しません。返金・異議申し立て・精算の照合はまだ含みません。`}
+        description={`Stripe の決済（PaymentIntent）の一覧を起点に、この環境の支払い済みの決済が、注文・取引の記録と一致しているかを照合します（読み取りのみ）。支払いから${Math.round(RECONCILE_GRACE_MS / 60_000)}分以内で記録がまだ無いものは「処理待ち」として異常にしません。あわせて、返金・異議申し立て（元の決済が期間の外でも、期間の中に作られたもの）と、確定済みの店舗精算の調整を照合します。異常が見つかっても自動では修正・返金・精算しません。Firestore にだけある取引の照合はまだ含みません。`}
       />
       <Card title="照合する">
         <PaymentReconcilePanel mode={mode} labels={labels} />

@@ -2,8 +2,8 @@
 
 import { useState } from "react";
 
-type Item = { kind: string; details: string[]; paymentIntentId: string; chargeId: string | null; checkoutId: string | null; transactionId: string; storeId: string | null; created: number; existingReview: boolean };
-type Ref = { paymentIntentId: string; checkoutId: string | null; created: number; scope?: string };
+type Item = { kind: string; details: string[]; paymentIntentId: string; chargeId: string | null; checkoutId: string | null; transactionId: string; storeId: string | null; created: number; existingReview: boolean; delta?: number };
+type Ref = { paymentIntentId: string; checkoutId: string | null; created: number; scope?: string; reason?: string; chargeId?: string | null; transactionId?: string | null };
 type Result = {
   runId: string;
   mode: "test" | "live";
@@ -20,7 +20,8 @@ type Result = {
   anomalies: Item[];
   pendingItems: Ref[];
   reviewItems: Ref[];
-  truncated: { anomalies: boolean; pending: boolean; review: boolean; dupIndex: boolean };
+  truncated: { anomalies: boolean; pending: boolean; review: boolean; dupIndex: boolean; checked: boolean };
+  phase: "payments" | "refunds" | "disputes";
   token: string | null;
 };
 
@@ -29,7 +30,11 @@ export type ReconcileLabels = {
   detail: Record<string, string>;
   stop: Record<string, string>;
   error: Record<string, string>;
+  review: Record<string, string>;
+  pending: Record<string, string>;
 };
+
+const PHASE_LABEL: Record<string, string> = { payments: "決済の一覧", refunds: "返金の一覧", disputes: "異議申し立ての一覧" };
 
 const VERDICT: Record<Result["verdict"], { label: string; cls: string; text: string }> = {
   ok: { label: "異常なし", cls: "border-success/40 text-success", text: "期間内のすべてのページを読み、この環境の支払い済みの決済は、すべて注文・取引の記録と一致しました。" },
@@ -117,7 +122,8 @@ export function PaymentReconcilePanel({ mode, labels }: { mode: "test" | "live" 
               <span className={`mr-2 inline-flex rounded-full border px-2 py-0.5 text-[11px] ${v.cls}`}>{v.label}</span>
               {v.text}
             </p>
-            {result.stoppedBy ? <p className="mt-1 text-danger">{`止まった理由：${labels.stop[result.stoppedBy] ?? result.stoppedBy}`}</p> : null}
+            {result.stoppedBy ? <p className="mt-1 text-danger">{`止まった理由：${labels.stop[result.stoppedBy] ?? result.stoppedBy}（${PHASE_LABEL[result.phase] ?? result.phase}の途中）`}</p> : null}
+            {result.truncated.checked ? <p className="mt-1 text-gold-200">返金・異議申し立てを確かめる件数の上限を超えたため、一部の決済は確かめていません（「要確認」に表示）。</p> : null}
             {result.truncated.dupIndex ? (
               <p data-reconcile-dup-truncated="true" className="mt-1 text-gold-200">
                 未確定の支払い済みの決済が重複の判定の上限（1,000件）を超えたため、超えた分は同じ注文への重複を判定していません。重複が無いとは言えません（期間を短くして照合し直してください）。
@@ -135,6 +141,12 @@ export function PaymentReconcilePanel({ mode, labels }: { mode: "test" | "live" 
                 ["処理待ち（支払いの直後）", c.pending],
                 ["要確認（照合できなかった支払い済み）", c.needsReview],
                 ["支払いが完了していない（照合しない）", c.notPaid],
+                ["返金・異議申し立てを確かめた決済", c.adjustmentChecks],
+                ["返金・異議申し立ての異常がある決済", c.adjustmentIssues],
+                ["返金の一覧・異議申し立ての一覧で読んだ件数", (c.refundsSeen ?? 0) + (c.disputesSeen ?? 0)],
+                ["返金の処理中（取引にも反映済み・正常な一時状態）", c.refundInProgress],
+                ["異議申し立ての対応中（取引にも反映済み）", c.disputeOpen],
+                ["精算の調整を確かめた取引（確定済みの精算）", c.settlementChecked],
                 ["対象外：別の環境", c.otherEnv],
                 ["対象外：モードが違う", c.otherMode],
                 ["環境を表す値が無い・形が違う（全状態）", (c.untagged ?? 0) + (c.badTag ?? 0)],
@@ -174,6 +186,7 @@ export function PaymentReconcilePanel({ mode, labels }: { mode: "test" | "live" 
                           {labels.kind[a.kind] ?? a.kind}
                           {a.details.length ? <span className="block text-ink-faint">{a.details.map((d) => labels.detail[d] ?? d).join("・")}</span> : null}
                           {a.existingReview ? <span className="block text-gold-200">決済要確認に記録済み（同じ決済）</span> : null}
+                          {typeof a.delta === "number" && a.delta !== 0 ? <span className="block text-ink-faint">{`差額 ${a.delta}円（今の取り分 − 支払った額 − 調整の合計）`}</span> : null}
                         </td>
                         <td className="py-2 pr-3 font-mono text-[11px] text-ink-faint">
                           <span className="block">{`PaymentIntent: ${a.paymentIntentId}`}</span>
@@ -189,16 +202,19 @@ export function PaymentReconcilePanel({ mode, labels }: { mode: "test" | "live" 
                   </tbody>
                 </table>
               </div>
+              {(result.byKind.refund_mismatch ?? 0) + (result.byKind.dispute_mismatch ?? 0) > 0 ? (
+                <p className="mt-1 text-[11px] text-ink-faint">返金・異議申し立ての状態が変わった直後（処理中→成功など）は、Stripe に変わった日時が無いため、取引への反映の前に異常として出ることがあります。時間をおいて照合し直してください。</p>
+              ) : null}
               {result.truncated.anomalies ? <p className="mt-1 text-[11px] text-gold-200">{`表示の上限を超えたため、一部だけを表示しています（件数はすべて数えています）。`}</p> : null}
             </section>
           ) : null}
           {result.reviewItems.length ? (
             <section>
-              <h3 className="mb-2 font-bold">{`要確認：照合できなかった支払い済みの決済（${c.needsReview}件）`}</h3>
-              <p className="mb-1 text-[11px] text-ink-faint">環境を表す値（uranaiEnv）が無い・形が違う、または本番の接続で別の環境の値を持つ決済です。正常とは判断していません。</p>
+              <h3 className="mb-2 font-bold">{`要確認：正常とは判断できなかった決済（${c.needsReview}件）`}</h3>
+              <p className="mb-1 text-[11px] text-ink-faint">環境を表す値が無い決済・返金や異議申し立ての内容を確認できない決済・部分返金や返金の失敗・以前の仕組みで確定した精算など、照合で正常と判断できなかったものです。</p>
               <ul className="space-y-1 font-mono text-[11px] text-ink-faint">
-                {result.reviewItems.map((r) => (
-                  <li key={r.paymentIntentId} data-reconcile-review={r.scope}>{`${fmt(r.created)}  PaymentIntent: ${r.paymentIntentId}  注文: ${r.checkoutId ?? "—"}  （${r.scope === "untagged" ? "値が無い" : r.scope === "bad_tag" ? "値の形が違う" : "別の環境"}）`}</li>
+                {result.reviewItems.map((r, i) => (
+                  <li key={`${r.paymentIntentId}:${r.reason ?? r.scope}:${i}`} data-reconcile-review={r.scope ?? r.reason} data-reconcile-review-reason={r.reason ?? r.scope}>{`${fmt(r.created)}  PaymentIntent: ${r.paymentIntentId}${r.chargeId ? `  Charge: ${r.chargeId}` : ""}  注文: ${r.checkoutId ?? "—"}${r.transactionId ? `  取引: ${r.transactionId}` : ""}  （${labels.review[r.reason ?? r.scope ?? ""] ?? r.reason ?? r.scope}）`}</li>
                 ))}
               </ul>
               {result.truncated.review ? <p className="mt-1 text-[11px] text-gold-200">表示の上限を超えたため、一部だけを表示しています。</p> : null}
@@ -208,8 +224,8 @@ export function PaymentReconcilePanel({ mode, labels }: { mode: "test" | "live" 
             <section>
               <h3 className="mb-2 font-bold">{`処理待ち（${c.pending}件）`}</h3>
               <ul className="space-y-1 font-mono text-[11px] text-ink-faint">
-                {result.pendingItems.map((r) => (
-                  <li key={r.paymentIntentId}>{`${fmt(r.created)}  PaymentIntent: ${r.paymentIntentId}  注文: ${r.checkoutId ?? "—"}`}</li>
+                {result.pendingItems.map((r, i) => (
+                  <li key={`${r.paymentIntentId}:${r.reason ?? "payment"}:${i}`} data-reconcile-pending={r.reason ?? "payment"}>{`${fmt(r.created)}  PaymentIntent: ${r.paymentIntentId}${r.chargeId ? `  Charge: ${r.chargeId}` : ""}  注文: ${r.checkoutId ?? "—"}  （${labels.pending[r.reason ?? "payment"] ?? r.reason}）`}</li>
                 ))}
               </ul>
               {result.truncated.pending ? <p className="mt-1 text-[11px] text-gold-200">表示の上限を超えたため、一部だけを表示しています。</p> : null}
