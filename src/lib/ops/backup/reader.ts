@@ -28,6 +28,24 @@ export type ReaderOptions = {
   /** 1回の取得件数 */
   pageSize?: number;
   fetchImpl?: typeof fetch;
+  /**
+   * 経過時間の計測に使う単調時計（ミリ秒。既定は performance.now()）。PC の時計（壁時計）を合わせ直しても戻らない。
+   * テストで差し替える。
+   */
+  monotonic?: () => number;
+  /** 実際の日時（壁時計。既定は Date.now）。時計のずれの診断だけに使い、期限や整合性の判定には使わない */
+  wallClock?: () => number;
+};
+
+/** 時刻確認の結果（Firestore の応答の Date ヘッダーと、こちらの送信・受信時刻） */
+export type ServerTimeProbe = {
+  /** Date ヘッダーの時刻（ミリ秒。秒より細かい部分は切り捨てられている）。ヘッダーが無い・読めないときは null */
+  serverDate: number | null;
+  /** 単調時計で、送信を始めた時刻・応答を受け取り終えた時刻（経過時間と往復時間の計測用） */
+  sentAt: number;
+  receivedAt: number;
+  /** 応答を受け取り終えたときの壁時計（PC の時計のずれの診断用。期限・整合性の判定には使わない） */
+  wallAtReceived: number;
 };
 
 export class ReadOnlyViolationError extends Error {
@@ -48,16 +66,25 @@ export function isAllowedReadRequest(method: string, pathWithQuery: string): boo
 
 export class FirestoreReadOnlyReader {
   readonly root: string;
-  private readonly o: Required<Omit<ReaderOptions, "readTime" | "fetchImpl">> & Pick<ReaderOptions, "readTime"> & { fetchImpl: typeof fetch };
+  private readonly o: Required<Omit<ReaderOptions, "readTime" | "fetchImpl" | "monotonic" | "wallClock">> & Pick<ReaderOptions, "readTime"> & { fetchImpl: typeof fetch; monotonic: () => number; wallClock: () => number };
   /** 送ったリクエストの数（読み取り回数の目安） */
   requests = 0;
 
   constructor(opts: ReaderOptions) {
-    this.o = { databaseId: "(default)", pageSize: 300, fetchImpl: fetch, ...opts } as typeof this.o;
+    this.o = { databaseId: "(default)", pageSize: 300, fetchImpl: fetch, monotonic: () => performance.now(), wallClock: Date.now, ...opts } as typeof this.o;
     this.root = `projects/${opts.projectId}/databases/${this.o.databaseId}/documents`;
   }
 
+  /** すべての読み取りに付ける時点（指定しないときは undefined） */
+  get readTime(): string | undefined {
+    return this.o.readTime;
+  }
+
   private async request<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
+    return (await this.send<T>(method, path, body)).data;
+  }
+
+  private async send<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<{ data: T; date: string | null }> {
     if (!isAllowedReadRequest(method, path)) throw new ReadOnlyViolationError(`${method} ${path.replace(/documents\/.*/, "documents/…")}`);
     this.requests += 1;
     const res = await this.o.fetchImpl(`${this.o.baseUrl.replace(/\/$/, "")}${path}`, {
@@ -78,7 +105,22 @@ export class FirestoreReadOnlyReader {
       (err as Error & { httpStatus?: number }).httpStatus = res.status;
       throw err;
     }
-    return (text ? JSON.parse(text) : {}) as T;
+    return { data: (text ? JSON.parse(text) : {}) as T, date: res.headers.get("date") };
+  }
+
+  /**
+   * Firestore のサーバーの時刻を確認する（readTime を決めるため。こちらの時計は使わない）。
+   * トップレベルのコレクション一覧を1件だけ、readTime を付けずに取得し、応答の Date ヘッダーを返す（読み取り1回）。
+   * Date ヘッダーは秒単位で、応答はこちらの送信から受信までの間に作られている。
+   */
+  async probeServerTime(): Promise<ServerTimeProbe> {
+    const sentAt = this.o.monotonic();
+    const r = await this.send("POST", `/v1/${this.enc(this.root)}:listCollectionIds`, { pageSize: 1 });
+    const receivedAt = this.o.monotonic();
+    const wallAtReceived = this.o.wallClock();
+    // HTTP の Date ヘッダーは「Sun, 08 Nov 2026 03:00:10 GMT」の形（秒単位）。それ以外の形は使わない
+    const t = r.date && /^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(r.date.trim()) ? Date.parse(r.date) : NaN;
+    return { serverDate: Number.isFinite(t) ? t : null, sentAt, receivedAt, wallAtReceived };
   }
 
   private enc(path: string): string {

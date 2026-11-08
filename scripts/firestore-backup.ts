@@ -10,10 +10,10 @@
  * 表示するのはトップレベルのコレクション名と件数だけ。ドキュメントID・フィールドの値・鍵は表示しない。
  */
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { canonical, exportAll, parseAndVerify, serialize, sha256, type BackupDoc, type PlainManifest } from "../src/lib/ops/backup/archive";
+import { canonical, createConsistentExport, exportAll, parseAndVerify, serialize, sha256, writeBackupFilesAtomically, type BackupDoc, type PlainManifest } from "../src/lib/ops/backup/archive";
 import { assertPassphrase, decryptBackup, encryptBackup, MIN_PASSPHRASE_LENGTH } from "../src/lib/ops/backup/crypto";
 import { FirestoreReadOnlyReader } from "../src/lib/ops/backup/reader";
 import { assertEmulatorTarget, restoreToEmulator, rewriteReferences } from "../src/lib/ops/backup/restore-emulator";
@@ -95,8 +95,8 @@ async function passphrase(confirm: boolean): Promise<string> {
   return p!;
 }
 
-/** 本番：読み取り専用サービスアカウントの鍵から、アクセストークンを取得する */
-async function productionReader(keyPath: string, readTime: string | undefined) {
+/** 本番：読み取り専用サービスアカウントの鍵から、アクセストークンを取得する。makeReader(readTime) で読み取りクライアントを作る */
+async function productionReader(keyPath: string) {
   if (process.env.FIRESTORE_EMULATOR_HOST) fail("FIRESTORE_EMULATOR_HOST が設定されています。本番のバックアップでは外してから実行してください。");
   if (!existsSync(keyPath)) fail("鍵ファイルが見つかりません。");
   if (!isSafeFromGit(keyPath)) fail("鍵ファイルが Git の管理対象の場所にあります。リポジトリの外（例：ホームフォルダの専用フォルダ）に移してください。");
@@ -117,7 +117,8 @@ async function productionReader(keyPath: string, readTime: string | undefined) {
     }
     return token.value;
   };
-  return { projectId: key!.project_id!, reader: new FirestoreReadOnlyReader({ baseUrl: "https://firestore.googleapis.com", projectId: key!.project_id!, getToken, readTime }) };
+  const projectId = key!.project_id!;
+  return { projectId, makeReader: (readTime: string | undefined) => new FirestoreReadOnlyReader({ baseUrl: "https://firestore.googleapis.com", projectId, getToken, readTime }) };
 }
 
 /** Emulator（テスト用）：demo- のプロジェクトだけ */
@@ -130,7 +131,8 @@ function emulatorReader(projectId: string) {
     fail("--emulator で使えるのは、Firestore Emulator（FIRESTORE_EMULATOR_HOST）の demo- で始まるプロジェクトだけです。本番は --key を使ってください。");
   }
   // Emulator は readTime（時点を指定した読み取り）に対応していないため使わない
-  return { projectId, reader: new FirestoreReadOnlyReader({ baseUrl: base, projectId, getToken: async () => "owner" }) };
+  const make = () => new FirestoreReadOnlyReader({ baseUrl: base, projectId, getToken: async () => "owner" });
+  return { projectId, reader: make(), makeReader: (readTime: string | undefined) => (readTime === undefined ? make() : fail("Emulator では読み取りの時点（readTime）を使えません。")) };
 }
 
 function stamp(d = new Date()) {
@@ -140,15 +142,17 @@ function stamp(d = new Date()) {
 async function cmdBackup() {
   const keyPath = opt("--key");
   const emu = opt("--emulator");
+  // 本番（--key）か Emulator（--emulator）かを、ネットワークに接続する前にはっきりさせる
+  if (keyPath && emu) fail("--key（本番）と --emulator（テスト）は同時に指定できません。どちらか一方だけを指定してください。", 2);
   if (!keyPath && !emu) fail("--key <鍵JSON>（本番）または --emulator <demo-プロジェクトID>（テスト）を指定してください。", 2);
-  const started = Date.now();
-  // 本番は「開始時点」の内容で全件を読む（途中で変わったデータが混ざらないように）。
-  // 万一この指定が使えない場合だけ --no-read-time で外せる（その場合は読み取り中の変更が混ざり得る）
-  const readTime = emu || flag("--no-read-time") ? undefined : new Date(started - 2000).toISOString();
-  if (!emu && !readTime) console.log("⚠ --no-read-time：時点を固定せずに読み取ります（読み取り中に変更されたデータが混ざる可能性があります）。");
-  const { projectId, reader } = keyPath ? await productionReader(keyPath, readTime) : emulatorReader(emu!);
+  // 本番は必ず「1時点の内容」（readTime）で全件を読む。時点を固定しない読み取りは本番では選べない
+  if (keyPath && flag("--no-read-time")) fail("本番のバックアップでは --no-read-time は使えません（読み取り中の変更が混ざるのを防ぐため、時点の指定は必須です）。--no-read-time を外して実行してください。", 2);
+  const mode = keyPath ? "production" : "emulator";
+  const { projectId, makeReader } = keyPath ? await productionReader(keyPath) : emulatorReader(emu!);
 
   if (flag("--estimate")) {
+    // 見積もりは件数の目安だけなので、時点は固定しない
+    const reader = makeReader(undefined);
     const ids = await reader.listCollectionIds(null);
     let total = 0;
     console.log("トップレベルのコレクションと件数（サブコレクションは含みません）:");
@@ -157,27 +161,31 @@ async function cmdBackup() {
       total += n;
       console.log(`  ${id}: ${n}件`);
     }
-    console.log(`合計 ${total}件。バックアップ1回の読み取り回数の目安: 約 ${total * 2 + ids.length + 10} 回（Spark の無料枠は1日5万回）`);
+    console.log(`合計 ${total}件。バックアップ1回の読み取り回数の目安: 約 ${total * 2 + ids.length * 2 + 10} 回（Spark の無料枠は1日5万回）`);
     return;
   }
 
   const outDir = opt("--out") ?? "backups";
   mkdirSync(outDir, { recursive: true });
   if (!isSafeFromGit(join(outDir, "x.ufbk"))) fail(`保存先 ${outDir} が Git の管理対象です。.gitignore に追加するか、リポジトリの外を指定してください。`);
+  // 合言葉の入力は時刻の確認より前に済ませる（入力に時間がかかっても readTime の有効期限を使わない）
   const pass = await passphrase(true);
 
-  console.log(`読み取りを開始します（${readTime ? `時点: ${readTime}` : "Emulator"}）…`);
-  const result = await exportAll(
-    reader,
-    { projectId, databaseId: "(default)", readTime: readTime ?? null },
-    { deadline: started + 50 * 60_000, onProgress: (p) => process.stdout.write(`\r  ${p.collections}コレクション・${p.docs}件`) },
-  );
+  console.log(mode === "production" ? "Firestore の時刻を確認しています…" : "読み取りを開始します（Emulator・時点の指定なし）…");
+  const result = await createConsistentExport({
+    mode,
+    makeReader,
+    projectId,
+    onReadTime: ({ readTime, skewMs }) => {
+      if (readTime) console.log(`読み取りを開始します（時点: ${readTime}・このパソコンの時計とのずれ 約${Math.round((skewMs ?? 0) / 1000)}秒）…`);
+    },
+    onProgress: (p) => process.stdout.write(`\r  ${p.collections}コレクション・${p.docs}件`),
+  });
   process.stdout.write("\n");
   const encrypted = encryptBackup(serialize(result), pass);
-  const name = `uranai-backup-${stamp(new Date(started))}`;
+  const name = `uranai-backup-${stamp(new Date(result.header.createdAt))}`;
   const file = join(outDir, `${name}.ufbk`);
-  writeFileSync(file, encrypted, { mode: 0o600 });
-  chmodSync(file, 0o600);
+  const manifestFile = join(outDir, `${name}.manifest.json`);
   const manifest: PlainManifest = {
     format: result.header.format,
     version: result.header.version,
@@ -189,17 +197,31 @@ async function cmdBackup() {
     encryptedFile: basename(file),
     encryptedSha256: sha256(encrypted),
     encryptedBytes: encrypted.length,
+    consistency: result.header.consistency,
+    finishedAt: result.header.finishedAt,
+    countCheck: result.header.countCheck,
   };
-  writeFileSync(join(outDir, `${name}.manifest.json`), JSON.stringify(manifest, null, 2) + "\n", { mode: 0o600 });
-
-  // 書き出した直後に、同じ合言葉で読み戻して確認する
-  const check = parseAndVerify(decryptBackup(readFileSync(file), pass));
-  if (!check.ok) fail(`書き出したバックアップの確認に失敗しました: ${check.problems.join(" / ")}`);
+  // .partial の名前で書き、同じ合言葉で読み戻して確認できてから正式な名前にする（失敗したら何も残さない）
+  writeBackupFilesAtomically({
+    file,
+    manifestFile,
+    encrypted,
+    manifestText: JSON.stringify(manifest, null, 2) + "\n",
+    verify: (partial) => {
+      const raw = readFileSync(partial);
+      if (sha256(raw) !== manifest.encryptedSha256) throw new Error("書き出したバックアップの確認に失敗しました: ファイルのハッシュが一致しません。");
+      const check = parseAndVerify(decryptBackup(raw, pass));
+      if (!check.ok) throw new Error(`書き出したバックアップの確認に失敗しました: ${check.problems.join(" / ")}`);
+    },
+  });
   console.log("トップレベルのコレクション（件数）:");
   for (const [k, v] of Object.entries(result.rootCounts)) console.log(`  ${k}: ${v}件`);
-  console.log(`合計 ${result.footer.totalDocs}件（うちサブコレクションの親だけのドキュメント ${result.footer.missingDocs}件）・コレクション ${Object.keys(result.footer.collections).length}個・リクエスト ${reader.requests}回`);
+  console.log(`合計 ${result.footer.totalDocs}件（うちサブコレクションの親だけのドキュメント ${result.footer.missingDocs}件）・コレクション ${Object.keys(result.footer.collections).length}個・リクエスト ${result.reader.requests}回`);
+  console.log(`件数の照合: トップレベルの ${Object.keys(result.countedRoots).length}コレクションで一致（${result.header.readTime ? "同じ時点の集計と比較" : "Emulator・時点の指定なし"}。サブコレクションは照合の対象外）`);
+  if (result.header.readTime) console.log(`読み取りの時点: ${result.header.readTime}・終了: ${result.header.finishedAt}（Firestore の時刻・推定）`);
+  else console.log("⚠ 時点を固定していないバックアップです（Emulator のテスト用）。");
   console.log(`✔ 作成しました: ${file}（${encrypted.length.toLocaleString()} バイト・暗号化済み）`);
-  console.log(`  説明ファイル: ${join(outDir, `${name}.manifest.json`)}`);
+  console.log(`  説明ファイル: ${manifestFile}`);
 }
 
 function loadAndVerify(file: string, pass: string) {
@@ -207,8 +229,9 @@ function loadAndVerify(file: string, pass: string) {
   const raw = readFileSync(file);
   const problems: string[] = [];
   const manifestPath = file.replace(/\.ufbk$/, ".manifest.json");
+  let m: PlainManifest | null = null;
   if (existsSync(manifestPath)) {
-    const m = JSON.parse(readFileSync(manifestPath, "utf8")) as PlainManifest;
+    m = JSON.parse(readFileSync(manifestPath, "utf8")) as PlainManifest;
     if (m.encryptedSha256 !== sha256(raw)) problems.push("説明ファイルに記録したハッシュとファイルが一致しません（ファイルが変わっています）。");
   } else console.log("⚠ 説明ファイル（.manifest.json）が見つからないため、ファイル全体のハッシュ照合は省略します。");
   let report;
@@ -216,6 +239,12 @@ function loadAndVerify(file: string, pass: string) {
     report = parseAndVerify(decryptBackup(raw, pass));
   } catch (e) {
     fail((e as Error).message);
+  }
+  const h = report!.header;
+  if (m && h) {
+    // 説明ファイルの時点・整合性の記録が中身と同じか（新しい項目は、どちらかにあれば比べる）
+    if (m.createdAt !== h.createdAt || (m.readTime ?? null) !== h.readTime) problems.push("説明ファイルの作成日時・読み取りの時点が、バックアップの中身と一致しません。");
+    for (const k of ["consistency", "finishedAt", "countCheck"] as const) if ((m[k] ?? null) !== (h[k] ?? null)) problems.push(`説明ファイルの ${k} が、バックアップの中身と一致しません。`);
   }
   return { report: report!, problems: [...problems, ...report!.problems] };
 }
@@ -226,7 +255,11 @@ async function cmdVerify() {
   const { report, problems } = loadAndVerify(file!, await passphrase(false));
   const roots: Record<string, number> = {};
   for (const d of report.docs) if (!d.c.includes("/")) roots[d.c] = (roots[d.c] ?? 0) + 1;
-  console.log(`作成日時: ${report.header?.createdAt}・読み取り時点: ${report.header?.readTime ?? "（Emulator）"}`);
+  const h = report.header;
+  console.log(`作成日時: ${h?.createdAt}・読み取り時点: ${h?.readTime ?? "（固定なし）"}`);
+  const kind = h?.consistency === "read_time" ? "1時点の読み取り（readTime）" : h?.consistency === "none" ? "時点の固定なし（Emulator）" : h?.readTime ? "1時点の読み取り（readTime・旧形式：終了時刻の記録なし）" : "時点の固定なし（旧形式）";
+  console.log(`整合性: ${kind}${h?.finishedAt ? `・読み取りの終了: ${h.finishedAt}` : ""}${h?.countCheck === "root_collections" ? "・トップレベルの件数を照合済み" : ""}`);
+  for (const w of report.warnings) console.log(`⚠ ${w}`);
   for (const [k, v] of Object.entries(roots).sort()) console.log(`  ${k}: ${v}件`);
   console.log(`合計 ${report.docs.length}件・コレクション ${report.collectionCount}個`);
   for (const need of ["users", "stores"]) if (!(need in roots)) console.log(`⚠ 「${need}」コレクションが含まれていません（本番のバックアップなら通常は含まれます）。`);
