@@ -233,14 +233,17 @@ async function main() {
     assert.deepEqual([t.paymentStatus, await reviewDoc(tnfId(p))], ["REFUNDED", null]);
     step("決済確定より先の返金（正常な先着）：先に確定して返金済み・記録しない → 後の決済確定の通知も返金済み。記録は0のまま");
   }
-  // 11b. 本当の異常（注文が無い）：記録して 200（回数1）。決済確定の通知も確定できない（記録は増えない・決済記録は作らない）
+  // 11b. 本当の異常（注文が無い）：記録して 200（回数1）。決済確定の通知も確定できない（決済記録は作らない）。
+  //      決済確定の通知は、支払い済みなのに注文が無い決済として別に記録し（paid_checkout_unconfirmable）、500（注文が戻るまで処理済みにしない）
   {
     const p = await refundedBeforeConfirm(rt, code);
     const e = refundEv(p);
     assert.equal(outcomeOf(await deliver(rt, e)), "ignored");
-    assert.equal(outcomeOf(await deliver(rt, ev("checkout.session.completed", { id: p.sessionId, object: "checkout.session" }))), "rejected"); // 注文が無い（unknown_checkout）
+    const done = await deliver(rt, ev("checkout.session.completed", { id: p.sessionId, object: "checkout.session" }));
+    assert.equal(done.status, 500); // 注文が無い（unknown_checkout）：処理済みにしない
     assert.deepEqual([(await fsdb().collection(C.transactions).doc(p.txId).get()).exists, (await reviewDoc(tnfId(p)))?.occurrences], [false, 1]);
-    step("決済確定より先の返金（注文が無い）：記録（回数1）。決済確定の通知でも決済記録は作らず、記録は増えない");
+    assert.deepEqual((await reviewDoc(paymentReviewId("paid_checkout_unconfirmable", p.charge)))?.mismatches, ["unknown_checkout"]);
+    step("決済確定より先の返金（注文が無い）：記録（回数1）。決済確定の通知でも決済記録は作らず、支払い済みで照合できない決済として記録して 500");
   }
 
   assert.equal([...failRecord.values()].reduce((x, n) => x + n, 0), 0, "（前提）用意した記録の失敗がすべて使われていません");

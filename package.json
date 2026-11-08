@@ -53,6 +53,7 @@
     "e2e:admin-restore-browser": "tsx --conditions=react-server scripts/e2e-admin-restore-browser.ts",
     "e2e:test-alert-browser": "tsx --conditions=react-server scripts/e2e-test-alert-browser.ts",
     "e2e:stripe-new-checkout-pause": "tsx --conditions=react-server scripts/e2e-stripe-new-checkout-pause.ts",
+    "e2e:stripe-paid-unconfirmable": "tsx --conditions=react-server scripts/e2e-stripe-paid-unconfirmable.ts",
     "monitor:payments": "tsx --conditions=react-server scripts/payment-monitor.ts"
   },
   "dependencies": {

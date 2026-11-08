@@ -162,9 +162,12 @@ async function main() {
   const p3 = await begin(live, store.storeCode);
   await fsdb().collection(C.checkouts).doc(p3.checkoutId).update({ stripeLivemode: false }); // 注文のモードの記録と食い違う
   await liveStripe.ctl(`pay/${p3.sessionId}`);
-  assert.deepEqual(await confirmStripeCheckout(p3.sessionId, live), { status: "rejected", reason: "mode_mismatch" });
+  // 支払い済み（Stripe の側は検証済み）なのに注文の記録と照合できない：決済要確認・決済監視に記録する（paidReview）
+  assert.deepEqual(await confirmStripeCheckout(p3.sessionId, live), { status: "rejected", reason: "mode_mismatch", paidReview: true });
   assert.equal((await txOf(p3.checkoutId)).length, 0);
-  step("livemode が混ざった決済（Charge だけ false）・注文のモードの記録との食い違いは拒否（記録なし）");
+  const p3Reviews = await fsdb().collection(C.paymentReviews).where("kind", "==", "paid_checkout_unconfirmable").where("checkoutId", "==", p3.checkoutId).get();
+  assert.deepEqual(p3Reviews.docs.map((d) => [d.get("mismatches"), d.get("amount"), d.get("livemode")]), [[["mode_mismatch"], 100, true]]);
+  step("livemode が混ざった決済（Charge だけ false）は拒否（記録なし）。注文のモードの記録との食い違いは拒否し、支払い済みで照合できない決済として決済要確認に記録");
 
   // ---- 7. 確定待ち（PayPay の非同期の支払い）→ 確定、期限切れ、非同期の失敗（本番モードでも既存どおり） ----
   const p4 = await begin(live, store.storeCode);

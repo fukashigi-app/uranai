@@ -286,6 +286,19 @@ describe("Stripe の Webhook", () => {
     expect(hooks.calls.some((c) => c.startsWith("fail:evt_test_checkout.session.completed:") && c.endsWith(":lease_test"))).toBe(true); // 処理権の値で RETRYABLE に
   });
 
+  it("支払い済みなのに注文・店舗の記録が無い（retryable）は 500。処理済みにせず、記録が戻った後の再送・自動の復旧で確定する", async () => {
+    hooks.confirm = { status: "rejected", reason: "unknown_checkout", paidReview: true, retryable: true };
+    const r = await post(ev("checkout.session.completed", { id: "cs_test_abc" }));
+    expect(r.status).toBe(500);
+    expect(hooks.calls).not.toContain("finish:evt_test_checkout.session.completed");
+    expect(hooks.calls.some((c) => c.startsWith("fail:evt_test_checkout.session.completed:StripeCheckoutRecordMissingError"))).toBe(true);
+    // 戻らない理由（記録済み・paidReview だけ）は今までどおり処理済み（200）
+    hooks.calls.length = 0;
+    hooks.confirm = { status: "rejected", reason: "session_not_linked", paidReview: true };
+    expect((await post(ev("checkout.session.completed", { id: "cs_test_abc" }, { id: "evt_test_unlinked" }))).status).toBe(200);
+    expect(hooks.calls).toContain("finish:evt_test_unlinked");
+  });
+
   it("別の環境の決済（環境を表す値が違い、この環境に記録が無い）は IGNORED_OTHER_ENV で処理済みにする。それ以外の拒否は今までどおり PROCESSED", async () => {
     hooks.confirm = { status: "rejected", reason: "other_environment" };
     const r = await post(ev("checkout.session.completed", { id: "cs_test_abc" }));

@@ -131,6 +131,13 @@ Stripe Checkout の決済・返金・異議申し立て（チャージバック�
 3. `webhookEvents/stripe_{イベントID}` で処理済みかを確かめる。処理済みなら 200（`duplicate: true`）で何もしない
 4. 種類ごとに処理する（通知の中身は使わず、Stripe API から取り直す）。成功したら処理済みにして 200
 5. 処理で例外が出たら、処理済みにせず 500（Stripe が再送する）。決済監視に種類ごとの異常を記録する
+6. 決済の完了の通知で、**Stripe では支払い済み（金額・metadata・PaymentIntent・Charge を検証済み）なのに、この環境の注文・店舗の記録と照合できず確定しなかった**ときは、
+   決済要確認（`paid_checkout_unconfirmable`・対象は Charge）と決済監視（`stripe_paid_not_confirmed`・対象は注文。決済監視の点検と同じ記録）に記録する。記録できなければ 500
+   - 注文が無い（`unknown_checkout`）・店舗が無い（`store_not_found`）：記録が戻れば確定できる可能性があるので、**処理済みにせず 500**。
+     記録が戻った後の Stripe の再送・Webhook の自動の復旧・運営の再処理で確定する（決済記録は PaymentIntent で1件に決まるので二重にならない）
+   - 注文が別の決済と紐付いている・同じ注文が別の決済で確定済み・返金済みの注文・注文と金額や店舗が一致しない など：再送しても変わらないので、記録して 200（処理済み）。運営が確認し、必要なら返金する
+   - 対象は、この環境で作った Session（metadata の環境を表す値が同じ）だけ。値が無い以前の Session は今までどおり（記録せず処理済み）
+   - 記録するのは Stripe の Session・PaymentIntent・Charge の ID、注文・店舗の ID、金額、モード、理由の名前だけ（個人情報・秘密情報・通知の本文・署名は記録しない）
 
 - 処理済みの記録は、作成から90日で毎日の定期処理が削除します（処理済みのものだけ）
 - **実装済み・テスト済み**：`tests/stripe.test.ts`、`scripts/e2e-stripe.ts`、`scripts/e2e-stripe-ordering.ts`
@@ -282,6 +289,7 @@ Stripe の通知のうち、記録と照合できず反映していないもの�
 | 状況 | 対応 |
 | --- | --- |
 | 決済要確認に `transaction_not_found` が残る | 決済確定より先に届いた返金・異議申し立ての通知です。決済履歴でその決済の状態が Stripe と一致していることを確かめてから「確認済みにする」（自動では解消しない） |
+| 決済要確認に `paid_checkout_unconfirmable` | Stripe では支払い済みだが、注文・店舗の記録と照合できず確定していません（理由は「一致しない項目」に、`unknown_checkout` などの名前で表示）。`unknown_checkout`・`store_not_found` は、記録が戻れば Stripe の再送・Webhook の復旧で確定します。それ以外は、Stripe の Dashboard で決済を確かめ、必要なら返金してから「確認済みにする」。**復旧して確定した後も、この決済要確認と決済監視の通知（`stripe_paid_not_confirmed`・`checkout_confirm_failed`）は未確認のまま残ります（自動では解消しない）。決済履歴でその決済の決済記録があり、Stripe と一致していることを確かめてから、手動で「確認済みにする」** |
 | 決済監視に「Stripe で支払い済みなのに未確定」 | 決済確定が失敗し続けています。Stripe の障害なら回復後の再送を待つ。Stripe の Dashboard から通知を再送する場合は、**本物の Stripe での操作になるので運営の判断で行う** |
 | 決済監視に `refund_sync_failed`（決済記録の ID） | 決済確定の後の再確認が失敗しました。その決済の返金・異議申し立ての状態を Stripe と照らし合わせる（その後の通知でも反映される） |
 | 復旧の操作が `state_changed` | 確認の途中で状態が変わりました。画面を開き直して、もう一度確認する |

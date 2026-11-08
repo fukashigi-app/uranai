@@ -26,7 +26,8 @@ export type PaymentReviewKind =
   | "dispute_state_regressed"
   | "legacy_settlement_change"
   | "legacy_settlement_mismatch"
-  | "paid_payment_method_not_allowed";
+  | "paid_payment_method_not_allowed"
+  | "paid_checkout_unconfirmable";
 
 export const PAYMENT_REVIEW_LABEL: Record<PaymentReviewKind, string> = {
   charge_mismatch: "Stripe の決済と記録が一致しない（返金・異議申し立てを反映していません）",
@@ -38,6 +39,8 @@ export const PAYMENT_REVIEW_LABEL: Record<PaymentReviewKind, string> = {
   legacy_settlement_change: "以前に確定した精算の月の取引が、後から返金・異議申し立てで変わった（支払った額が不明なため、調整していません）",
   legacy_settlement_mismatch: "以前に確定した精算の金額と、今の集計が一致しない（調整していません）",
   paid_payment_method_not_allowed: "Stripe では支払い済みだが、許可していない支払い方法のため、決済を確定せず占いの権利も付与していない（返金などの対応が必要。自動では返金しません）",
+  paid_checkout_unconfirmable:
+    "Stripe では支払い済みだが、アプリの注文・店舗の記録と照合できないため、決済を確定せず占いの権利も付与していない（注文・店舗の記録を確認し、復旧するか返金などの対応が必要。自動では返金しません）",
 };
 
 export type PaymentReviewStatus = "OPEN" | "RESOLVED";

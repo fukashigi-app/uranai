@@ -115,6 +115,9 @@ async function handle(event: Stripe.Event, rt: StripeRuntime): Promise<string> {
       // 決済確定の後の再確認が失敗した（決済記録は PENDING のまま）：処理済みにせず 500 を返し、Stripe の再送で再確認する
       if (r.recheck === "pending") throw Object.assign(new Error("recheck after confirmation is pending"), { name: "StripeRecheckPendingError" });
       if (r.status === "rejected" && r.reason === "other_environment") return OTHER_ENV;
+      // 支払い済みなのに注文・店舗の記録が見つからない（決済要確認・決済監視には記録済み）：処理済みにせず 500 を返し、
+      // 記録が戻った後の Stripe の再送・Webhook の自動の復旧・運営の再処理で確定する（同じ通知の重複は処理済みの判定で防ぐ）
+      if (r.status === "rejected" && r.retryable) throw Object.assign(new Error("paid checkout record is missing"), { name: "StripeCheckoutRecordMissingError" });
       return r.status;
     }
     case "checkout.session.expired":

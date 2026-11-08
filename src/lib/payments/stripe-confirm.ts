@@ -99,8 +99,12 @@ export type StripeConfirmOutcome = (
   /** 返金済み・チャージバック：決済記録は作る（または作成済み）が、占い権利は付与しない（注文は REFUNDED） */
   | { status: "refunded"; transactionId: string; refundReason: CheckoutRefundReason | null }
   | { status: "not_paid"; reason: string }
-  /** paidReview … Stripe では支払い済みだが確定を拒否した（決済要確認・決済監視に記録済み。利用者には「請求は発生していません」と案内しない） */
-  | { status: "rejected"; reason: string; paidReview?: true }
+  /**
+   * paidReview … Stripe では支払い済みだが確定を拒否した（決済要確認・決済監視に記録済み。利用者には「請求は発生していません」と案内しない）
+   * retryable … 注文・店舗の記録が見つからない（復元の途中・データの消失など、後で記録が戻る可能性がある）。Webhook は処理済みにせず 500 を返し、
+   *             Stripe の再送・Webhook の自動の復旧・運営の再処理で、記録が戻った後に確定する
+   */
+  | { status: "rejected"; reason: string; paidReview?: true; retryable?: true }
 ) & { recheck?: RecheckRun };
 
 /** 再確認の実行の結果（not_pending＝PENDING ではなかったので何もしていない） */
@@ -401,6 +405,23 @@ export async function confirmStripeCheckout(
     const created = await txRef.get();
     if (recheckStateOf(created.get("recheckState")) !== RECHECK_PENDING) return { status: "duplicate", transactionId: txId };
     return { status: "duplicate", transactionId: txId, recheck: await recheckStripePayment(txId, f, r0) };
+  }
+  // Stripe では支払い済み（金額・metadata・PaymentIntent・Charge を検証済み）なのに、注文・店舗の記録と照合できず確定しなかった：
+  // 運営が見つけられるよう決済要確認・決済監視に記録する（記録できなければ例外。Webhook は 500 で Stripe が再送）。
+  // 通常の確定だけが対象（自動の回収・先着の返金と異議申し立ての通知からの確定は、それぞれの仕組みで記録する）。
+  // この環境で作った Session（metadata の環境を表す値がこの環境と同じ）だけ。値が無い以前の Session は、同じ Sandbox を使う別の環境の
+  // 決済かもしれないので、今までどおり（記録せず処理済み）
+  if (
+    outcome.status === "rejected" &&
+    PAID_UNCONFIRMABLE_REASONS.has(outcome.reason) &&
+    !opts.requireExistingTransaction &&
+    !opts.expectedPaymentIntentId &&
+    f.envTag !== null &&
+    f.envTag === r0.envTag
+  ) {
+    console.error("[stripe] paid payment could not be confirmed", { sessionId, reason: outcome.reason });
+    await recordPaidUnconfirmable(f, outcome.reason, r0);
+    return { status: "rejected", reason: outcome.reason, paidReview: true, ...(RETRYABLE_UNCONFIRMABLE_REASONS.has(outcome.reason) ? { retryable: true as const } : {}) };
   }
   if (createdHere) {
     if (!ent.grant) console.warn("[stripe] payment confirmed with a refund or chargeback (entitlement not granted)", { sessionId, reason: ent.refundReason });
@@ -1054,6 +1075,65 @@ async function recordPaidRejection(p: StripePaidRejection, reason: string): Prom
   });
   await recordPaymentAlert(
     { kind, objectType: "checkout", objectId: p.checkoutId, checkoutId: p.checkoutId, paymentIntentId: p.paymentIntentId, storeId: p.storeId, mode: alertModeOf(p.livemode), errorName: reason },
+    new Date(),
+    { once: true },
+  );
+}
+
+/**
+ * 支払い済みなのに、注文・店舗の記録と照合できずに確定を拒否した理由（confirmStripeCheckout のトランザクションの中の判定）。
+ * Stripe の側（金額・metadata・PaymentIntent・Charge）は検証済みで、このアプリの決済であることは確か。
+ *  unknown_checkout       … 注文が無い
+ *  store_not_found        … 店舗が無い
+ *  provider_mismatch・session_not_linked・mode_mismatch … 注文が別の決済（別の Session・モード）と紐付いている
+ *  checkout_already_succeeded … 同じ注文が別の決済で確定済み（同じ注文に2回目の支払い）
+ *  checkout_refunded      … 返金済み・チャージバックの注文に、別の支払い
+ *  store_mismatch・fortune_type_mismatch・amount_mismatch … 注文と Stripe の metadata・金額が一致しない
+ */
+export const PAID_UNCONFIRMABLE_REASONS: ReadonlySet<string> = new Set([
+  "unknown_checkout",
+  "store_not_found",
+  "provider_mismatch",
+  "session_not_linked",
+  "mode_mismatch",
+  "checkout_already_succeeded",
+  "checkout_refunded",
+  "store_mismatch",
+  "fortune_type_mismatch",
+  "amount_mismatch",
+]);
+/** 記録が戻れば確定できる可能性がある理由（Webhook は処理済みにせず再送を待つ）。それ以外は運営の確認・返金の対応が必要（再送しても変わらない） */
+export const RETRYABLE_UNCONFIRMABLE_REASONS: ReadonlySet<string> = new Set(["unknown_checkout", "store_not_found"]);
+
+/**
+ * 支払い済みなのに注文・店舗と照合できず、確定を拒否した決済を記録する（recordPaidRejection と同じ方式）。
+ *  - 決済要確認（paid_checkout_unconfirmable・対象は Charge）… 必須。失敗したら例外（Webhook は 500 で再送）
+ *  - 決済監視（stripe_paid_not_confirmed・対象は注文）       … 失敗しても止めない。決済監視の点検と同じ種類・対象なので1件にまとまる
+ * 保存するのは Stripe の Session・PaymentIntent・Charge の ID、注文・店舗の ID（metadata の値）、金額、モード、理由の名前だけ
+ * （秘密情報・カードの情報・個人情報・通知の本文・署名は保存しない）。同じ決済のくり返し（再送など）では回数を増やさない。
+ */
+async function recordPaidUnconfirmable(
+  f: { sessionId: string; checkoutId: string; storeId: string; paymentIntentId: string; chargeId: string; amount: number; livemode: boolean },
+  reason: string,
+  r0: StripeRuntime,
+): Promise<void> {
+  r0.testHooks?.beforeReviewRecord?.("paid_checkout_unconfirmable"); // 自動テストだけ（記録の失敗の再現）
+  const timeoutMs = r0.testHooks?.reviewRecordTimeoutMs;
+  await recordRequiredPaymentReview({
+    kind: "paid_checkout_unconfirmable",
+    objectType: "charge",
+    objectId: f.chargeId,
+    chargeId: f.chargeId,
+    paymentIntentId: f.paymentIntentId,
+    checkoutId: f.checkoutId,
+    sessionId: f.sessionId,
+    storeId: f.storeId,
+    mismatches: [reason],
+    amount: f.amount,
+    livemode: f.livemode,
+  }, timeoutMs ? { timeoutMs } : {});
+  await recordPaymentAlert(
+    { kind: "stripe_paid_not_confirmed", objectType: "checkout", objectId: f.checkoutId, checkoutId: f.checkoutId, paymentIntentId: f.paymentIntentId, storeId: f.storeId, mode: alertModeOf(f.livemode), errorName: reason },
     new Date(),
     { once: true },
   );
