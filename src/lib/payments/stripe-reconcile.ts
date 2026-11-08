@@ -1,7 +1,7 @@
 import "server-only";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
-import type { DocumentReference, DocumentSnapshot } from "firebase-admin/firestore";
-import { C, fsdb, safeId } from "@/lib/firestore/admin";
+import { FieldPath, Timestamp, type DocumentReference, type DocumentSnapshot } from "firebase-admin/firestore";
+import { C, fsdb, safeId, toDate } from "@/lib/firestore/admin";
 import { paymentReviewId } from "@/lib/firestore/payment-reviews";
 import { isSessionSecretStrong } from "@/lib/env-rules";
 import { txFacts } from "@/lib/firestore/settlement-adjustments";
@@ -16,6 +16,10 @@ import {
   disputeFactOf,
   refundFactOf,
   RECONCILE_MAX_ADJUSTMENTS_PER_TX,
+  REVERSE_LOOKBACK_SEC,
+  classifyReverse,
+  reversePrecheck,
+  type ReverseTxFact,
   type AdjustmentDocFact,
   type AdjustmentTxFact,
   type ChargeFact,
@@ -74,6 +78,12 @@ export const RECONCILE_LIMITS = {
   maxAdjustmentChecksPerSegment: 60,
   /** 返金・異議申し立てを確かめた Charge の記録の上限（同じ Charge を二重に数えないため。超えた分は「確認していない」） */
   maxChecked: 3000,
+  /** 第2段階b：Firestore の取引の一覧の1ページの件数 */
+  txPageSize: 50,
+  /** 取引のページごとに読む Stripe の決済の一覧の上限（ページ数）。読み切れなかった取引は1件ずつ取り直す */
+  reverseListMaxPages: 5,
+  /** 1回の実行で、取引の決済を1件ずつ取り直す上限（超えたら次のページを読まずに未完了で止め、続きから再開） */
+  maxReverseLookupsPerSegment: 60,
 };
 export type ReconcileLimits = typeof RECONCILE_LIMITS;
 
@@ -137,12 +147,23 @@ export type ReconcileCounts = {
   disputeOpen: number;
   /** 精算の調整を確かめた取引（確定済みの精算に含めたもの） */
   settlementChecked: number;
+  /** 第2段階b：Firestore の取引の一覧で読んだ取引（paidAt が期間の中のもの。paidAt が無い取引は含まれない） */
+  txScanned: number;
+  /** 対象外：Stripe 以外の決済会社・モードが違う取引 */
+  txOtherProvider: number;
+  txOtherMode: number;
+  /** 元の決済が期間の中（決済の一覧の段階で照合済み。重ねて数えない） */
+  txCovered: number;
+  /** 元の決済が期間の外で、Stripe と一致（期間の境目） */
+  txMatched: number;
+  /** Stripe の決済を1件ずつ取り直した回数 */
+  reverseLookups: number;
 };
 
-export type ReconcilePhase = "payments" | "refunds" | "disputes";
+export type ReconcilePhase = "payments" | "refunds" | "disputes" | "transactions";
 
 export type ReconcileState = {
-  v: 2;
+  v: 3;
   runId: string;
   userId: string;
   mode: StripeMode;
@@ -177,7 +198,7 @@ export type ReconcileStop = "time" | "page_limit" | "check_limit" | "stripe_erro
 export const RECONCILE_STOP_LABEL: Record<ReconcileStop, string> = {
   time: "1回の実行の時間の上限に達した",
   page_limit: "1回の実行で読むページの上限に達した",
-  check_limit: "1回の実行で返金・異議申し立てを確かめる件数の上限に達した",
+  check_limit: "1回の実行で、返金・異議申し立てを確かめる件数、または取引の決済を取り直す件数の上限に達した",
   stripe_error: "Stripe から取得できなかった（決済・返金・異議申し立ての一覧、または個別の確認）",
   firestore_error: "Firestore を読めなかった",
   unexpected_response: "Stripe から想定外の応答があった",
@@ -208,9 +229,10 @@ export class ReconcileInputError extends Error {
 const emptyCounts = (): ReconcileCounts => ({
   scanned: 0, inScope: 0, matched: 0, notPaid: 0, pending: 0, anomalyPayments: 0, anomalies: 0, otherMode: 0, otherEnv: 0, untagged: 0, badTag: 0, needsReview: 0,
   adjustmentChecks: 0, adjustmentIssues: 0, refundsSeen: 0, disputesSeen: 0, refundInProgress: 0, disputeOpen: 0, settlementChecked: 0,
+  txScanned: 0, txOtherProvider: 0, txOtherMode: 0, txCovered: 0, txMatched: 0, reverseLookups: 0,
 });
 const emptyByKind = (): Record<ReconcileAnomalyKind, number> => ({
-  stripe_paid_no_checkout: 0, stripe_paid_no_transaction: 0, amount_or_mode_mismatch: 0, duplicate_or_bad_link: 0, refund_mismatch: 0, dispute_mismatch: 0, settlement_adjustment_mismatch: 0,
+  stripe_paid_no_checkout: 0, stripe_paid_no_transaction: 0, amount_or_mode_mismatch: 0, duplicate_or_bad_link: 0, refund_mismatch: 0, dispute_mismatch: 0, settlement_adjustment_mismatch: 0, stripe_payment_missing: 0,
 });
 const chargeKey = (ch: string) => createHash("sha256").update(ch).digest("hex").slice(0, 12);
 
@@ -246,7 +268,7 @@ export function decodeReconcileToken(raw: unknown, secret: string | undefined = 
   } catch {
     throw new ReconcileInputError("invalid_token");
   }
-  if (!s || s.v !== 2 || typeof s.runId !== "string" || typeof s.startedAt !== "number" || typeof s.from !== "number" || typeof s.to !== "number") throw new ReconcileInputError("invalid_token");
+  if (!s || s.v !== 3 || typeof s.runId !== "string" || typeof s.startedAt !== "number" || typeof s.from !== "number" || typeof s.to !== "number") throw new ReconcileInputError("invalid_token");
   return s;
 }
 
@@ -260,7 +282,7 @@ export async function startReconcile(opts: { rt: StripeRuntime; userId: string; 
   const range = normalizeRange(opts.fromSec, opts.toSec, now.getTime());
   if (!range.ok) throw new ReconcileInputError(range.reason === "too_long" ? "range_too_long" : range.reason === "future" ? "range_future" : "invalid_range");
   const state: ReconcileState = {
-    v: 2,
+    v: 3,
     runId: randomUUID(),
     userId: opts.userId,
     mode: opts.rt.mode,
@@ -298,7 +320,7 @@ export async function resumeReconcile(opts: { rt: StripeRuntime; userId: string;
   if (s.mode !== opts.rt.mode || s.envTag !== opts.rt.envTag || s.accountKey !== accountKeyOf(opts.rt)) throw new ReconcileInputError("token_environment_mismatch");
   if (s.done) throw new ReconcileInputError("already_done");
   if (!s.dupIndex || typeof s.dupIndex !== "object" || !Number.isSafeInteger(s.dupIndexSize) || typeof s.truncated?.dupIndex !== "boolean" || typeof s.truncated?.checked !== "boolean") throw new ReconcileInputError("invalid_token");
-  if (!["payments", "refunds", "disputes"].includes(s.phase) || !Array.isArray(s.checked) || !s.metrics) throw new ReconcileInputError("invalid_token");
+  if (!["payments", "refunds", "disputes", "transactions"].includes(s.phase) || !Array.isArray(s.checked) || !s.metrics) throw new ReconcileInputError("invalid_token");
   return runSegment(s, opts.rt, L, secret);
 }
 
@@ -321,7 +343,7 @@ const SETTLEMENT_FIELDS = ["status", "lockedAt"];
 const ADJUSTMENT_FIELDS = ["transactionId", "storeId", "sourceSettlementId", "amount"];
 
 /** 1ページの処理で使う値。page は結果に加えるページの読み取り・呼び出しの件数 */
-type Ctx = { rt: StripeRuntime; L: ReconcileLimits; live: boolean; now: Date; page: { stripeCalls: number; firestoreReads: number }; checks: number };
+type Ctx = { rt: StripeRuntime; L: ReconcileLimits; live: boolean; now: Date; page: { stripeCalls: number; firestoreReads: number }; checks: number; reverseLookups: number };
 
 const coRef = (id: string) => fsdb().collection(C.checkouts).doc(id);
 const txRef = (pi: string) => fsdb().collection(C.transactions).doc(safeId("stripe", pi));
@@ -703,14 +725,134 @@ async function streamPage(ctx: Ctx, state: ReconcileState, next: ReconcileState,
   return { hasMore: page.has_more, lastId: items.length ? items[items.length - 1].id : null };
 }
 
-const NEXT_PHASE: Record<ReconcilePhase, ReconcilePhase | null> = { payments: "refunds", refunds: "disputes", disputes: null };
+const REVERSE_TX_FIELDS = ["paymentProvider", "livemode", "stripePaymentIntentId", "stripeChargeId", "paidAt", "storeId", "checkoutId"];
+
+/**
+ * Stripe の PaymentIntent を1件取り直す（逆方向の照合）。Stripe に無い（404・resource_missing）ときだけ null。
+ * 認証の失敗（401）・権限（403）・レート制限（429）・通信の失敗・5xx などは stripe_error（照合全体を未完了にする。「Stripe に無い」とはしない）
+ */
+async function retrievePaymentIntent(ctx: Ctx, id: string): Promise<PiFact | null> {
+  ctx.page.stripeCalls++;
+  let raw: unknown;
+  try {
+    raw = await ctx.rt.client.paymentIntents.retrieve(id);
+  } catch (e) {
+    const x = e as { statusCode?: unknown; code?: unknown; name?: unknown };
+    if (x.statusCode === 404 && x.code === "resource_missing") return null;
+    console.error("[payment-reconcile] stripe read failed", { error: (e as Error)?.name, status: typeof x.statusCode === "number" ? x.statusCode : null });
+    throw new Stop("stripe_error");
+  }
+  const f = piFactOf(raw);
+  if (!f || f.id !== id) throw new Stop("unexpected_response");
+  return f;
+}
+
+/**
+ * Firestore の取引の一覧の1ページ（第2段階b。逆方向）。paidAt が期間の中の取引を paidAt・文書 ID の順に読む
+ * （範囲の条件と並び順が同じ1つの項目なので、自動の単一項目のインデックスで動く。同じ値の中は文書 ID の順）。
+ * paidAt が無い取引は検索に含まれない（照合の対象外）。
+ * Stripe 以外の決済会社・モードの違う取引は対象外。それ以外は、取引の支払日時の2時間前から支払日時までに作られた
+ * Stripe の PaymentIntent の一覧と、完全な ID で照合する（短いハッシュは使わない）。一覧に無いものだけを1件ずつ取り直し、
+ * 404 のときだけ「Stripe に無い」とする。元の決済が期間の中なら、決済の一覧の段階で照合済みなので重ねて数えない。
+ */
+async function transactionsPage(ctx: Ctx, state: ReconcileState, next: ReconcileState, found: ReconcileItem[]): Promise<{ hasMore: boolean; lastId: string | null }> {
+  const { rt, L, live } = ctx;
+  let cursor: { ms: number; id: string } | null = null;
+  if (state.cursor) {
+    const i = state.cursor.indexOf("|");
+    const ms = Number(state.cursor.slice(0, i));
+    const id = state.cursor.slice(i + 1);
+    if (i <= 0 || !Number.isSafeInteger(ms) || !id) throw new Stop("unexpected_response");
+    cursor = { ms, id };
+  }
+  let docs: DocumentSnapshot[];
+  try {
+    let q = fsdb()
+      .collection(C.transactions)
+      .where("paidAt", ">=", Timestamp.fromMillis(state.from * 1000))
+      .where("paidAt", "<", Timestamp.fromMillis(state.to * 1000))
+      .orderBy("paidAt")
+      .orderBy(FieldPath.documentId())
+      .select(...REVERSE_TX_FIELDS)
+      .limit(L.txPageSize);
+    if (cursor) q = q.startAfter(Timestamp.fromMillis(cursor.ms), cursor.id);
+    const snap = await q.get();
+    ctx.page.firestoreReads += Math.max(1, snap.size); // 結果が0件でも1件の読み取り
+    docs = snap.docs;
+  } catch (e) {
+    console.error("[payment-reconcile] firestore read failed", { error: (e as Error)?.name });
+    throw new Stop("firestore_error");
+  }
+  const c = next.counts;
+  type Cand = { id: string; tx: ReverseTxFact & Record<string, unknown>; pi: string; paidAt: number };
+  const cands: Cand[] = [];
+  const itemOf = (d: DocumentSnapshot, t: Record<string, unknown>, paidAt: number) => ({
+    paymentIntentId: typeof t.stripePaymentIntentId === "string" ? t.stripePaymentIntentId : "-",
+    chargeId: typeof t.stripeChargeId === "string" ? t.stripeChargeId : null,
+    checkoutId: typeof t.checkoutId === "string" ? t.checkoutId : null,
+    transactionId: d.id,
+    storeId: typeof t.storeId === "string" ? t.storeId : null,
+    created: paidAt,
+    existingReview: false,
+  });
+  for (const d of docs) {
+    c.txScanned++;
+    const t = (d.data() ?? {}) as ReverseTxFact & Record<string, unknown>;
+    const paidAtDate = toDate(t.paidAt);
+    if (!paidAtDate) throw new Stop("unexpected_response"); // 検索の条件で paidAt があるはず
+    const paidAt = Math.floor(paidAtDate.getTime() / 1000);
+    const pre = reversePrecheck(t, d.id, live);
+    if (pre.kind === "other_provider") c.txOtherProvider++;
+    else if (pre.kind === "other_mode") c.txOtherMode++;
+    else if (pre.kind === "invalid") addFound(next, found, { kind: "duplicate_or_bad_link", details: [...pre.details, "found_via_transactions"], ...itemOf(d, t, paidAt) });
+    else cands.push({ id: d.id, tx: t, pi: pre.paymentIntentId, paidAt });
+  }
+  if (cands.length) {
+    // Stripe の一覧（作成日時が、取引の支払日時の2時間前から支払日時まで）。完全な ID で照合する
+    const minPaid = Math.min(...cands.map((x) => x.paidAt));
+    const maxPaid = Math.max(...cands.map((x) => x.paidAt));
+    const seen = new Map<string, PiFact>();
+    let after: string | undefined;
+    for (let i = 0; i < L.reverseListMaxPages; i++) {
+      const page = await stripeGet(ctx, () => rt.client.paymentIntents.list({ created: { gte: minPaid - REVERSE_LOOKBACK_SEC, lt: maxPaid + 1 }, limit: 100, ...(after ? { starting_after: after } : {}) }));
+      if (!Array.isArray(page.data) || typeof page.has_more !== "boolean") throw new Stop("unexpected_response");
+      for (const raw of page.data) {
+        const f = piFactOf(raw);
+        if (!f) throw new Stop("unexpected_response");
+        seen.set(f.id, f);
+      }
+      if (!page.has_more || !page.data.length) break;
+      after = (page.data[page.data.length - 1] as { id: string }).id;
+    }
+    for (const x of cands) {
+      let f = seen.get(x.pi) ?? null;
+      if (!f) {
+        // 一覧に無い（PaymentIntent が支払いの2時間より前に作られた・一覧を読み切れなかった・Stripe に無い）：1件ずつ取り直す
+        ctx.reverseLookups++;
+        c.reverseLookups++;
+        f = await retrievePaymentIntent(ctx, x.pi);
+      }
+      const v = classifyReverse({ tx: x.tx, pi: f, from: state.from, to: state.to, live, envTag: rt.envTag });
+      const doc = docs.find((d) => d.id === x.id)!;
+      if (v.kind === "covered") c.txCovered++;
+      else if (v.kind === "ok") c.txMatched++;
+      else if (v.kind === "review") addReview(next, L, { paymentIntentId: x.pi, checkoutId: typeof x.tx.checkoutId === "string" ? x.tx.checkoutId : null, created: x.paidAt, chargeId: typeof x.tx.stripeChargeId === "string" ? x.tx.stripeChargeId : null, transactionId: x.id, scope: v.reason, reason: v.reason });
+      else for (const fd of v.findings) addFound(next, found, { kind: fd.kind, details: fd.details, ...itemOf(doc, x.tx, x.paidAt) });
+    }
+  }
+  const last = docs[docs.length - 1];
+  const lastPaid = last ? toDate(last.get("paidAt")) : null;
+  return { hasMore: docs.length === L.txPageSize, lastId: last && lastPaid ? `${lastPaid.getTime()}|${last.id}` : null };
+}
+
+const NEXT_PHASE: Record<ReconcilePhase, ReconcilePhase | null> = { payments: "refunds", refunds: "disputes", disputes: "transactions", transactions: null };
 
 async function runSegment(start: ReconcileState, rt: StripeRuntime, L: ReconcileLimits, secret: string | undefined): Promise<ReconcileRun> {
   let state = start;
   const t0 = Date.now();
   let segmentPages = 0;
   let stoppedBy: ReconcileStop | null = null;
-  const ctx: Ctx = { rt, L, live: rt.mode === "live", now: new Date(), page: { stripeCalls: 0, firestoreReads: 0 }, checks: 0 };
+  const ctx: Ctx = { rt, L, live: rt.mode === "live", now: new Date(), page: { stripeCalls: 0, firestoreReads: 0 }, checks: 0, reverseLookups: 0 };
   try {
     try {
       await ensureStripeAccount(rt); // 本番：キーが設定したアカウントのものか（GET /v1/account。読むだけ）
@@ -719,14 +861,15 @@ async function runSegment(start: ReconcileState, rt: StripeRuntime, L: Reconcile
     }
     while (!state.done) {
       if (segmentPages >= L.maxPagesPerSegment) throw new Stop("page_limit");
-      if (ctx.checks >= L.maxAdjustmentChecksPerSegment) throw new Stop("check_limit");
+      if (ctx.checks >= L.maxAdjustmentChecksPerSegment || ctx.reverseLookups >= L.maxReverseLookupsPerSegment) throw new Stop("check_limit");
       if (Date.now() - t0 > L.deadlineMs) throw new Stop("time");
       ctx.now = new Date();
       ctx.page = { stripeCalls: 0, firestoreReads: 0 };
       // 1ページ分の結果は写しに加え、ページのすべての取得・読み取り・判定が成功したときだけ採用する（失敗したら続きの位置を進めない）
       const next = clone(state);
       const found: ReconcileItem[] = [];
-      const r = state.phase === "payments" ? await paymentsPage(ctx, state, next, found) : await streamPage(ctx, state, next, found, state.phase);
+      const r =
+        state.phase === "payments" ? await paymentsPage(ctx, state, next, found) : state.phase === "transactions" ? await transactionsPage(ctx, state, next, found) : await streamPage(ctx, state, next, found, state.phase);
       // 異常の決済が、決済要確認（F1：Webhook の受信のときの記録）に記録済みか（ID で読むだけ。新しく記録はしない）
       const chargeIds = [...new Set(found.map((x) => x.chargeId).filter((x): x is string => !!x))];
       if (chargeIds.length) {

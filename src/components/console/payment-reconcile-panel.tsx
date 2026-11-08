@@ -21,7 +21,7 @@ type Result = {
   pendingItems: Ref[];
   reviewItems: Ref[];
   truncated: { anomalies: boolean; pending: boolean; review: boolean; dupIndex: boolean; checked: boolean };
-  phase: "payments" | "refunds" | "disputes";
+  phase: "payments" | "refunds" | "disputes" | "transactions";
   token: string | null;
 };
 
@@ -34,7 +34,7 @@ export type ReconcileLabels = {
   pending: Record<string, string>;
 };
 
-const PHASE_LABEL: Record<string, string> = { payments: "決済の一覧", refunds: "返金の一覧", disputes: "異議申し立ての一覧" };
+const PHASE_LABEL: Record<string, string> = { payments: "決済の一覧", refunds: "返金の一覧", disputes: "異議申し立ての一覧", transactions: "Firestore の取引の一覧" };
 
 const VERDICT: Record<Result["verdict"], { label: string; cls: string; text: string }> = {
   ok: { label: "異常なし", cls: "border-success/40 text-success", text: "期間内のすべてのページを読み、この環境の支払い済みの決済は、すべて注文・取引の記録と一致しました。" },
@@ -147,6 +147,10 @@ export function PaymentReconcilePanel({ mode, labels }: { mode: "test" | "live" 
                 ["返金の処理中（取引にも反映済み・正常な一時状態）", c.refundInProgress],
                 ["異議申し立ての対応中（取引にも反映済み）", c.disputeOpen],
                 ["精算の調整を確かめた取引（確定済みの精算）", c.settlementChecked],
+                ["Firestore の取引の一覧で読んだ取引（支払日時が期間の中）", c.txScanned],
+                ["うち元の決済が期間の中（決済の一覧で照合済み）", c.txCovered],
+                ["うち元の決済が期間の外で Stripe と一致", c.txMatched],
+                ["対象外：Stripe 以外の決済会社・モードが違う取引", (c.txOtherProvider ?? 0) + (c.txOtherMode ?? 0)],
                 ["対象外：別の環境", c.otherEnv],
                 ["対象外：モードが違う", c.otherMode],
                 ["環境を表す値が無い・形が違う（全状態）", (c.untagged ?? 0) + (c.badTag ?? 0)],
@@ -158,6 +162,9 @@ export function PaymentReconcilePanel({ mode, labels }: { mode: "test" | "live" 
               </div>
             ))}
           </dl>
+          <p className="text-[11px] text-ink-faint">
+            逆方向の照合（Firestore の取引 → Stripe）は、支払日時（paidAt）が期間の中の取引だけが対象です。paidAt が無い取引は対象になりません。Stripe に無いと判定するのは、Stripe が「存在しない（404）」と答えたときだけで、認証・通信・レート制限などの失敗は「未完了」にします。
+          </p>
           {result.anomalies.length ? (
             <section>
               <h3 className="mb-2 font-bold">{`異常（${c.anomalies}件）`}</h3>

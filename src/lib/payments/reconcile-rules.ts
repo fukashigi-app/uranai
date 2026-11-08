@@ -20,6 +20,7 @@ export const RECONCILE_ANOMALY_KINDS = [
   "refund_mismatch",
   "dispute_mismatch",
   "settlement_adjustment_mismatch",
+  "stripe_payment_missing",
 ] as const;
 export type ReconcileAnomalyKind = (typeof RECONCILE_ANOMALY_KINDS)[number];
 
@@ -31,6 +32,7 @@ export const RECONCILE_ANOMALY_LABEL: Record<ReconcileAnomalyKind, string> = {
   refund_mismatch: "Stripe の返金と、取引の返金の記録が一致しない",
   dispute_mismatch: "Stripe の異議申し立てと、取引の記録が一致しない",
   settlement_adjustment_mismatch: "確定済みの精算の調整が、今の取り分と一致しない",
+  stripe_payment_missing: "Firestore に取引があるのに、Stripe に決済が無い",
 };
 
 /** 一致しない項目の名前（画面の表示用） */
@@ -72,6 +74,13 @@ export const RECONCILE_DETAIL_LABEL: Record<string, string> = {
   adjustment_doc_mismatch: "調整の記録の取引・店舗・精算が一致しない",
   adjustment_doc_sum: "調整の記録の合計が、取引の調整の合計と一致しない",
   adjustment_count: "調整の記録の件数が、取引の件数と一致しない",
+  stripe_not_found: "Stripe に PaymentIntent が存在しない（404）",
+  tx_id_mismatch: "取引の文書 ID と PaymentIntent の ID が一致しない",
+  tx_payment_intent_invalid: "取引に PaymentIntent の ID が無い・形が違う",
+  stripe_not_paid: "Stripe の決済が支払い済みではない",
+  stripe_other_env: "Stripe の決済が別の環境のもの",
+  stripe_livemode: "Stripe の決済のモードが取引と違う",
+  found_via_transactions: "Firestore の取引の一覧から見つかった（元の決済は期間の外）",
   duplicate_in_run: "同じ注文に、未確定の支払い済みの PaymentIntent が複数（照合した期間の中・ページをまたいでも判定）",
 };
 
@@ -546,4 +555,53 @@ export function classifySettlement(input: {
   if (!m || m.status === "UNPAID") return { kind: "not_applicable", reason: "unpaid_month" };
   if (!m.lockedAt) return { kind: "review", reason: "legacy_settlement" };
   return input.entitled > 0 ? { kind: "review", reason: "settlement_import_pending" } : { kind: "ok" };
+}
+
+// ===================== 第2段階b：Firestore の取引の一覧（逆方向） =====================
+
+/** 逆方向の照合で、Stripe の一覧をさかのぼる時間（取引の支払日時より前。PaymentIntent は支払いの直前に作られる） */
+export const REVERSE_LOOKBACK_SEC = 2 * 3600;
+
+/** Firestore の取引から逆方向の照合に使う値 */
+export type ReverseTxFact = { paymentProvider: unknown; livemode: unknown; stripePaymentIntentId: unknown; stripeChargeId: unknown };
+
+export type ReversePrecheck = { kind: "other_provider" } | { kind: "other_mode" } | { kind: "invalid"; details: string[] } | { kind: "check"; paymentIntentId: string };
+
+/**
+ * Stripe に問い合わせる前の判定（Firestore の値だけ）。
+ *  - Stripe 以外の決済会社（疑似決済・以前の決済会社）・モードが違う取引（本番の Firestore のテスト決済など）は対象外
+ *    （本番のキーでテストの決済は取得できず、「Stripe に無い」と誤って判定しないため）
+ *  - 文書 ID が stripe_{PaymentIntent} と一致しない・PaymentIntent の ID が無いのは紐付けの不正
+ */
+export function reversePrecheck(tx: ReverseTxFact, docId: string, live: boolean): ReversePrecheck {
+  if (tx.paymentProvider !== "stripe") return { kind: "other_provider" };
+  if (tx.livemode !== live) return { kind: "other_mode" };
+  const pi = tx.stripePaymentIntentId;
+  if (typeof pi !== "string" || !PI_ID_RE.test(pi)) return { kind: "invalid", details: ["tx_payment_intent_invalid"] };
+  if (docId !== `stripe_${pi}`) return { kind: "invalid", details: ["tx_id_mismatch"] };
+  return { kind: "check", paymentIntentId: pi };
+}
+
+export type ReverseVerdict =
+  /** 元の決済が照合の期間の中：決済の一覧の段階で照合済み（重ねて数えない） */
+  | { kind: "covered" }
+  | { kind: "ok" }
+  | { kind: "review"; reason: string }
+  | { kind: "anomaly"; findings: ReconcileFinding[] };
+
+/**
+ * Stripe から得た PaymentIntent（完全な ID で一致したもの。Stripe に無ければ null＝404 を確かめたもの）と、取引の照合。
+ * 取得の失敗（認証・通信・レート制限など）はここに来ない（呼び出し側で未完了にする）。
+ */
+export function classifyReverse(input: { tx: ReverseTxFact; pi: PiFact | null; from: number; to: number; live: boolean; envTag: string }): ReverseVerdict {
+  const { tx, pi } = input;
+  if (!pi) return { kind: "anomaly", findings: [{ kind: "stripe_payment_missing", details: ["stripe_not_found", "found_via_transactions"] }] };
+  if (pi.created >= input.from && pi.created < input.to) return { kind: "covered" };
+  const scope = scopeOf(pi, { live: input.live, envTag: input.envTag });
+  if (scope === "other_mode") return { kind: "anomaly", findings: [{ kind: "duplicate_or_bad_link", details: ["stripe_livemode", "found_via_transactions"] }] };
+  if (scope === "other_env" || scope === "bad_tag") return { kind: "anomaly", findings: [{ kind: "duplicate_or_bad_link", details: ["stripe_other_env", "found_via_transactions"] }] };
+  if (scope === "untagged") return { kind: "review", reason: "untagged" };
+  if (pi.status !== "succeeded") return { kind: "anomaly", findings: [{ kind: "duplicate_or_bad_link", details: ["stripe_not_paid", "found_via_transactions"] }] };
+  if (!pi.latestChargeId || tx.stripeChargeId !== pi.latestChargeId) return { kind: "anomaly", findings: [{ kind: "amount_or_mode_mismatch", details: ["charge", "found_via_transactions"] }] };
+  return { kind: "ok" };
 }

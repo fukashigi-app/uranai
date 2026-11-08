@@ -301,7 +301,12 @@ Stripe の決済（PaymentIntent）の一覧を起点に、この環境の支払
   - 精算の調整（`settlement_adjustment_mismatch`）：確定済み（lockedAt あり）の精算に含めた取引で「今の取り分 = 支払った額（settledShare）＋調整の合計（adjustmentTotal）」か。あわせて調整の記録（`settlementAdjustments/{取引ID}_1〜n`）がすべてあり、取引・店舗・精算が一致し、合計が adjustmentTotal と一致し、n+1 番目が無いこと。**過去の精算に含めた取引が後から返金されても、調整が正しければ異常にしません**。以前の仕組みで確定した月は判定せず「要確認」。確定済みの月の、精算に含めていない取引は「精算への取り込み待ち（要確認）」
   - 返金・異議申し立ての状態の変化（処理中→成功・対応中→勝訴など）には Stripe の日時が無いため、変化の直後は反映の前に異常として出ることがあります（時間をおいて照合し直す）
   - 取得の失敗（返金・異議申し立ての一覧、Charge ごとの取り直し）は照合全体を「未完了」にします。1回の実行で確かめる Charge は60件まで（超えたら続きから）
-- Firestore にだけある取引の照合（第2段階b）、定期実行（Cron）、決済要確認への自動の登録は**未実装**です
+- Firestore にだけある取引（第2段階b・逆方向）：最後に、支払日時（`paidAt`）が期間の中の取引を `paidAt`・文書 ID の順にページで読みます（範囲の条件と並び順が同じ1つの項目なので、自動の単一項目のインデックスで動き、複合インデックスは不要）。**`paidAt` が無い取引は対象になりません**
+  - Stripe 以外の決済会社・モードが違う取引（本番の Firestore のテスト決済など）は対象外（件数だけ）。文書 ID が `stripe_{PaymentIntent}` と一致しないのは紐付けの不正
+  - 取引のページごとに、支払日時の2時間前から支払日時までに作られた PaymentIntent の一覧を読み、**完全な ID** で照合します（短いハッシュは使わない）。一覧に無いものだけを1件ずつ取り直し、Stripe が 404（`resource_missing`）と答えたときだけ `stripe_payment_missing`（Firestore にだけある）。認証の失敗・権限・レート制限・通信の失敗・5xx は「未完了」
+  - 元の決済が期間の中なら、決済の一覧の段階で照合済みなので重ねて数えません。期間の境目（PaymentIntent は期間より前・支払いは期間の中）は、モード・環境・支払い済み・Charge が一致すれば正常。返金・異議申し立て・チャージバックがあっても PaymentIntent は支払い済みのままなので正常（返金・異議申し立ての照合は上の第2段階a）
+  - 1回の実行で1件ずつ取り直すのは60件まで（超えたら続きから）
+- 定期実行（Cron）、決済要確認への自動の登録は**未実装**です
 - 異常が見つかったら：表示された PaymentIntent・Charge の ID で Stripe の Dashboard を、注文・取引の ID で Firestore（決済履歴）を確かめ、運営が判断します（復旧・返金は既存の手順）
 
 ### 4.6 エラー・確認待ちが残ったとき
@@ -420,6 +425,7 @@ Stripe の決済（PaymentIntent）の一覧を起点に、この環境の支払
 | `npm run e2e:stripe-ordering` | 通知の順序・同時実行・再送・復旧の競合・API の障害からの回復（各操作の後に不変条件を確認） |
 | `npm run e2e:admin-restore-browser` | 運営画面のブラウザの操作（Chromium。Playwright が入った環境と、起動中のアプリが必要） |
 | `npx tsx --conditions=react-server scripts/e2e-payment-reconcile.ts` | Stripe 起点の決済照合（ページ送り・取得の失敗・再開・読み取り専用） |
+| `npx tsx --conditions=react-server scripts/e2e-payment-reconcile-firestore-only.ts` | 決済照合の逆方向（Firestore にだけある取引・期間の境目・404 と取得の失敗の区別・再開・読み取り専用） |
 | `npx tsx --conditions=react-server scripts/e2e-payment-reconcile-adjustments.ts` | 決済照合の返金・異議申し立て・精算の調整（期間より前の決済・取得の失敗・再開・読み取り専用） |
 | `npx tsx --conditions=react-server scripts/e2e-payment-reconcile-browser.ts` | 決済照合の運営画面（Chromium。起動中のアプリが必要） |
 

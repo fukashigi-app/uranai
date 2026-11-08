@@ -164,8 +164,10 @@ async function main() {
     scanned: 15, inScope: 11, matched: 3, notPaid: 1, pending: 1, anomalyPayments: 6, anomalies: 6, otherMode: 1, otherEnv: 1, untagged: 1, badTag: 1, needsReview: 3,
     // 第2段階a：返金済み（H）・異議申し立て中（I）の Charge を確かめ、一致（返金・異議申し立ての一覧の同じ Charge は二重に数えない）
     adjustmentChecks: 2, adjustmentIssues: 0, refundsSeen: 1, disputesSeen: 1, refundInProgress: 0, disputeOpen: 1, settlementChecked: 0,
+    // 第2段階b：期間の中に支払われた取引5件（A・H・I・D・F）は、元の決済が期間の中なので決済の一覧で照合済み（重ねて数えない）
+    txScanned: 5, txOtherProvider: 0, txOtherMode: 0, txCovered: 5, txMatched: 0, reverseLookups: 0,
   });
-  assert.deepEqual(s.byKind, { stripe_paid_no_checkout: 3, stripe_paid_no_transaction: 1, amount_or_mode_mismatch: 1, duplicate_or_bad_link: 1, refund_mismatch: 0, dispute_mismatch: 0, settlement_adjustment_mismatch: 0 });
+  assert.deepEqual(s.byKind, { stripe_paid_no_checkout: 3, stripe_paid_no_transaction: 1, amount_or_mode_mismatch: 1, duplicate_or_bad_link: 1, refund_mismatch: 0, dispute_mismatch: 0, settlement_adjustment_mismatch: 0, stripe_payment_missing: 0 });
   step("件数：読んだ15件（期間外は数えない）・この環境11件・一致3件（正常・返金済み・異議申し立て中）・異常6件・処理待ち1件・未払い1件");
 
   assert.deepEqual(byKindOf(run, B.pi), ["stripe_paid_no_checkout"]);
@@ -221,19 +223,19 @@ async function main() {
     for (let i = 0; i < 230; i++) await raw({ created: base - i, status: "canceled", metadata: { checkoutId: `co_bulk_${i}`, uranaiEnv: tag } });
     const full = await runAll(rt, from, to);
     assert.equal(full.segments.length, 1);
-    assert.deepEqual([full.run.state.counts.scanned, full.run.state.pages, full.run.state.counts.notPaid], [245, 5, 231]); // 決済3ページ＋返金1＋異議申し立て1
+    assert.deepEqual([full.run.state.counts.scanned, full.run.state.pages, full.run.state.counts.notPaid], [245, 6, 231]); // 決済3ページ＋返金1＋異議申し立て1＋取引1
     const paged = await runAll(rt, from, to, { maxPagesPerSegment: 1 });
-    assert.equal(paged.segments.length, 5);
-    assert.deepEqual(paged.segments.map((x) => [x.verdict, x.stoppedBy]), [...Array(4).fill(["incomplete", "page_limit"]), ["issues", null]]);
+    assert.equal(paged.segments.length, 6);
+    assert.deepEqual(paged.segments.map((x) => [x.verdict, x.stoppedBy]), [...Array(5).fill(["incomplete", "page_limit"]), ["issues", null]]);
     assert.deepEqual(paged.run.state.counts, full.run.state.counts);
-    step("ページ送り：245件を3ページ（＋返金・異議申し立ての一覧1ページずつ）で読む。1回1ページで区切って再開しても、同じ件数（二重に数えない）");
+    step("ページ送り：245件を3ページ（＋返金・異議申し立て・取引の一覧1ページずつ）で読む。1回1ページで区切って再開しても、同じ件数（二重に数えない）");
 
     stripe.fake.failCalls.push({ path: /^\/v1\/payment_intents$/, method: "GET", skip: 1, count: 1 });
     const failed = await startReconcile({ rt, userId: USER, fromSec: from, toSec: to });
     assert.deepEqual([failed.verdict, failed.stoppedBy, failed.state.pages, failed.state.done], ["incomplete", "stripe_error", 1, false]);
     assert.ok(failed.token);
     const resumed = await resumeReconcile({ rt, userId: USER, token: failed.token });
-    assert.deepEqual([resumed.verdict, resumed.state.pages], ["issues", 5]);
+    assert.deepEqual([resumed.verdict, resumed.state.pages], ["issues", 6]);
     assert.deepEqual(resumed.state.counts, full.run.state.counts);
     step("Stripe の取得の失敗：未完了（「異常なし」にしない・続きの位置は進めない）→ 再開で完了し、件数は失敗しなかったときと同じ");
 
@@ -282,7 +284,7 @@ async function main() {
     step("重複（60分以内・別のページ）：2件とも「重複」の異常（処理待ちにしない。同じページのときと同じ）");
     assert.deepEqual([kinds(W1.pi), kinds(W2)], [[], ["duplicate_or_bad_link:checkout_linked_to_other_payment"]]);
     step("片方だけ確定済み：確定済みの1件目は一致・2件目は「注文は別の決済と紐付いている」（重複として二重に数えない）");
-    assert.deepEqual(r.state.byKind, { stripe_paid_no_checkout: 0, stripe_paid_no_transaction: 2, amount_or_mode_mismatch: 0, duplicate_or_bad_link: 5, refund_mismatch: 0, dispute_mismatch: 0, settlement_adjustment_mismatch: 0 });
+    assert.deepEqual(r.state.byKind, { stripe_paid_no_checkout: 0, stripe_paid_no_transaction: 2, amount_or_mode_mismatch: 0, duplicate_or_bad_link: 5, refund_mismatch: 0, dispute_mismatch: 0, settlement_adjustment_mismatch: 0, stripe_payment_missing: 0 });
     assert.deepEqual([r.state.counts.anomalyPayments, r.state.counts.anomalies, r.state.counts.matched], [5, 7, 1]);
     assert.equal(r.state.truncated.dupIndex, false);
 

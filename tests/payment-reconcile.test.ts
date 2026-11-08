@@ -16,7 +16,7 @@ import {
   type TxFact,
 } from "@/lib/payments/reconcile-rules";
 import { decodeReconcileToken, encodeReconcileToken, ReconcileInputError, RECONCILE_LIMITS, RECONCILE_TOKEN_MAX_LENGTH, resumeReconcile, startReconcile, type ReconcileState } from "@/lib/payments/stripe-reconcile";
-import { classifyAdjustments, classifySettlement, chargeFactOf, chargeNeedsAdjustmentCheck, disputeFactOf, refundFactOf, type AdjustmentTxFact, type DisputeFact, type RefundFact } from "@/lib/payments/reconcile-rules";
+import { classifyAdjustments, classifyReverse, classifySettlement, chargeFactOf, chargeNeedsAdjustmentCheck, disputeFactOf, refundFactOf, reversePrecheck, type AdjustmentTxFact, type DisputeFact, type RefundFact } from "@/lib/payments/reconcile-rules";
 
 const TAG = "fp_0123456789abcdef";
 const OTHER = "fp_fedcba9876543210";
@@ -164,9 +164,9 @@ describe("期間・結果の分類", () => {
 
 describe("再開用の値（署名）", () => {
   const base = (): ReconcileState => ({
-    v: 2, runId: "r1", userId: "u1", mode: "live", envTag: TAG, accountKey: "k", from: 1, to: 2, startedAt: NOW.getTime(), phase: "payments", cursor: "pi_x", done: false, pages: 1,
-    counts: { scanned: 0, inScope: 0, matched: 0, notPaid: 0, pending: 0, anomalyPayments: 0, anomalies: 0, otherMode: 0, otherEnv: 0, untagged: 0, badTag: 0, needsReview: 0, adjustmentChecks: 0, adjustmentIssues: 0, refundsSeen: 0, disputesSeen: 0, refundInProgress: 0, disputeOpen: 0, settlementChecked: 0 },
-    byKind: { stripe_paid_no_checkout: 0, stripe_paid_no_transaction: 0, amount_or_mode_mismatch: 0, duplicate_or_bad_link: 0, refund_mismatch: 0, dispute_mismatch: 0, settlement_adjustment_mismatch: 0 },
+    v: 3, runId: "r1", userId: "u1", mode: "live", envTag: TAG, accountKey: "k", from: 1, to: 2, startedAt: NOW.getTime(), phase: "payments", cursor: "pi_x", done: false, pages: 1,
+    counts: { scanned: 0, inScope: 0, matched: 0, notPaid: 0, pending: 0, anomalyPayments: 0, anomalies: 0, otherMode: 0, otherEnv: 0, untagged: 0, badTag: 0, needsReview: 0, adjustmentChecks: 0, adjustmentIssues: 0, refundsSeen: 0, disputesSeen: 0, refundInProgress: 0, disputeOpen: 0, settlementChecked: 0, txScanned: 0, txOtherProvider: 0, txOtherMode: 0, txCovered: 0, txMatched: 0, reverseLookups: 0 },
+    byKind: { stripe_paid_no_checkout: 0, stripe_paid_no_transaction: 0, amount_or_mode_mismatch: 0, duplicate_or_bad_link: 0, refund_mismatch: 0, dispute_mismatch: 0, settlement_adjustment_mismatch: 0, stripe_payment_missing: 0 },
     anomalies: [], pendingItems: [], reviewItems: [], truncated: { anomalies: false, pending: false, review: false, dupIndex: false, checked: false }, dupIndex: {}, dupIndexSize: 0, checked: [], metrics: { stripeCalls: 0, firestoreReads: 0 },
   });
   it("署名を確かめて取り出す。書き換え・別の鍵・形違いは invalid_token", () => {
@@ -178,6 +178,13 @@ describe("再開用の値（署名）", () => {
       expect(() => decodeReconcileToken(bad, SECRET)).toThrow(ReconcileInputError);
     }
     expect(() => decodeReconcileToken(t, "another-strong-secret-value-0123456789")).toThrow(/invalid_token/);
+  });
+  it("以前の版（v2：第2段階a まで）の再開用の値は、正しい鍵で署名されていても読まない（最初から照合し直す）", async () => {
+    const old = encodeReconcileToken({ ...base(), v: 2 } as unknown as ReconcileState, SECRET);
+    expect(() => decodeReconcileToken(old, SECRET)).toThrow(/invalid_token/);
+    const client = { paymentIntents: { list: vi.fn() } };
+    await expect(resumeReconcile({ rt: { mode: "live", envTag: TAG, accountId: undefined, client } as never, userId: "u1", token: old, now: NOW, secret: SECRET })).rejects.toThrow(/invalid_token/);
+    expect(client.paymentIntents.list).not.toHaveBeenCalled();
   });
   it("弱い鍵では作らない・読まない", () => {
     expect(() => encodeReconcileToken(base(), "short")).toThrow(/secret_unavailable/);
@@ -315,9 +322,9 @@ describe("再開用の値の最大の大きさ（すべての上限まで埋め�
     const id = (p: string, i: number, n = 24) => `${p}_3${String(i).padStart(n, "0")}`;
     const uuid = (i: number) => `${String(i).padStart(8, "0")}-0000-4000-8000-000000000000`;
     const s: ReconcileState = {
-      v: 2, runId: uuid(1), userId: uuid(2), mode: "live", envTag: TAG, accountKey: "k".repeat(24), from: 1, to: 2, startedAt: NOW.getTime(), phase: "disputes", cursor: id("dp", 1), done: false, pages: 999,
-      counts: { scanned: 1e6, inScope: 1e6, matched: 1e6, notPaid: 1e6, pending: 1e6, anomalyPayments: 1e6, anomalies: 1e6, otherMode: 1e6, otherEnv: 1e6, untagged: 1e6, badTag: 1e6, needsReview: 1e6, adjustmentChecks: 1e6, adjustmentIssues: 1e6, refundsSeen: 1e6, disputesSeen: 1e6, refundInProgress: 1e6, disputeOpen: 1e6, settlementChecked: 1e6 },
-      byKind: { stripe_paid_no_checkout: 1e6, stripe_paid_no_transaction: 1e6, amount_or_mode_mismatch: 1e6, duplicate_or_bad_link: 1e6, refund_mismatch: 1e6, dispute_mismatch: 1e6, settlement_adjustment_mismatch: 1e6 },
+      v: 3, runId: uuid(1), userId: uuid(2), mode: "live", envTag: TAG, accountKey: "k".repeat(24), from: 1, to: 2, startedAt: NOW.getTime(), phase: "transactions", cursor: `1800000000000|stripe_${id("pi", 1)}`, done: false, pages: 999,
+      counts: { scanned: 1e6, inScope: 1e6, matched: 1e6, notPaid: 1e6, pending: 1e6, anomalyPayments: 1e6, anomalies: 1e6, otherMode: 1e6, otherEnv: 1e6, untagged: 1e6, badTag: 1e6, needsReview: 1e6, adjustmentChecks: 1e6, adjustmentIssues: 1e6, refundsSeen: 1e6, disputesSeen: 1e6, refundInProgress: 1e6, disputeOpen: 1e6, settlementChecked: 1e6, txScanned: 1e6, txOtherProvider: 1e6, txOtherMode: 1e6, txCovered: 1e6, txMatched: 1e6, reverseLookups: 1e6 },
+      byKind: { stripe_paid_no_checkout: 1e6, stripe_paid_no_transaction: 1e6, amount_or_mode_mismatch: 1e6, duplicate_or_bad_link: 1e6, refund_mismatch: 1e6, dispute_mismatch: 1e6, settlement_adjustment_mismatch: 1e6, stripe_payment_missing: 1e6 },
       anomalies: Array.from({ length: L.maxListed }, (_, i) => ({ kind: "settlement_adjustment_mismatch" as const, details: ["adjustment_total", "adjustment_doc_missing", "adjustment_doc_mismatch", "adjustment_doc_sum", "adjustment_count"], paymentIntentId: id("pi", i), chargeId: id("ch", i), checkoutId: uuid(i), transactionId: `stripe_${id("pi", i)}`, storeId: uuid(i), created: 1_800_000_000, existingReview: true, delta: -100 })),
       pendingItems: Array.from({ length: L.maxListed }, (_, i) => ({ paymentIntentId: id("pi", i), checkoutId: uuid(i), created: 1_800_000_000, reason: "dispute_sync", chargeId: id("ch", i), transactionId: `stripe_${id("pi", i)}` })),
       reviewItems: Array.from({ length: L.maxListed }, (_, i) => ({ paymentIntentId: id("pi", i), checkoutId: uuid(i), created: 1_800_000_000, scope: "other_env", reason: "settlement_import_pending", chargeId: id("ch", i), transactionId: `stripe_${id("pi", i)}` })),
@@ -339,5 +346,51 @@ describe("再開用の値の最大の大きさ（すべての上限まで埋め�
     const client = { paymentIntents: { list: vi.fn() }, accounts: { retrieveCurrent: vi.fn() } };
     await expect(resumeReconcile({ rt: { mode: "live", envTag: TAG, accountId: undefined, client } as never, userId: "u1", token: big, now: NOW, secret: SECRET })).rejects.toThrow(/invalid_token/);
     expect(client.paymentIntents.list).not.toHaveBeenCalled();
+  });
+});
+
+describe("第2段階b：Firestore の取引の一覧（逆方向）", () => {
+  const tx = (o: Record<string, unknown> = {}) => ({ paymentProvider: "stripe", livemode: true, stripePaymentIntentId: "pi_abc123", stripeChargeId: "ch_abc123", ...o });
+  it("Stripe に問い合わせる前：決済会社・モードの違いは対象外、文書 ID・PaymentIntent の ID の不正は紐付けの異常", () => {
+    expect(reversePrecheck(tx(), "stripe_pi_abc123", true)).toEqual({ kind: "check", paymentIntentId: "pi_abc123" });
+    expect(reversePrecheck(tx({ paymentProvider: "mock" }), "stripe_pi_abc123", true)).toEqual({ kind: "other_provider" });
+    expect(reversePrecheck(tx({ livemode: false }), "stripe_pi_abc123", true)).toEqual({ kind: "other_mode" });
+    expect(reversePrecheck(tx({ livemode: undefined }), "stripe_pi_abc123", true)).toEqual({ kind: "other_mode" });
+    expect(reversePrecheck(tx(), "stripe_pi_other", true)).toEqual({ kind: "invalid", details: ["tx_id_mismatch"] });
+    expect(reversePrecheck(tx({ stripePaymentIntentId: null }), "stripe_x", true)).toEqual({ kind: "invalid", details: ["tx_payment_intent_invalid"] });
+  });
+  const from = Math.floor(NOW.getTime() / 1000) - 86_400;
+  const to = Math.floor(NOW.getTime() / 1000);
+  const run = (pi: PiFact | null, t = tx()) => classifyReverse({ tx: t, pi, from, to, live: true, envTag: TAG });
+  it("Stripe に無い（404 を確かめたもの）は stripe_payment_missing", () => {
+    expect(run(null)).toEqual({ kind: "anomaly", findings: [{ kind: "stripe_payment_missing", details: ["stripe_not_found", "found_via_transactions"] }] });
+  });
+  it("元の決済が期間の中なら照合済み（決済の一覧の段階の結果と重ねない）。状態によらない", () => {
+    expect(run(fact({ created: from }))).toEqual({ kind: "covered" });
+    expect(run(fact({ created: to - 1, status: "canceled" }))).toEqual({ kind: "covered" });
+  });
+  it("期間の境目（作成は期間より前・支払いは期間の中）：一致すれば正常。返金済みでも PaymentIntent は支払い済みのまま", () => {
+    expect(run(fact({ created: from - 1 }))).toEqual({ kind: "ok" });
+  });
+  it("期間の外の決済の不一致：モード・環境・未払い・Charge・環境を表す値なし", () => {
+    const before = { created: from - 100 };
+    expect(run(fact({ ...before, livemode: false }))).toMatchObject({ kind: "anomaly", findings: [{ kind: "duplicate_or_bad_link", details: ["stripe_livemode", "found_via_transactions"] }] });
+    expect(run(fact({ ...before, metadata: { checkoutId: "co_1", uranaiEnv: OTHER } }))).toMatchObject({ findings: [{ details: ["stripe_other_env", "found_via_transactions"] }] });
+    expect(run(fact({ ...before, status: "requires_payment_method" }))).toMatchObject({ findings: [{ details: ["stripe_not_paid", "found_via_transactions"] }] });
+    expect(run(fact(before), tx({ stripeChargeId: "ch_other" }))).toEqual({ kind: "anomaly", findings: [{ kind: "amount_or_mode_mismatch", details: ["charge", "found_via_transactions"] }] });
+    expect(run(fact({ ...before, metadata: { checkoutId: "co_1" } }))).toEqual({ kind: "review", reason: "untagged" });
+  });
+});
+
+describe("第2段階b：取引の段階で Firestore を読めないとき", () => {
+  it("未完了（firestore_error）。取引の段階で止まり、異常なしと表示しない", async () => {
+    const empty = { object: "list", data: [], has_more: false };
+    const client = { paymentIntents: { list: vi.fn(async () => empty), retrieve: vi.fn() }, refunds: { list: vi.fn(async () => empty) }, disputes: { list: vi.fn(async () => empty) } };
+    const rt = { mode: "live", envTag: TAG, accountId: undefined, client } as never;
+    const n = Math.floor(NOW.getTime() / 1000);
+    const r = await startReconcile({ rt, userId: "u1", fromSec: n - 3600, toSec: n, now: NOW, secret: SECRET });
+    expect([r.verdict, r.stoppedBy, r.state.phase, r.state.done]).toEqual(["incomplete", "firestore_error", "transactions", false]);
+    expect(r.token).toBeTruthy();
+    expect(client.paymentIntents.retrieve).not.toHaveBeenCalled();
   });
 });

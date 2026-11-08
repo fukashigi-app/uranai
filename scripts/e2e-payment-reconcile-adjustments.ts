@@ -194,7 +194,7 @@ async function main() {
 
   const s = run.state;
   assert.equal(segments.length, 1);
-  assert.deepEqual([run.verdict, run.stoppedBy, s.done, s.phase], ["issues", null, true, "disputes"]);
+  assert.deepEqual([run.verdict, run.stoppedBy, s.done, s.phase], ["issues", null, true, "transactions"]);
   const kinds = (p: Pay | string) => s.anomalies.filter((a) => a.paymentIntentId === (typeof p === "string" ? p : p.pi)).map((a) => `${a.kind}:${a.details.join("+")}`);
   const reasons = (p: Pay) => s.reviewItems.filter((r) => r.paymentIntentId === p.pi).map((r) => r.reason);
   const pendingOf = (p: Pay) => s.pendingItems.filter((r) => r.paymentIntentId === p.pi).map((r) => r.reason);
@@ -227,7 +227,7 @@ async function main() {
   step("D：精算の後に返金され調整が正しいものは一致（返金済みの取引が過去の精算に含まれるだけでは異常にしない）・調整の記録の欠落・調整の不足（差額 -30円）は異常");
   assert.deepEqual([kinds(L1), reasons(L1)], [[], ["legacy_settlement"]]);
   step("以前の仕組みで確定した精算の月：判定せず「要確認」（推測で正常・異常を決めない）");
-  assert.deepEqual(s.byKind, { stripe_paid_no_checkout: 0, stripe_paid_no_transaction: 0, amount_or_mode_mismatch: 0, duplicate_or_bad_link: 0, refund_mismatch: 3, dispute_mismatch: 3, settlement_adjustment_mismatch: 2 });
+  assert.deepEqual(s.byKind, { stripe_paid_no_checkout: 0, stripe_paid_no_transaction: 0, amount_or_mode_mismatch: 0, duplicate_or_bad_link: 0, refund_mismatch: 3, dispute_mismatch: 3, settlement_adjustment_mismatch: 2, stripe_payment_missing: 0 });
   // 同じ Charge を二重に数えない（決済の一覧の段階と、返金・異議申し立ての一覧の段階）
   const checkedCharges = new Set([R1, R2, R2b, R3, R4, R5, R6, C1, C2, C3, C4, O1, O1b, O2, S1, S2, S3, L1].map((p) => p.charge));
   assert.equal(s.counts.adjustmentChecks, checkedCharges.size);

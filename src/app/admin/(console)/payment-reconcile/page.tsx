@@ -55,7 +55,7 @@ export default async function PaymentReconcilePage() {
     <>
       <PageHeader
         title="決済照合"
-        description={`Stripe の決済（PaymentIntent）の一覧を起点に、この環境の支払い済みの決済が、注文・取引の記録と一致しているかを照合します（読み取りのみ）。支払いから${Math.round(RECONCILE_GRACE_MS / 60_000)}分以内で記録がまだ無いものは「処理待ち」として異常にしません。あわせて、返金・異議申し立て（元の決済が期間の外でも、期間の中に作られたもの）と、確定済みの店舗精算の調整を照合します。異常が見つかっても自動では修正・返金・精算しません。Firestore にだけある取引の照合はまだ含みません。`}
+        description={`Stripe の決済（PaymentIntent）の一覧を起点に、この環境の支払い済みの決済が、注文・取引の記録と一致しているかを照合します（読み取りのみ）。支払いから${Math.round(RECONCILE_GRACE_MS / 60_000)}分以内で記録がまだ無いものは「処理待ち」として異常にしません。あわせて、返金・異議申し立て（元の決済が期間の外でも、期間の中に作られたもの）と、確定済みの店舗精算の調整を照合します。最後に、支払日時が期間の中の Firestore の取引が Stripe に実在するか（逆方向）を確かめます。異常が見つかっても自動では修正・返金・精算しません。`}
       />
       <Card title="照合する">
         <PaymentReconcilePanel mode={mode} labels={labels} />

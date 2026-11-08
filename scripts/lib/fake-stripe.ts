@@ -37,7 +37,7 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
      * 指定した API の呼び出しだけを失敗させる（一致する呼び出しのうち、skip 件を通した後の count 件を 500。使い終わったら何もしない）。
      * SDK が自動で再試行しないよう stripe-should-retry: false を付ける（1回の呼び出しの失敗を正確に再現する）
      */
-    failCalls: [] as { path: RegExp; method?: string; query?: RegExp; skip: number; count: number }[],
+    failCalls: [] as { path: RegExp; method?: string; query?: RegExp; skip: number; count: number; status?: number }[],
     /** 受け付けた API の呼び出し（"GET /v1/refunds" の形。呼び出しの有無・回数の確認用） */
     callLog: [] as string[],
     /** 作成時の expires_at（ID ごと）と作成時刻 */
@@ -139,8 +139,10 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
         if (rule.skip > 0) rule.skip--;
         else {
           rule.count--;
-          res.writeHead(500, { "content-type": "application/json", "request-id": `req_${fake.n}`, "stripe-should-retry": "false" });
-          return res.end(JSON.stringify({ error: { type: "api_error", message: "simulated failure (single call)" } }));
+          const st = rule.status ?? 500;
+          res.writeHead(st, { "content-type": "application/json", "request-id": `req_${fake.n}`, "stripe-should-retry": "false" });
+          const type = st === 401 ? "authentication_error" : st === 429 ? "rate_limit_error" : st === 404 ? "invalid_request_error" : "api_error";
+          return res.end(JSON.stringify({ error: { type, message: "simulated failure (single call)" } }));
         }
       }
     }
@@ -229,7 +231,7 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
     r = m(/^\/v1\/payment_intents\/([^/]+)$/);
     if (req.method === "GET" && r) {
       const pi = fake.pis.get(r[1]);
-      return pi ? send(res, 200, pi) : send(res, 404, { error: { type: "invalid_request_error", message: "No such payment_intent" } });
+      return pi ? send(res, 200, pi) : stripeError(res, 404, "invalid_request_error", `No such payment_intent: '${r[1]}'`, "id", "resource_missing");
     }
     r = m(/^\/v1\/disputes\/([^/]+)$/);
     if (req.method === "GET" && r) {
@@ -259,7 +261,7 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
       return;
     }
     // ---- テスト用の操作（決済画面での支払い・返金・期限切れ・手数料の確定を再現） ----
-    const ctl = JSON.parse(body || "{}") as { fee?: number | null; amount?: number; created?: number; metadataStoreId?: string; metadataCheckoutId?: string; uranaiEnv?: string; method?: string; async?: boolean; status?: string; currency?: string; id?: string; livemode?: boolean; metadata?: Record<string, string>; amountReceived?: number; latestCharge?: string };
+    const ctl = JSON.parse(body || "{}") as { fee?: number | null; amount?: number; created?: number; metadataStoreId?: string; metadataCheckoutId?: string; uranaiEnv?: string; method?: string; async?: boolean; status?: string; currency?: string; id?: string; livemode?: boolean; metadata?: Record<string, string>; amountReceived?: number; latestCharge?: string; chargeCreated?: number };
     r = m(/^\/__test\/pay\/([^/]+)$/);
     if (r) {
       // 決済画面での支払い。method: card | apple_pay | google_pay | paypay | link | samsung_pay、async: 確定待ち（PayPay の非同期の確定）
@@ -270,7 +272,7 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
       const method = ctl.method ?? "card";
       const pmd = method === "paypay" ? { type: "paypay", paypay: {} } : method === "link" ? { type: "link", link: {} } : { type: "card", card: { brand: "visa", wallet: method === "card" ? null : { type: method } } };
       const pending = ctl.async === true;
-      fake.charges.set(chId, { id: chId, object: "charge", livemode: LIVE, status: pending ? "pending" : "succeeded", paid: !pending, captured: !pending, refunded: false, amount_refunded: 0, currency: "jpy", amount, payment_intent: piId, created: ctl.created ?? Math.floor(Date.now() / 1000), payment_method_details: pmd, fee: ctl.fee === undefined ? 4 : ctl.fee });
+      fake.charges.set(chId, { id: chId, object: "charge", livemode: LIVE, status: pending ? "pending" : "succeeded", paid: !pending, captured: !pending, refunded: false, amount_refunded: 0, currency: "jpy", amount, payment_intent: piId, created: ctl.chargeCreated ?? ctl.created ?? Math.floor(Date.now() / 1000), payment_method_details: pmd, fee: ctl.fee === undefined ? 4 : ctl.fee });
       const md = { ...(s.pi_metadata as Record<string, string>), ...(ctl.metadataStoreId ? { storeId: ctl.metadataStoreId } : {}) };
       fake.pis.set(piId, { id: piId, object: "payment_intent", livemode: LIVE, created: ctl.created ?? Math.floor(Date.now() / 1000), status: pending ? "processing" : "succeeded", currency: "jpy", amount, amount_received: pending ? 0 : amount, metadata: md, latest_charge: chId });
       Object.assign(s, { status: "complete", payment_status: pending ? "unpaid" : "paid", payment_intent: piId, amount_total: amount });
