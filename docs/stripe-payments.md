@@ -284,6 +284,20 @@ Stripe の通知のうち、記録と照合できず反映していないもの�
 2. 異常を確かめて「確認済みにする」。上部に「決済監視の異常を確認済みにしました」と表示されます（絞り込み `status`・`mode` はそのまま。監査ログ `payment_alert.resolved`）
 3. 定期の点検（Cron）・異常の通知（メールなど）は**未実装**です
 
+### 4.5.1 決済照合（運営画面 > 決済照合。F2 第1段階）
+
+Stripe の決済（PaymentIntent）の一覧を起点に、この環境の支払い済みの決済が Firestore の注文・取引と一致しているかを照合します（`src/lib/payments/stripe-reconcile.ts`・`reconcile-rules.ts`、API は `src/app/api/admin/payment-reconcile/route.ts`）。決済監視は Firestore の注文を起点にするので、**注文そのものが消えた決済・Webhook が届かなかった決済は、こちらでだけ見つかります**。
+
+- 読み取り専用：Stripe は一覧の取得（`GET /v1/payment_intents`。`created` で期間・新しい順・`starting_after` でページ送り・展開なし）と接続のアカウントの確認だけ。Firestore は ID で読むだけ。書き込みは実行ごとの監査ログ（`payment_reconcile.run`）1件だけ。自動の修正・返金・決済要確認への登録はしません
+- 対象：livemode が接続のモードと同じで、metadata の `uranaiEnv` がこの環境の値の決済。値が無い・形が違う支払い済みの決済、本番の接続での別の環境の値の決済は「要確認」（正常とは扱わない）。テストの接続での別の環境の決済は対象外（同じ Sandbox を使う別の環境）
+- 異常：`stripe_paid_no_checkout`（注文が無い）・`stripe_paid_no_transaction`（取引が無い）・`amount_or_mode_mismatch`（金額・通貨・モード・店舗・占いの種類・Charge の不一致）・`duplicate_or_bad_link`（同じ注文への2回目の支払い・取引や注文の紐付けの食い違い・metadata に注文の ID が無い）。同じ決済が F1 の決済要確認（`paid_checkout_unconfirmable`）に記録済みなら「記録済み」と表示
+- 重複：同じ注文に、注文が紐付いていない（未確定の）支払い済みの決済が2件以上あれば、ページをまたいでも、支払いから60分以内でも、すべて重複（`duplicate_in_run`）。確定済みの1件目は重複にしません（2件目は「注文は別の決済と紐付いている」）。判定は照合した期間の中だけ。未確定の支払い済みの決済が1回の照合で1,000件を超えたら、超えた分は判定せず、画面に「重複が無いとは言えない」と表示します
+- 処理待ち：支払いから60分以内で記録がまだ無いものは異常にしません。支払いが完了していない PaymentIntent（処理中など）は照合しません
+- 未完了：Stripe・Firestore の取得の失敗、1回の実行の上限（約40秒・30ページ＝3,000件）で止まったら「未完了」。**すべてのページを読み終えるまで「異常なし」と表示しません**。「続きから照合する」で再開（開始から2時間まで）。再開用の値はサーバーが署名し、期間・モード・環境・アカウント・運営者を含むので、再開のときに変えられません
+- 期間は日本時間の日付で最長31日。終わりは実行の開始の時刻まで
+- 返金・異議申し立て・精算の照合、定期実行（Cron）、決済要確認への自動の登録は**未実装**（第2段階）。返金済み・異議申し立て中の決済は、注文・取引があれば「一致」と数えます
+- 異常が見つかったら：表示された PaymentIntent・Charge の ID で Stripe の Dashboard を、注文・取引の ID で Firestore（決済履歴）を確かめ、運営が判断します（復旧・返金は既存の手順）
+
 ### 4.6 エラー・確認待ちが残ったとき
 
 | 状況 | 対応 |
@@ -399,6 +413,8 @@ Stripe の通知のうち、記録と照合できず反映していないもの�
 | `npm run e2e:payment-monitor` | 決済監視 |
 | `npm run e2e:stripe-ordering` | 通知の順序・同時実行・再送・復旧の競合・API の障害からの回復（各操作の後に不変条件を確認） |
 | `npm run e2e:admin-restore-browser` | 運営画面のブラウザの操作（Chromium。Playwright が入った環境と、起動中のアプリが必要） |
+| `npx tsx --conditions=react-server scripts/e2e-payment-reconcile.ts` | Stripe 起点の決済照合（ページ送り・取得の失敗・再開・読み取り専用） |
+| `npx tsx --conditions=react-server scripts/e2e-payment-reconcile-browser.ts` | 決済照合の運営画面（Chromium。起動中のアプリが必要） |
 
 どの E2E も、Firestore Emulator の `demo-` プロジェクトと localhost の模擬 Stripe だけを使います（本物の Stripe・本番の Firebase には接続しない）。
 起動の手順は各スクリプトの先頭の説明を参照してください。

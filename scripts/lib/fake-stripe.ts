@@ -194,6 +194,32 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
     if (req.method === "GET" && r) {
       return fake.charges.has(r[1]) ? send(res, 200, chargeView(r[1])) : send(res, 404, { error: { type: "invalid_request_error", message: "No such charge" } });
     }
+    if (req.method === "GET" && url.pathname === "/v1/payment_intents") {
+      // 一覧（本物の Stripe と同じく新しい順・created の範囲・limit は 1〜100・starting_after でページ送り。expand は受け付けない）
+      const q = url.searchParams;
+      if ([...q.keys()].some((k) => k.startsWith("expand"))) return stripeError(res, 400, "invalid_request_error", "expand is not supported by the fake list", "expand");
+      const limit = q.has("limit") ? Number(q.get("limit")) : 10;
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) return stripeError(res, 400, "invalid_request_error", "Invalid limit", "limit");
+      const num = (k: string) => (q.has(k) ? Number(q.get(k)) : null);
+      const [gte, gt, lt, lte] = [num("created[gte]"), num("created[gt]"), num("created[lt]"), num("created[lte]")];
+      const all = [...fake.pis.values()]
+        .map((p, i) => ({ p, i }))
+        .filter(({ p }) => {
+          const c = Number(p.created ?? 0);
+          return (gte === null || c >= gte) && (gt === null || c > gt) && (lt === null || c < lt) && (lte === null || c <= lte);
+        })
+        .sort((a, b) => Number(b.p.created ?? 0) - Number(a.p.created ?? 0) || b.i - a.i)
+        .map(({ p }) => p);
+      let startIdx = 0;
+      const after = q.get("starting_after");
+      if (after) {
+        const k = all.findIndex((p) => p.id === after);
+        if (k < 0) return stripeError(res, 400, "invalid_request_error", `No such payment_intent: '${after}'`, "starting_after", "resource_missing");
+        startIdx = k + 1;
+      }
+      const data = all.slice(startIdx, startIdx + limit);
+      return send(res, 200, { object: "list", url: "/v1/payment_intents", has_more: startIdx + limit < all.length, data });
+    }
     r = m(/^\/v1\/payment_intents\/([^/]+)$/);
     if (req.method === "GET" && r) {
       const pi = fake.pis.get(r[1]);
@@ -225,7 +251,7 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
       return;
     }
     // ---- テスト用の操作（決済画面での支払い・返金・期限切れ・手数料の確定を再現） ----
-    const ctl = JSON.parse(body || "{}") as { fee?: number | null; amount?: number; created?: number; metadataStoreId?: string; metadataCheckoutId?: string; uranaiEnv?: string; method?: string; async?: boolean; status?: string; currency?: string };
+    const ctl = JSON.parse(body || "{}") as { fee?: number | null; amount?: number; created?: number; metadataStoreId?: string; metadataCheckoutId?: string; uranaiEnv?: string; method?: string; async?: boolean; status?: string; currency?: string; id?: string; livemode?: boolean; metadata?: Record<string, string>; amountReceived?: number; latestCharge?: string };
     r = m(/^\/__test\/pay\/([^/]+)$/);
     if (r) {
       // 決済画面での支払い。method: card | apple_pay | google_pay | paypay | link | samsung_pay、async: 確定待ち（PayPay の非同期の確定）
@@ -238,7 +264,7 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
       const pending = ctl.async === true;
       fake.charges.set(chId, { id: chId, object: "charge", livemode: LIVE, status: pending ? "pending" : "succeeded", paid: !pending, captured: !pending, refunded: false, amount_refunded: 0, currency: "jpy", amount, payment_intent: piId, created: ctl.created ?? Math.floor(Date.now() / 1000), payment_method_details: pmd, fee: ctl.fee === undefined ? 4 : ctl.fee });
       const md = { ...(s.pi_metadata as Record<string, string>), ...(ctl.metadataStoreId ? { storeId: ctl.metadataStoreId } : {}) };
-      fake.pis.set(piId, { id: piId, object: "payment_intent", livemode: LIVE, status: pending ? "processing" : "succeeded", currency: "jpy", amount, amount_received: pending ? 0 : amount, metadata: md, latest_charge: chId });
+      fake.pis.set(piId, { id: piId, object: "payment_intent", livemode: LIVE, created: ctl.created ?? Math.floor(Date.now() / 1000), status: pending ? "processing" : "succeeded", currency: "jpy", amount, amount_received: pending ? 0 : amount, metadata: md, latest_charge: chId });
       Object.assign(s, { status: "complete", payment_status: pending ? "unpaid" : "paid", payment_intent: piId, amount_total: amount });
       return send(res, 200, { paymentIntent: piId, charge: chId });
     }
@@ -247,7 +273,7 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
       // カードが拒否された（決済画面で支払い直せる。Session は open のまま、PaymentIntent は requires_payment_method）
       const s = fake.sessions.get(r[1])!;
       const piId = id("pi");
-      fake.pis.set(piId, { id: piId, object: "payment_intent", livemode: LIVE, status: "requires_payment_method", currency: "jpy", amount: s.amount_total, amount_received: 0, metadata: s.pi_metadata, latest_charge: null });
+      fake.pis.set(piId, { id: piId, object: "payment_intent", livemode: LIVE, created: Math.floor(Date.now() / 1000), status: "requires_payment_method", currency: "jpy", amount: s.amount_total, amount_received: 0, metadata: s.pi_metadata, latest_charge: null });
       Object.assign(s, { status: "open", payment_status: "unpaid", payment_intent: piId });
       return send(res, 200, { paymentIntent: piId });
     }
@@ -297,6 +323,12 @@ export function createFakeStripe(opts: { port: number; mode: FakeStripeMode; api
       }
       pi.metadata = md;
       return send(res, 200, {});
+    }
+    if (url.pathname === "/__test/raw-pi") {
+      // 自動テスト用：任意の PaymentIntent を登録する（別の環境・環境を表す値の無い決済・大量の決済などの再現）
+      const piId = typeof ctl.id === "string" ? ctl.id : id("pi");
+      fake.pis.set(piId, { id: piId, object: "payment_intent", livemode: typeof ctl.livemode === "boolean" ? ctl.livemode : LIVE, created: typeof ctl.created === "number" ? ctl.created : Math.floor(Date.now() / 1000), status: typeof ctl.status === "string" ? ctl.status : "succeeded", currency: "jpy", amount: typeof ctl.amount === "number" ? ctl.amount : 100, amount_received: typeof ctl.amountReceived === "number" ? ctl.amountReceived : 100, metadata: (ctl.metadata as Record<string, string>) ?? {}, latest_charge: typeof ctl.latestCharge === "string" ? ctl.latestCharge : null, receipt_email: "buyer@example.com", client_secret: `${piId}_secret_fake` });
+      return send(res, 200, { paymentIntent: piId });
     }
     r = m(/^\/__test\/expire\/([^/]+)$/);
     if (r) {
