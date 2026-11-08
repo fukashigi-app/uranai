@@ -13,17 +13,19 @@
  *     （対照：時点を固定しない読み取りでは、途中の変更が混ざることも確認し、この試験が意味を持つことを示す）
  *  3. 件数の不一致・Date ヘッダーなし・時計のずれ・未来の時刻・有効期限切れ（サーバー側・こちらの時計）で、安全に止まる
  *  4. 新しい形式のバックアップを、オフライン検証ツール（tools/backup-verifier）と backup:verify で確認できる
+ *     （オフライン検証ツールは Git に含めていないため、実行時にあれば読み込む。無いときはその確認だけを理由を表示してスキップする）
  *  5. 旧形式（2026-11-06 までのヘッダー）を、引き続き確認できる
  *  6. CLI：本番（--key）での --no-read-time と、--key と --emulator の同時指定を、ネットワークに接続する前に拒否する。
  *     途中で失敗したらファイルを残さない。（Emulator があれば）Emulator の従来どおりの流れ（readTime なし・検証・復元）
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   canonical,
   createConsistentExport,
@@ -37,8 +39,34 @@ import {
 } from "../src/lib/ops/backup/archive";
 import { decryptBackup, encryptBackup } from "../src/lib/ops/backup/crypto";
 import { FirestoreReadOnlyReader } from "../src/lib/ops/backup/reader";
-// オフライン検証ツール（読み込むだけ。変更しない）
-import { verifyBackup } from "../tools/backup-verifier/verifier-core.mjs";
+
+// ---------------------------------------------------------------------------
+// オフライン検証ツール（tools/backup-verifier。読み込むだけで変更しない）
+// Git に含めていないファイルのため、静的な import にはしない（型チェック・ビルドがこのファイルの有無に依存しないように）。
+// 実行時にファイルがあるときだけ読み込む。ファイルが無いことだけをスキップの理由にし、読み込みや実行の失敗はそのままエラーにする。
+// ---------------------------------------------------------------------------
+type OfflineVerifyResult = { ok: boolean; problems: string[]; warnings: string[]; summary: { readTime: string | null } | null };
+type OfflineVerify = (input: { file: Uint8Array; fileName?: string; manifestText: string; passphrase: string }) => Promise<OfflineVerifyResult>;
+const OFFLINE_VERIFIER_PATH = join(__dirname, "..", "tools", "backup-verifier", "verifier-core.mjs");
+const skipped: string[] = [];
+
+async function loadOfflineVerifier(): Promise<OfflineVerify | null> {
+  if (!existsSync(OFFLINE_VERIFIER_PATH)) return null;
+  const mod: { verifyBackup?: unknown } = await import(pathToFileURL(OFFLINE_VERIFIER_PATH).href);
+  if (typeof mod.verifyBackup !== "function") throw new Error("オフライン検証ツールに verifyBackup がありません。");
+  return mod.verifyBackup as OfflineVerify;
+}
+
+/** オフライン検証ツールがあれば check を実行し、無ければ理由を表示してスキップする */
+async function withOfflineVerifier(what: string, verify: OfflineVerify | null, check: (v: OfflineVerify) => Promise<void>) {
+  if (!verify) {
+    const msg = `オフライン検証ツール（tools/backup-verifier/verifier-core.mjs）が無いため、${what}の確認をスキップしました`;
+    skipped.push(msg);
+    console.log(`  ↷ スキップ：${msg}`);
+    return;
+  }
+  await check(verify);
+}
 
 const PASS = "e2e-consistency-passphrase-0001";
 const PROJECT = "demo-consistency";
@@ -270,6 +298,8 @@ async function writeBackup(dir: string, name: string, plain: Buffer, header: { c
 }
 
 async function main() {
+  const offlineVerify = await loadOfflineVerifier();
+  console.log(offlineVerify ? "オフライン検証ツール：あり（互換性の確認も行います）" : "オフライン検証ツール：なし（その確認だけスキップします）");
   const out = mkdtempSync(join(tmpdir(), "uranai-bkp-consistency-"));
   try {
     // ---- 1・2. 途中の変更があっても1時点。すべてのリクエストに同じ readTime ----
@@ -416,9 +446,11 @@ async function main() {
     // ---- 4. 新しい形式を、オフライン検証ツールと backup:verify で確認 ----
     const plain = serialize(good);
     const g = await writeBackup(out, "uranai-backup-20261108T000000Z", plain, good.header, { totalDocs: good.footer.totalDocs, rootCollections: good.rootCounts });
-    const vNew = await verifyBackup({ file: new Uint8Array(g.encrypted), fileName: "uranai-backup-20261108T000000Z.ufbk", manifestText: g.manifestText, passphrase: PASS });
-    assert.equal(vNew.ok, true, JSON.stringify(vNew.problems));
-    assert.equal(vNew.summary?.readTime, good.header.readTime);
+    await withOfflineVerifier("新しい形式", offlineVerify, async (verify) => {
+      const vNew = await verify({ file: new Uint8Array(g.encrypted), fileName: "uranai-backup-20261108T000000Z.ufbk", manifestText: g.manifestText, passphrase: PASS });
+      assert.equal(vNew.ok, true, JSON.stringify(vNew.problems));
+      assert.equal(vNew.summary?.readTime, good.header.readTime);
+    });
     let v = cli(["verify", g.file]);
     assert.equal(v.code, 0, v.out);
     assert.match(v.out, /整合性: 1時点の読み取り（readTime）・読み取りの終了: .*トップレベルの件数を照合済み/);
@@ -428,7 +460,7 @@ async function main() {
     v = cli(["verify", g.file]);
     assert.notEqual(v.code, 0);
     assert.match(v.out, /finishedAt が、バックアップの中身と一致しません/);
-    ok("新しい形式（版は 1 のまま）を、オフライン検証ツール（verifier-core）と backup:verify で確認できる。説明ファイルとの不一致も検出");
+    ok(`新しい形式（版は 1 のまま）を backup:verify${offlineVerify ? "・オフライン検証ツール（verifier-core）" : ""}で確認できる。説明ファイルとの不一致も検出`);
 
     // ---- 5. 旧形式（2026-11-06 までのヘッダー：consistency・finishedAt・countCheck なし） ----
     const legacyHeader = { ...good.header };
@@ -438,7 +470,9 @@ async function main() {
     const lp = serialize({ header: legacyHeader, docs: good.docs, footer: good.footer });
     const l = await writeBackup(out, "uranai-backup-20261106T001724Z", lp, legacyHeader, { totalDocs: good.footer.totalDocs, rootCollections: good.rootCounts }, true);
     assert.equal(Object.keys(JSON.parse(l.manifestText)).includes("consistency"), false);
-    assert.equal((await verifyBackup({ file: new Uint8Array(l.encrypted), manifestText: l.manifestText, passphrase: PASS })).ok, true);
+    await withOfflineVerifier("旧形式", offlineVerify, async (verify) => {
+      assert.equal((await verify({ file: new Uint8Array(l.encrypted), manifestText: l.manifestText, passphrase: PASS })).ok, true);
+    });
     v = cli(["verify", l.file]);
     assert.equal(v.code, 0, v.out);
     assert.match(v.out, /旧形式：終了時刻の記録なし/);
@@ -448,7 +482,7 @@ async function main() {
     v = cli(["verify", nl.file]);
     assert.equal(v.code, 0, v.out);
     assert.match(v.out, /⚠ このバックアップは読み取りの時点を固定していません/);
-    ok("旧形式（readTime あり／なし）のバックアップを、backup:verify とオフライン検証ツールで引き続き確認できる（readTime なしは警告のみ）");
+    ok(`旧形式（readTime あり／なし）のバックアップを、backup:verify${offlineVerify ? "・オフライン検証ツール" : ""}で引き続き確認できる（readTime なしは警告のみ）`);
 
     // ---- 6. CLI ----
     const before = readdirSync(out).length;
@@ -507,8 +541,10 @@ async function main() {
         v = cli(["verify", file]);
         assert.equal(v.code, 0, v.out);
         assert.match(v.out, /整合性: 時点の固定なし（Emulator）/);
-        const vr = await verifyBackup({ file: new Uint8Array(readFileSync(file)), manifestText: readFileSync(file.replace(/\.ufbk$/, ".manifest.json"), "utf8"), passphrase: PASS });
-        assert.equal(vr.ok, true, JSON.stringify(vr.problems));
+        await withOfflineVerifier("Emulator で作ったバックアップ", offlineVerify, async (verify) => {
+          const vr = await verify({ file: new Uint8Array(readFileSync(file)), manifestText: readFileSync(file.replace(/\.ufbk$/, ".manifest.json"), "utf8"), passphrase: PASS });
+          assert.equal(vr.ok, true, JSON.stringify(vr.problems));
+        });
         const r = cli(["restore-emulator", file, "--project", DST]);
         assert.equal(r.code, 0, r.out);
         assert.match(r.out, /全ドキュメント（ID・型・値）がバックアップと一致/);
@@ -523,14 +559,15 @@ async function main() {
       } finally {
         rmSync(edir, { recursive: true, force: true });
       }
-      ok("Emulator：従来どおり readTime なしで作成（consistency: none・件数の照合あり）→ backup:verify・オフライン検証ツール・Emulator への復元がすべて成功");
+      ok(`Emulator：従来どおり readTime なしで作成（consistency: none・件数の照合あり）→ backup:verify${offlineVerify ? "・オフライン検証ツール" : ""}・Emulator への復元がすべて成功`);
     } else {
       console.log("（FIRESTORE_EMULATOR_HOST が無いため、Emulator の流れは省略）");
     }
   } finally {
     rmSync(out, { recursive: true, force: true });
   }
-  console.log("\nBACKUP CONSISTENCY E2E PASSED");
+  if (skipped.length) console.log(`\nスキップした確認 ${skipped.length}件（オフライン検証ツールが無いため）:\n${skipped.map((m) => `  - ${m}`).join("\n")}`);
+  console.log(`\nBACKUP CONSISTENCY E2E PASSED${skipped.length ? `（オフライン検証ツールの確認 ${skipped.length}件はスキップ）` : ""}`);
 }
 
 main().catch((e) => {
