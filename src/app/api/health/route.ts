@@ -4,6 +4,7 @@ import { dataProvider } from "@/lib/data-provider";
 import { readOperatorInfo } from "@/config/operator";
 import { dangerousConfigReasons, isPaidFlowBlocked, isTestPaymentConfigured, pausedMessage, productionConfigIssues, siteStatus } from "@/lib/env";
 import { checkFirestoreTarget } from "@/lib/firestore/target-guard";
+import { firebaseCredentialMode } from "@/lib/firestore/credential-mode";
 import { stripeLiveConfig } from "@/lib/payments/stripe-guard";
 
 const stripeLiveOperatorAudience = () => {
@@ -12,6 +13,30 @@ const stripeLiveOperatorAudience = () => {
 };
 import { getMaintenanceStatus } from "@/lib/services/maintenance-status";
 import { getSessionUser } from "@/lib/auth/session";
+import { clientIpMode } from "@/lib/security/client-ip";
+import { trustedOriginMode } from "@/lib/security/trusted-origin";
+
+/** Cloud Run 用の設定の状態（3種類だけ。位置・APP_URL などの値は返さない。環境変数を見るだけで、データベースには接続しない） */
+type CloudRunSettingState = "未設定" | "有効" | "設定の誤り";
+
+/** CLIENT_IP_SOURCE と CLIENT_IP_XFF_POSITION_FROM_RIGHT の組み合わせ（位置だけ残っているのも誤りとして扱う） */
+function clientIpSourceState(): CloudRunSettingState {
+  try {
+    if (clientIpMode().kind === "xff-from-right") return "有効";
+  } catch {
+    return "設定の誤り";
+  }
+  return (process.env.CLIENT_IP_XFF_POSITION_FROM_RIGHT ?? "").trim() === "" ? "未設定" : "設定の誤り";
+}
+
+/** TRUSTED_ORIGIN_SOURCE と APP_URL（https のオリジン・アプリが使う公開 URL と一致）の組み合わせ */
+function trustedOriginSourceState(): CloudRunSettingState {
+  try {
+    return trustedOriginMode().kind === "app-url" ? "有効" : "未設定";
+  } catch {
+    return "設定の誤り";
+  }
+}
 
 export const dynamic = "force-dynamic";
 
@@ -70,6 +95,10 @@ async function detailedHealth(): Promise<Response> {
     checks.stripeConnection = st.connection ? `${st.mode} (Webhook・返金・異議申し立て・再確認・決済監視を処理します)` : "unavailable (Stripe の Webhook・決済を受け付けていません)";
     checks.stripeNewCheckout = !st.connection ? "unavailable" : st.accepting ? "accepting (STRIPE_NEW_CHECKOUT=on)" : `stopped (${st.reason})`;
   }
+  // Cloud Run 用の設定（未設定は正常。設定の誤りは API が停止するため ok=false。値は返さない）
+  checks.CLIENT_IP_SOURCE = clientIpSourceState();
+  checks.TRUSTED_ORIGIN_SOURCE = trustedOriginSourceState();
+  const cloudRunConfigError = checks.CLIENT_IP_SOURCE === "設定の誤り" || checks.TRUSTED_ORIGIN_SOURCE === "設定の誤り";
   // 本番環境の危険な設定・設定漏れ（値は返さない）。error があれば ok=false
   const prodIssues = productionConfigIssues();
   const prodErrors = prodIssues.filter((i) => i.level === "error");
@@ -78,18 +107,34 @@ async function detailedHealth(): Promise<Response> {
   const operator = readOperatorInfo().issues;
   const opErrors = operator.filter((i) => i.level === "error").map((i) => i.key);
   checks.operatorInfo = opErrors.length ? `error: 仮の値または不正な値を無視しています (${opErrors.join(", ")})` : "ok";
+  // Cloud Run 上（K_SERVICE がある）では、運営者情報の仮の値・不正な値を ok=false にする（公開前のチェックで確実に気付くため。
+  // 表示には使わず既定の屋号・問い合わせ先を出す動作は従来どおり。Vercel では K_SERVICE が無いので ok の判定は変えない）
+  const operatorBlocksHealth = Boolean(process.env.K_SERVICE) && opErrors.length > 0;
   checks.operatorDisclosure = operator.some((i) => i.key === "disclosure") ? "on-request (氏名・住所・電話番号は請求時開示の表示。法令上の条件は要確認)" : "listed";
   if (provider === "firestore") {
     const target = checkFirestoreTarget();
     checks.firestoreTarget = target.ok ? "ok" : `blocked (${target.reason})`;
     checks.PRODUCTION_FIREBASE_PROJECT_ID = process.env.PRODUCTION_FIREBASE_PROJECT_ID ? "set" : "missing";
     checks.FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID ? "set" : "missing";
-    checks.FIREBASE_CLIENT_EMAIL = process.env.FIREBASE_CLIENT_EMAIL ? "set" : "missing";
-    checks.FIREBASE_PRIVATE_KEY = !process.env.FIREBASE_PRIVATE_KEY
-      ? "missing"
-      : /BEGIN PRIVATE KEY/.test(process.env.FIREBASE_PRIVATE_KEY) && /END PRIVATE KEY/.test(process.env.FIREBASE_PRIVATE_KEY)
-        ? "set"
-        : "set (形式が正しくない可能性: -----BEGIN PRIVATE KEY----- から -----END PRIVATE KEY----- まで全体を登録してください)";
+    let credentialMode: string;
+    try {
+      credentialMode = firebaseCredentialMode();
+    } catch {
+      credentialMode = "invalid";
+    }
+    checks.FIREBASE_CREDENTIALS = credentialMode === "invalid" ? "invalid (空または application-default のどちらかにしてください)" : credentialMode;
+    if (credentialMode === "application-default") {
+      // 実行用サービスアカウントで接続する（秘密鍵は使わない。登録されていると接続を停止する）
+      checks.FIREBASE_CLIENT_EMAIL = process.env.FIREBASE_CLIENT_EMAIL ? "set (application-default では登録しないでください)" : "not used";
+      checks.FIREBASE_PRIVATE_KEY = process.env.FIREBASE_PRIVATE_KEY ? "set (application-default では登録しないでください)" : "not used";
+    } else {
+      checks.FIREBASE_CLIENT_EMAIL = process.env.FIREBASE_CLIENT_EMAIL ? "set" : "missing";
+      checks.FIREBASE_PRIVATE_KEY = !process.env.FIREBASE_PRIVATE_KEY
+        ? "missing"
+        : /BEGIN PRIVATE KEY/.test(process.env.FIREBASE_PRIVATE_KEY) && /END PRIVATE KEY/.test(process.env.FIREBASE_PRIVATE_KEY)
+          ? "set"
+          : "set (形式が正しくない可能性: -----BEGIN PRIVATE KEY----- から -----END PRIVATE KEY----- まで全体を登録してください)";
+    }
   } else {
     checks.DATABASE_URL = process.env.DATABASE_URL ? "set" : "missing";
   }
@@ -124,6 +169,6 @@ async function detailedHealth(): Promise<Response> {
   } catch {
     checks.maintenance = "unknown";
   }
-  const ok = database === "ok" && checks.SESSION_SECRET === "set" && prodErrors.length === 0;
+  const ok = database === "ok" && checks.SESSION_SECRET === "set" && prodErrors.length === 0 && !cloudRunConfigError && !operatorBlocksHealth;
   return NextResponse.json({ ok, database, ...checks }, { status: ok ? 200 : 503, headers: { "Cache-Control": "no-store" } });
 }

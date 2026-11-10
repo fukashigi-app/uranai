@@ -1,8 +1,9 @@
 import "server-only";
-import { cert, getApps, initializeApp, type App } from "firebase-admin/app";
+import { applicationDefault, cert, getApps, initializeApp, type App } from "firebase-admin/app";
 import { getFirestore, Timestamp, type Firestore } from "firebase-admin/firestore";
 import { assertFirestoreTarget } from "./target-guard";
 import { normalizePrivateKey } from "./private-key";
+import { firebaseCredentialMode, type FirebaseCredentialMode } from "./credential-mode";
 
 /**
  * Firebase Admin SDK（サーバー専用）。秘密鍵は環境変数からのみ読み込み、コードやリポジトリには置かない。
@@ -12,8 +13,16 @@ import { normalizePrivateKey } from "./private-key";
  *  FIREBASE_PRIVATE_KEY  … サービスアカウントの秘密鍵（"\n" 表記・実際の改行のどちらでも可）
  *
  * FIRESTORE_EMULATOR_HOST がある場合は Emulator に接続（認証情報不要・本番に触れない）。
+ *
+ * 秘密鍵を使わない接続（Cloud Run などの実行用サービスアカウント。Application Default Credentials）：
+ *  FIREBASE_CREDENTIALS=application-default を明示したときだけ使う（未設定なら従来どおり秘密鍵で接続。Vercel はこちら）。
+ *  このとき FIREBASE_PROJECT_ID は必須で、FIREBASE_CLIENT_EMAIL・FIREBASE_PRIVATE_KEY は登録しない（どちらかでも登録されていると、取り違えの可能性があるため停止）。
+ *  接続先のプロジェクトは FIREBASE_PROJECT_ID で明示する（実行環境のプロジェクトを推測で使わない）。
+ *  接続先の確認（assertFirestoreTarget）は従来どおり先に行う。
  */
 const globalForFs = globalThis as unknown as { __uranaiFsApp?: App; __uranaiFs?: Firestore };
+
+export { firebaseCredentialMode, type FirebaseCredentialMode };
 
 export { normalizePrivateKey };
 
@@ -28,6 +37,13 @@ function initApp(): App {
   }
   const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
   const privateKey = process.env.FIREBASE_PRIVATE_KEY;
+  if (firebaseCredentialMode() === "application-default") {
+    if (!process.env.FIREBASE_PROJECT_ID) throw new Error("Firebase is not configured: FIREBASE_PROJECT_ID is required with FIREBASE_CREDENTIALS=application-default");
+    if (clientEmail || privateKey) {
+      throw new Error("Firebase is misconfigured: do not set FIREBASE_CLIENT_EMAIL / FIREBASE_PRIVATE_KEY with FIREBASE_CREDENTIALS=application-default");
+    }
+    return initializeApp({ credential: applicationDefault(), projectId: process.env.FIREBASE_PROJECT_ID }, "uranai");
+  }
   if (!process.env.FIREBASE_PROJECT_ID || !clientEmail || !privateKey) {
     throw new Error("Firebase is not configured: FIREBASE_PROJECT_ID / FIREBASE_CLIENT_EMAIL / FIREBASE_PRIVATE_KEY are required");
   }
