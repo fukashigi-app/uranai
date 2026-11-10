@@ -210,7 +210,7 @@ async function main() {
   }
   const html = await (await gC.req("/payment")).text();
   assert.match(html, /新しいお支払いの受付を一時停止しています/);
-  assert.doesNotMatch(html, /同意して100円を支払う/, "受付の停止中に支払いのボタンが表示されています");
+  assert.doesNotMatch(html, /同意して決済画面へ進む/, "受付の停止中に支払いのボタンが表示されています");
   assert.equal(fake.createCalls, createsBefore, "受付の停止中に Checkout Session を作成しました");
   assert.equal(await countOf(C.checkouts), checkoutsBefore, "受付の停止中に注文を作りました");
   assert.deepEqual(await snapshot(), snap0, "受付の停止で既存の記録が変わりました");

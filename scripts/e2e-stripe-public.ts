@@ -217,9 +217,38 @@ async function main() {
   html = await (await guest.req("/payment")).text();
   assert.ok(html.includes("テスト環境です。実際の請求は発生しません"), "一般のお客さん向けのテストの表示がありません");
   assert.ok(!html.includes("運営アカウントのみ"), "運営向けの表示が一般のお客さんに出ています");
-  assert.ok(html.includes("同意して100円を支払う（テスト）"), "購入ボタンの文言が違います");
+  assert.ok(html.includes("同意して決済画面へ進む（100円）（テスト）"), "購入ボタンの文言が違います");
+  assert.ok(html.includes("次の画面で支払いを確定します"), "購入ボタンの近くに、次の画面で支払いを確定する説明がありません");
+  // 決済画面を開いた後（PROCESSING）：「占いを選び直す」は出さず、変更できない理由を案内する（キャンセルして戻っても同じ）
+  const LOCKED = "決済画面を開いた後は、お支払いの有効期限が切れるまで占いの種類を変更できません。お支払いを完了していない場合は、有効期限が切れた後に選び直せます。";
+  assert.equal((await checkoutOf(p1.checkoutId)).status, "PROCESSING");
+  assert.ok(html.includes(LOCKED) && !html.includes("占いを選び直す"), "決済画面を開いた後の支払い画面に、選び直しのリンクが出ています");
   html = await (await guest.req("/payment?canceled=1")).text();
   assert.ok(html.includes("お支払いは完了していません"), "キャンセルの表示がありません");
+  assert.ok(html.includes(LOCKED) && !html.includes("占いを選び直す"), "キャンセルして戻った支払い画面に、選び直しのリンクが出ています");
+  // 選び直そうとしても、新しい注文は作らず 409 で支払い画面へ戻す（二重の決済を防ぐ。従来どおり）
+  r = await guest.req("/api/checkout", { method: "POST", json: { fortuneType: "BLOOD" } });
+  assert.equal(r.status, 409);
+  assert.equal(((await r.json()) as { error: { code: string } }).error.code, "payment_processing");
+  // 決済画面をまだ開いていない注文（CREATED）：「占いを選び直す」を表示し、選び直すと新しい注文になる
+  {
+    const g = new Client();
+    g.ip = "203.0.113.251";
+    await g.req(`/s/${storeA.storeCode}`);
+    r = await g.req("/api/checkout", { method: "POST", json: { fortuneType: "ZODIAC" } });
+    assert.equal(r.status, 201, await r.clone().text());
+    const first = ((await r.json()) as { checkoutId: string }).checkoutId;
+    assert.equal((await checkoutOf(first)).status, "CREATED");
+    let h = await (await g.req("/payment")).text();
+    assert.ok(h.includes("占いを選び直す") && !h.includes(LOCKED), "決済画面を開く前の支払い画面に、選び直しのリンクがありません");
+    r = await g.req("/api/checkout", { method: "POST", json: { fortuneType: "BLOOD" } });
+    assert.equal(r.status, 201, await r.clone().text());
+    const second = ((await r.json()) as { checkoutId: string }).checkoutId;
+    assert.notEqual(second, first);
+    assert.equal((await checkoutOf(second)).fortuneType, "BLOOD");
+    h = await (await g.req("/payment")).text();
+    assert.ok(h.includes("血液型") && h.includes("占いを選び直す"), "選び直した内容が支払い画面に反映されていません");
+  }
   const created = fake.createCalls;
   r = await guest.req("/api/checkout/stripe-session", { method: "POST", json: {} });
   assert.equal(((await r.json()) as { url: string }).url, p1.url, "キャンセル後に同じ決済画面へ戻れません");
@@ -413,7 +442,9 @@ async function main() {
   await ctl(`expire/${p5.sessionId}`);
   assert.equal(await outcome(await webhook("checkout.session.expired", { id: p5.sessionId, object: "checkout.session" })), "expired");
   assert.equal((await checkoutOf(p5.checkoutId)).status, "EXPIRED");
-  assert.match(await (await guestE.req("/payment")).text(), /お支払いの有効期限が切れました/);
+  html = await (await guestE.req("/payment")).text();
+  assert.match(html, /お支払いの有効期限が切れました/);
+  assert.ok(html.includes("占いを選び直す") && !html.includes("有効期限が切れるまで占いの種類を変更できません"), "期限切れの後の選び直しの案内が違います");
   assert.equal((await guestE.req("/api/checkout/stripe-session", { method: "POST", json: {} })).status, 410);
   assert.equal((await txOf(p5.checkoutId)).length, 0);
   // 期限切れの後は新しく注文し直せる
@@ -461,7 +492,7 @@ async function main() {
   const createdDev = fake.createCalls;
   assert.equal((await guestD.req("/api/checkout/stripe-session", { method: "POST", json: {} })).status, 404);
   html = await (await guestD.req("/payment")).text();
-  assert.doesNotMatch(html, /同意して100円を支払う/);
+  assert.doesNotMatch(html, /同意して決済画面へ進む/);
   assert.equal(fake.createCalls, createdDev, "開発モードで一般のお客さんの Session が作られました");
   assert.deepEqual([(await checkoutOf(cD)).status, (await checkoutOf(cD)).providerPaymentId ?? null], ["CREATED", null]);
   const opDev = await loggedIn(opId);

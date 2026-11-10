@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { PublicShell, Notice, ServicePausedNotice } from "@/components/public/public-shell";
 import { serviceStopReason } from "@/lib/env";
 import { MockPaymentForm } from "@/components/public/mock-payment-form";
+import { PaymentChangeOption } from "@/components/public/payment-change-option";
 import { PurchaseSummary } from "@/components/public/purchase-summary";
 import { FortuneIcon } from "@/components/public/fortune-icons";
 import { getAccessToken } from "@/lib/cookies";
@@ -95,11 +96,7 @@ export default async function PaymentPage(props: PageProps<"/payment">) {
         <PaymentHeader fortuneType={checkout.fortuneType} label={item.label} storeName={storeName} amount={checkout.amount} />
         <PurchaseSummary fortuneLabel={item.label} inputLabel={item.inputLabel} expiresAt={checkout.expiresAt} mode={stripe.mode === "test" ? "stripe_test" : "stripe"} payButtonLabel={stripe.mode === "test" ? STRIPE_TEST_PAY_BUTTON_LABEL : PAY_BUTTON_LABEL} />
         <StripeCheckoutButton canceled={canceled} variant={stripe.audience === "operator_test" ? (stripe.mode === "live" ? "operator_live" : "operator_test") : stripe.mode === "test" ? "public_test" : "live"} />
-        <p className="mt-4 text-center">
-          <Link href="/fortune" className="text-[12px] text-ink-muted underline underline-offset-4">
-            占いを選び直す
-          </Link>
-        </p>
+        <PaymentChangeOption processing={checkout.status === "PROCESSING"} />
       </PublicShell>
     );
   }

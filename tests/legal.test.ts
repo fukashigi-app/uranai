@@ -6,7 +6,7 @@ import CommercialTransactionPage from "@/app/commercial-transaction/page";
 import TermsPage from "@/app/terms/page";
 import PrivacyPage from "@/app/privacy/page";
 import { PurchaseSummary } from "@/components/public/purchase-summary";
-import { PAY_BUTTON_LABEL, TEST_PAY_BUTTON_LABEL } from "@/lib/legal/labels";
+import { PAY_BUTTON_LABEL, PAY_BUTTON_NEXT_STEP_NOTE, STRIPE_TEST_PAY_BUTTON_LABEL, TEST_PAY_BUTTON_LABEL } from "@/lib/legal/labels";
 
 const OPERATOR_KEYS = [
   "OPERATOR_TRADE_NAME",
@@ -289,8 +289,18 @@ describe("購入画面の確認事項", () => {
     expect(t).toContain("テスト用の疑似決済（実際の請求は発生しません）");
     expect(t).toContain(`「${TEST_PAY_BUTTON_LABEL}」ボタンを押した時点で決済されます（テスト用）`);
     expect(t).not.toContain("PAY.JP");
-    const st = text(createElement(PurchaseSummary, { fortuneLabel: "血液型占い", inputLabel: "血液型", expiresAt, mode: "stripe_test", payButtonLabel: "同意して100円を支払う（テスト）" }));
+    const st = text(createElement(PurchaseSummary, { fortuneLabel: "血液型占い", inputLabel: "血液型", expiresAt, mode: "stripe_test", payButtonLabel: "同意して決済画面へ進む（100円）（テスト）" }));
     expect(st).toContain("Stripeのテスト決済（実際の請求は発生しません）");
-    expect(st).toContain("「同意して100円を支払う（テスト）」ボタンを押すと、Stripeの決済画面に移動します");
+    expect(st).toContain("「同意して決済画面へ進む（100円）（テスト）」ボタンを押すと、Stripeの決済画面に移動します");
+  });
+});
+
+describe("購入ボタンの文言（B-1③）", () => {
+  it("決済画面へ進む操作であることが分かる文言にし、テスト決済には（テスト）を付ける。ボタンの下の説明は1つの定数で管理する", () => {
+    expect(PAY_BUTTON_LABEL).toBe("同意して決済画面へ進む（100円）");
+    expect(STRIPE_TEST_PAY_BUTTON_LABEL).toBe("同意して決済画面へ進む（100円）（テスト）");
+    expect(TEST_PAY_BUTTON_LABEL).toBe("テスト決済で進む（無料）");
+    expect(PAY_BUTTON_NEXT_STEP_NOTE).toBe("次の画面で支払いを確定します");
+    expect(PAY_BUTTON_LABEL).not.toContain("支払う");
   });
 });

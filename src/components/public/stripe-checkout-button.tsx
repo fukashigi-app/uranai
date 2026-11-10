@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Spinner } from "@/components/ui/spinner";
-import { PAY_BUTTON_LABEL, STRIPE_TEST_PAY_BUTTON_LABEL } from "@/lib/legal/labels";
+import { PAY_BUTTON_LABEL, PAY_BUTTON_NEXT_STEP_NOTE, STRIPE_TEST_PAY_BUTTON_LABEL } from "@/lib/legal/labels";
 
 /**
  * Stripe Checkout へ移動するボタン。URL はサーバーが注文と紐付けてから返す（/api/checkout/stripe-session）。
@@ -82,6 +82,9 @@ export function StripeCheckoutButton({ canceled, variant }: { canceled: boolean;
           variant === "live" || variant === "operator_live" ? PAY_BUTTON_LABEL : STRIPE_TEST_PAY_BUTTON_LABEL
         )}
       </button>
+      <p data-pay-next-step="" className="mt-2 text-center text-[12px] leading-relaxed text-ink-muted">
+        {PAY_BUTTON_NEXT_STEP_NOTE}
+      </p>
     </div>
   );
 }
