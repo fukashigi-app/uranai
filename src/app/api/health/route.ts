@@ -11,13 +11,30 @@ const stripeLiveOperatorAudience = () => {
   return c.ok && c.audience === "operator";
 };
 import { getMaintenanceStatus } from "@/lib/services/maintenance-status";
+import { getSessionUser } from "@/lib/auth/session";
 
 export const dynamic = "force-dynamic";
 
 /**
- * 動作確認用の診断エンドポイント。秘密情報は返さない（設定の有無と接続可否のみ）。
+ * 動作確認用の診断エンドポイント。秘密情報は返さない。
+ *  - 運営アカウントでログインしているとき：詳細（設定の有無・接続先・Firestore の接続確認・定期処理の状況）
+ *  - それ以外（認証なし）：Firestore を読み書きしない簡易の稼働確認だけ（ok と案内）。
+ *    大量のアクセスで Firestore の無料枠（Spark）を消費させないため。環境の詳細も返さない。
+ *    ログインのセッションの Cookie が無ければ、運営かどうかの確認でも Firestore を読まない（getSessionUser）。
  */
 export async function GET() {
+  const user = await getSessionUser().catch(() => null);
+  if (user?.role === "OPERATOR") return detailedHealth();
+  // 設定だけで判断できる稼働状態（環境変数を見るだけ。Firestore は使わない）
+  const ok = (process.env.SESSION_SECRET?.length ?? 0) >= 32 && productionConfigIssues().every((i) => i.level !== "error");
+  return NextResponse.json(
+    { ok, detail: "詳細は、運営アカウントでログインしたブラウザで開くと表示します。" },
+    { status: ok ? 200 : 503, headers: { "Cache-Control": "no-store" } },
+  );
+}
+
+/** 運営向けの詳細（従来の /api/health の内容。Firestore の読み取り2回：接続確認・定期処理の状況） */
+async function detailedHealth(): Promise<Response> {
   const provider = dataProvider();
   const checks: Record<string, string> = {
     dataProvider: provider,

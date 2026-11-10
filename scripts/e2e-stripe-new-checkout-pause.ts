@@ -17,8 +17,8 @@ import Stripe from "stripe";
 import { createFakeStripe } from "./lib/fake-stripe";
 import { C, fsdb } from "@/lib/firestore/admin";
 import { dataProvider } from "@/lib/data-provider";
-import { createStore } from "@/lib/services/stores";
-import { randomToken } from "@/lib/security/crypto";
+import { createOperator, createStore } from "@/lib/services/stores";
+import { randomToken, sha256Hex } from "@/lib/security/crypto";
 
 const PORT = Number(process.env.E2E_PAUSE_PORT ?? 3220);
 const BASE = `http://localhost:${PORT}`;
@@ -167,10 +167,17 @@ async function main() {
 
   const stamp = Date.now();
   const store = await createStore({ name: `受付停止検証店舗 ${stamp}`, contactName: "", postalCode: "", address: "", phone: "", email: "" }, SYSTEM);
+  // /api/health の詳細は、運営アカウントでログインしたときだけ返す（認証なしは Firestore を使わない簡易の確認だけ）
+  const opId = await createOperator({ name: "受付停止検証運営", email: `pause-op-${stamp}@example.com`, password: "PauseOperator123" });
+  const opToken = randomToken(32);
+  await fsdb().collection(C.authSessions).doc(sha256Hex(opToken)).set({ userId: opId, expiresAt: new Date(Date.now() + 3 * 3600_000) });
+  const op = new Client();
+  op.jar.set("sid", opToken);
+  const opHealth = async () => (await (await op.req("/api/health")).json()) as Record<string, string>;
 
   // ================= 1. 受付 on：新規の決済を作れる =================
   await startApp("STRIPE_NEW_CHECKOUT=on", { STRIPE_NEW_CHECKOUT: "on" });
-  let health = (await (await fetch(`${BASE}/api/health`)).json()) as Record<string, string>;
+  let health = await opHealth();
   assert.match(health.stripeNewCheckout, /^accepting/);
   assert.match(health.stripeConnection, /^test/);
   const gA = new Client();
@@ -190,7 +197,7 @@ async function main() {
   // ================= 2. 受付 off：新規の決済は作らない。既存の記録は変わらない =================
   const snap0 = await snapshot();
   await startApp("STRIPE_NEW_CHECKOUT=off", { STRIPE_NEW_CHECKOUT: "off" });
-  health = (await (await fetch(`${BASE}/api/health`)).json()) as Record<string, string>;
+  health = await opHealth();
   assert.equal(health.stripeNewCheckout, "stopped (new_checkout_off)");
   assert.match(health.stripeConnection, /^test/, "受付の停止で Stripe との接続まで止まっています");
   assert.match(health.paymentMode, /新規の決済の受付を停止中/);
@@ -303,7 +310,7 @@ async function main() {
     await startApp(`混在：${label}`, o);
     r = await webhook("checkout.session.completed", objB);
     assert.equal(r.status, 404, `${label}：混在しているのに Webhook を受け付けました`);
-    health = (await (await fetch(`${BASE}/api/health`)).json()) as Record<string, string>;
+    health = await opHealth();
     assert.match(health.stripeConnection, /^unavailable/, `${label}：混在しているのに接続を作りました`);
     r = await order(new Client(), store.storeCode);
     assert.equal(r.status, 503);

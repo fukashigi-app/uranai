@@ -485,11 +485,18 @@ async function main() {
   step("開発用プレビュー（/dev/fortune-preview）は本番相当の環境では 404");
 
   // 14. 接続確認API
+  // 認証なし：Firestore を使わない簡易の稼働確認だけ（環境の詳細は返さない）
   res = await fetch(`${BASE}/api/health`);
+  const pub = (await res.json()) as Record<string, unknown>;
+  assert.equal(res.status, 200);
+  assert.deepEqual(Object.keys(pub).sort(), ["detail", "ok"]);
+  assert.equal(pub.ok, true);
+  // 運営アカウントでログイン：従来の詳細（Firestore の接続確認を含む）
+  res = await op.req("/api/health");
   const health = (await res.json()) as { dataProvider: string; database: string };
   assert.equal(health.dataProvider, "firestore");
   assert.equal(health.database, "ok");
-  step("接続確認API（/api/health）で firestore / ok");
+  step("接続確認API（/api/health）：認証なしは簡易の確認だけ、運営のログインで firestore / ok");
 
   console.log("\nFIRESTORE E2E PASSED");
   process.exit(0);

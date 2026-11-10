@@ -14,9 +14,12 @@ export async function rateLimit(key: string, limit: number, windowSec: number): 
   const ref = fsdb().collection(C.rateLimits).doc(`${sha256Hex(key).slice(0, 40)}_${windowStart}`);
   const count = await fsdb().runTransaction(async (tx) => {
     const cur = await tx.get(ref);
-    const next = Number(cur.get("count") ?? 0) + 1;
-    tx.set(ref, { count: next, windowStart: new Date(windowStart), expireAt: new Date(windowStart + windowMs + 86_400_000) });
-    return next;
+    const used = Number(cur.get("count") ?? 0);
+    // すでに上限に達している：書き込まずに拒否する（大量のアクセスで無料枠の書き込みを使い切らないように）。
+    // 回数は上限のまま残り、時間枠（ドキュメントID）・期限（expireAt）は変えない。読み取りだけのトランザクションとして終わる
+    if (used >= limit) return used + 1;
+    tx.set(ref, { count: used + 1, windowStart: new Date(windowStart), expireAt: new Date(windowStart + windowMs + 86_400_000) });
+    return used + 1;
   });
   return count <= limit;
 }

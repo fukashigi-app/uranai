@@ -553,7 +553,7 @@ async function main() {
   await g2.req(`/s/${storeA.storeCode}`);
   assert.equal((await g2.req("/api/checkout", { method: "POST", json: { fortuneType: "ZODIAC" } })).status, 503);
   assert.equal((await g2.req("/api/checkout/stripe-session", { method: "POST", json: {} })).status, 404);
-  const health = (await (await fetch(`${BASE}/api/health`)).json()) as { checks?: Record<string, string> };
+  const health = (await (await op.req("/api/health")).json()) as { checks?: Record<string, string> };
   assert.doesNotMatch(JSON.stringify(health), /payjp \(|sk_live_e2e_dummy_payjp/, "ヘルスチェックに PAY.JP の決済・キーの値が出ています");
   step("PAY.JP は廃止：PAY.JP の本番用キーが残っていても Stripe で決済（PAY.JP の設定は読まない）。PAYMENT_PROVIDER=payjp は設定なし（注文 503）。カード決済の API・PAY.JP の Webhook は 404、画面に PAY.JP なし");
 
