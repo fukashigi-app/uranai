@@ -104,7 +104,7 @@ describe("一般のお客さんの Stripe 決済の受付（環境変数から�
     expect(payments.isProviderId("payjp")).toBe(false);
   });
 
-  it("Vercel の本番では受け付けない（Stripe の本番決済は未実装。テストの接続も本番では使えない）", async () => {
+  it("Vercel の本番では、本番決済の条件がそろわなければ受け付けない（テストの接続も本番では使えない）", async () => {
     expect(await access({ ...LOCAL, VERCEL_ENV: "production", FIRESTORE_EMULATOR_HOST: "", FIREBASE_PROJECT_ID: "uranai-b6edf", PRODUCTION_FIREBASE_PROJECT_ID: "uranai-b6edf" })).toMatchObject({ ok: false });
     expect(
       await access({
@@ -126,8 +126,58 @@ describe("一般のお客さんの Stripe 決済の受付（環境変数から�
     expect(env().PAYMENT_PROVIDER).toBeNull();
   });
 
-  it("本番で PAYMENT_PROVIDER=stripe なら、決済を受け付けていないことを警告する", () => {
+  it("本番で PAYMENT_PROVIDER=stripe：本番決済の設定が不足しているときだけ警告する（「未実装」の古い警告は出さない）", () => {
     const issues = productionConfigIssues({ VERCEL_ENV: "production", PAYMENT_PROVIDER: "stripe", CRON_SECRET: "x" });
-    expect(issues.filter((i) => i.key === "PAYMENT_PROVIDER").map((i) => i.level)).toEqual(["warning"]);
+    const pp = issues.filter((i) => i.key === "PAYMENT_PROVIDER");
+    expect(pp.map((i) => i.level)).toEqual(["warning"]);
+    expect(pp[0].message).toBe("Stripe本番決済に必要な設定が不足しています。設定を確認してください（STRIPE_LIVE_CHECKOUT=on が設定されていません）。");
+    expect(JSON.stringify(issues)).not.toMatch(/未実装/);
+  });
+});
+
+describe("PAYMENT_PROVIDER=stripe の警告（B-4）：本番決済の設定の有無だけで判定し、決済の受付・停止は変えない", () => {
+  const LIVE_COMPLETE = {
+    VERCEL_ENV: "production",
+    PAYMENT_PROVIDER: "stripe",
+    CRON_SECRET: "x".repeat(32),
+    FIREBASE_PROJECT_ID: "uranai-b6edf",
+    PRODUCTION_FIREBASE_PROJECT_ID: "uranai-b6edf",
+    STRIPE_LIVE_CHECKOUT: "on",
+    STRIPE_SECRET_KEY: "sk_live_unit_dummy",
+    STRIPE_WEBHOOK_SECRET: "whsec_unit_dummy",
+    STRIPE_ACCOUNT_ID: "acct_unitdummy01",
+    SITE_STATUS: "development",
+    STRIPE_NEW_CHECKOUT: "off",
+  };
+
+  it("本番決済の設定がそろっている：PAYMENT_PROVIDER の警告は出さない。公開の停止（development・STRIPE_NEW_CHECKOUT=off）は保たれる", async () => {
+    const issues = productionConfigIssues(LIVE_COMPLETE);
+    expect(issues.filter((i) => i.key === "PAYMENT_PROVIDER")).toEqual([]);
+    const { stripeLiveConfig } = await import("@/lib/payments/stripe-guard");
+    const live = stripeLiveConfig(LIVE_COMPLETE);
+    expect(live.ok).toBe(true);
+    if (live.ok) {
+      expect(live.audience).toBeNull(); // 一般のお客さんの決済は受け付けない
+      expect(live.newCheckout.ok).toBe(false);
+    }
+    // 受付の停止は従来どおり表示する（PAYMENT_PROVIDER の警告とは別）
+    expect(issues.map((i) => i.key)).toContain("STRIPE_NEW_CHECKOUT");
+    // 値（キー）は表示しない
+    expect(JSON.stringify(issues)).not.toMatch(/sk_live_unit_dummy|whsec_unit_dummy|acct_unitdummy01/);
+  });
+
+  it("本番決済のスイッチがあって条件が欠けている：従来の STRIPE_LIVE_CHECKOUT の error で示し、PAYMENT_PROVIDER の警告は重ねない", () => {
+    const issues = productionConfigIssues({ ...LIVE_COMPLETE, STRIPE_SECRET_KEY: "" });
+    expect(issues.filter((i) => i.key === "PAYMENT_PROVIDER")).toEqual([]);
+    expect(issues.find((i) => i.key === "STRIPE_LIVE_CHECKOUT")).toMatchObject({ level: "error" });
+  });
+
+  it("mock・payjp・未設定・Preview・開発環境の判定は従来どおり", () => {
+    const prod = { VERCEL_ENV: "production", CRON_SECRET: "x".repeat(32) };
+    expect(productionConfigIssues({ ...prod, PAYMENT_PROVIDER: "mock" }).filter((i) => i.key === "PAYMENT_PROVIDER").map((i) => i.level)).toEqual(["error"]);
+    expect(productionConfigIssues({ ...prod, PAYMENT_PROVIDER: "payjp" }).map((i) => i.key)).toEqual(["PAYJP_KEYS"]);
+    expect(productionConfigIssues(prod)).toEqual([]);
+    expect(productionConfigIssues({ VERCEL_ENV: "preview", PAYMENT_PROVIDER: "stripe" })).toEqual([]);
+    expect(productionConfigIssues({ PAYMENT_PROVIDER: "stripe" })).toEqual([]);
   });
 });

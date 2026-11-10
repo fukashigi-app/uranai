@@ -224,7 +224,20 @@ export function productionConfigIssues(e: RawProcessEnv = process.env): Producti
     issues.push({ level: "error", key: "PAYMENT_PROVIDER", message: "本番で PAYMENT_PROVIDER=mock になっています。疑似決済は本番では使えないため、占いの受付（無料テスト・有料の決済とも）を停止しています。PAYMENT_PROVIDER=mock を削除してください。" });
   }
   if (e.PAYMENT_PROVIDER === "stripe") {
-    issues.push({ level: "warning", key: "PAYMENT_PROVIDER", message: "PAYMENT_PROVIDER=stripe ですが、Stripe の本番決済はまだ実装されていないため、本番では決済を受け付けていません。" });
+    // 本番決済（Live）の接続の設定（stripeLiveConfig：キー・Webhook の署名の秘密・アカウント・Firebase の接続先・テスト用の設定が無いことなど）が
+    // そろっていないときだけ警告する。公開の状態（SITE_STATUS）・新規の決済の受付（STRIPE_NEW_CHECKOUT）は判定に含まない（意図した停止は警告しない）。
+    // 設定がそろっていても、実際に決済できるかはこの判定では分からない（キーのアカウントの照合・公開の状態などは別に確かめる）
+    // 本番決済のスイッチ（STRIPE_LIVE_CHECKOUT・STRIPE_LIVE_OPERATOR_TEST）があるときは、下の STRIPE_LIVE_CHECKOUT の確認が
+    // 不足している条件を error で詳しく示すので、ここでは重ねて警告しない
+    const live = stripeLiveConfig(e);
+    const liveSwitch = Boolean((e.STRIPE_LIVE_CHECKOUT ?? "").trim() || (e.STRIPE_LIVE_OPERATOR_TEST ?? "").trim());
+    if (!live.ok && !liveSwitch) {
+      issues.push({
+        level: "warning",
+        key: "PAYMENT_PROVIDER",
+        message: `Stripe本番決済に必要な設定が不足しています。設定を確認してください（${STRIPE_LIVE_DENY_MESSAGE[live.reason]}）。`,
+      });
+    }
   }
   if (e.ALLOW_MOCK_PAYMENTS_IN_PRODUCTION === "true") {
     issues.push({ level: "error", key: "ALLOW_MOCK_PAYMENTS_IN_PRODUCTION", message: "本番では無視しています（疑似決済は使えません）。削除してください。" });
