@@ -114,6 +114,7 @@ Stripe の E2E は、Firestore Emulator の `demo-` プロジェクトと、ス�
 - 返金・異議申し立て（チャージバック）は Stripe API で状態を取り直して反映し、振込済みの月の取引は「精算の調整」として次回の精算で差し引きます
 - 記録と照合できない通知（店舗・金額の食い違いなど）は反映せず、運営画面の「決済要確認」に記録します
 - 決済の状態と占い権利・Webhook の流れ・手数料・運営の手順・本番移行の前の確認は [docs/stripe-payments.md](docs/stripe-payments.md) を参照
+- Cloud Run への移行の準備（Cloud Run 用の環境変数・Sandbox の診断・未検証の事項）は [docs/cloud-run-migration.md](docs/cloud-run-migration.md) を参照
 
 ## デプロイ（例: Vercel + Supabase / Neon）
 
