@@ -12,15 +12,13 @@ import { getFortuneSession } from "@/lib/services/fortune";
 import { FORTUNE_CATALOG } from "@/lib/fortune/catalog";
 import { siteConfig } from "@/config/site";
 import { shareSummary } from "@/lib/fortune/share";
+import { shareSiteOrigin } from "@/lib/security/trusted-origin";
 
 export const metadata = { title: "占い結果", robots: { index: false } };
 
-/** 共有用のトップURL（設定に依存せず、アクセス中のドメインから作る） */
+/** 共有用のトップURL（Vercel：アクセス中のドメインから作る。Cloud Run 用：APP_URL だけ。lib/security/trusted-origin.ts） */
 async function siteOrigin(): Promise<string> {
-  const h = await headers();
-  const host = (h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000").split(",")[0].trim();
-  const proto = (h.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https")).split(",")[0].trim();
-  return `${proto}://${host}`;
+  return shareSiteOrigin(await headers());
 }
 
 export default async function FortuneResultPage() {

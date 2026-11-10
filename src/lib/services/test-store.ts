@@ -9,6 +9,7 @@ import { purchaseSeedFor } from "@/lib/fortune/seed";
 import { jsonError } from "@/lib/api";
 import { rateLimit } from "@/lib/security/rate-limit";
 import { clientKey } from "@/lib/security/request";
+import { requestSourceOrigin, trustedOriginMode } from "@/lib/security/trusted-origin";
 import { devModeAccess } from "./dev-mode";
 import { bindingFor, decodeFreeSession, DEV_TTL_MS, encodeFreeSession, FREE_COOKIE, TEST_TTL_MS, type TestSession } from "./free-session-token";
 
@@ -245,6 +246,9 @@ export async function resolveVisitorStore(): Promise<VisitorStore | null> {
 
 /** CSRF対策（テストモード用・設定に依存しない）: Origin/Referer がリクエスト先と同じホストか */
 export function isSameHostRequest(req: Request): boolean {
+  const trusted = trustedOriginMode();
+  // Cloud Run 用（TRUSTED_ORIGIN_SOURCE=app-url）：APP_URL のオリジンだけ（Host・X-Forwarded-Host は見ない）
+  if (trusted.kind === "app-url") return requestSourceOrigin(req) === trusted.origin;
   const host = (req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? "").split(",")[0].trim();
   const src = req.headers.get("origin") ?? req.headers.get("referer");
   if (!host || !src) return false;
