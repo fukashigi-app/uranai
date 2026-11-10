@@ -40,7 +40,9 @@ FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 FIREBASE_PROJECT_ID=demo-uranai PAYMENT_P
 ### 本番 Firestore の初期設定
 
 1. Vercel の環境変数に `FIREBASE_PROJECT_ID` / `FIREBASE_CLIENT_EMAIL` / `FIREBASE_PRIVATE_KEY` / `SESSION_SECRET` / `DATA_ENCRYPTION_KEY` を登録し、Redeploy
-2. `https://<公開URL>/api/health` で `"dataProvider":"firestore"` と `"database":"ok"` を確認
+2. `https://<公開URL>/api/health` を開き、`"ok":true` を確認
+   - 認証なしでは `ok` と案内（`detail`）だけを返します。`ok` は `SESSION_SECRET` と本番の設定の誤りだけで判定し、Firestore には接続しないため、**認証なしの `/api/health` だけでは Firestore の稼働を確認できません**
+   - `"dataProvider":"firestore"` と `"database":"ok"` などの詳細は、運営アカウントでログイン（`/admin/login`）したブラウザで `/api/health` を開いたときだけ表示されます。運営アカウントは次の手順3で作成するので、作成後にログインして確認してください
 3. ブラウザで `https://<公開URL>/admin/setup` を開き、最初の運営アカウントを作成（メールアドレスとパスワードを入力）
    - 運営アカウントが1件も無いときだけ使え、作成後は永久に無効になります（以後は「初期設定は完了しています」と表示）
    - 任意で Vercel の環境変数 `ADMIN_SETUP_TOKEN` を設定すると、その値（セットアップキー）を知っている人だけが作成できます
@@ -79,7 +81,7 @@ seed 後に表示されるQR URL（`/s/xxxxxxxxxxxx`）をスマホ幅で開く�
 
 `ENABLE_TEST_PAYMENT=false`（または未設定）にすると、テスト用の入口・ボタン・Cookie はすべて無効になり、
 決済成功の確認なしでは占えなくなります（決済が未設定の場合は「ただいまお支払いを受け付けていません」と表示）。
-設定状況は `/api/health` で確認できます（秘密情報は表示しません）。
+設定状況は、運営アカウントでログインしたブラウザで `/api/health` を開くと確認できます（秘密情報は表示しません。認証なしでは `ok` と案内だけを返します）。
 
 ## テスト
 
