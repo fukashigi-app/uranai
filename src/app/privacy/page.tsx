@@ -13,6 +13,12 @@ import {
 } from "@/lib/legal/policy";
 
 export const metadata = { title: "プライバシーポリシー" };
+/**
+ * 運営者情報（OPERATOR_*）を実行時の環境変数から読む（ビルド時の値で静的なページに固定しない）。
+ * Cloud Run はビルドに実行時の環境変数が渡らないため。Firestore には接続しない。
+ * サイト名など NEXT_PUBLIC_*（config/site.ts）は、この設定でもビルド時に埋め込まれたまま。
+ */
+export const dynamic = "force-dynamic";
 
 /**
  * 記載内容は実装と一致させること（保存期間: src/lib/firestore/misc.ts / src/lib/services/maintenance.ts の runMaintenance、
