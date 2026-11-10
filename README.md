@@ -104,7 +104,11 @@ Stripe の E2E は、Firestore Emulator の `demo-` プロジェクトと、ス�
 - **テスト決済（Sandbox）**：Vercel の Preview・ローカルだけ。`STRIPE_TEST_CHECKOUT=on`・`STRIPE_SECRET_KEY`（`sk_test_`）・`STRIPE_WEBHOOK_SECRET`・
   `STRIPE_TEST_FIREBASE_PROJECT_ID` がそろったときだけ有効。運営アカウントは `/fortune?pay=stripe-test` から、
   一般のお客さんは公開中（`SITE_STATUS=open`）かつ `PAYMENT_PROVIDER=stripe` のときに使えます。テスト決済は売上・精算に含めません
-- **本番決済（Live）**：未実装・無効です（`STRIPE_LIVE_CHECKOUT` の判定だけがあり、決済の処理からは使っていません）
+- **本番決済（Live）**：**コードは実装済み**です。Vercel の Production で `STRIPE_LIVE_CHECKOUT=on`・本番用キー（`sk_live_`）・`STRIPE_WEBHOOK_SECRET`・
+  `STRIPE_ACCOUNT_ID`・本番の Firebase などの条件がそろうと、**本番の Stripe に接続します**（Webhook・返金などの処理が動きます）。
+  さらに `STRIPE_NEW_CHECKOUT=on` と公開中（`SITE_STATUS=open`）、または開発モードの運営だけの本番決済テスト（`STRIPE_LIVE_OPERATOR_TEST=on`）の
+  条件がそろうと、新規の決済を受け付け、**実際に請求が発生します**。本番での実際の決済の確認は未実施で、コードが実装済みでも公開の準備が
+  できたとは判断しません（判定は `src/lib/payments/stripe-guard.ts`）
 - Webhook の URL は `https://<APP_URL>/api/webhooks/stripe`。必要なイベントは `docs/ARCHITECTURE.md` を参照
 - Vercel の Preview・Stripe の Sandbox での検証の手順は [docs/preview-verification.md](docs/preview-verification.md) を参照
 - 返金・異議申し立て（チャージバック）は Stripe API で状態を取り直して反映し、振込済みの月の取引は「精算の調整」として次回の精算で差し引きます

@@ -106,7 +106,7 @@ uranai/ (リポジトリルート)
 | `STRIPE_SECRET_KEY` | **サーバー専用**の Stripe の秘密鍵（テストは `sk_test_`。本番用 `sk_live_` はテストの環境では拒否） |
 | `STRIPE_WEBHOOK_SECRET` | Stripe の Webhook の署名の値（`whsec_`） |
 | `STRIPE_TEST_FIREBASE_PROJECT_ID` | テスト決済を使う Firebase プロジェクト（本番のIDとは別であること） |
-| `STRIPE_LIVE_CHECKOUT` / `STRIPE_LIVE_OPERATOR_TEST` | 本番決済の判定だけ（本番決済は未実装・無効） |
+| `STRIPE_LIVE_CHECKOUT` / `STRIPE_LIVE_OPERATOR_TEST` | 本番決済（Live。コードは実装済み）の条件（`stripe-guard.ts` の `stripeLiveConfig`）。`STRIPE_LIVE_CHECKOUT=on` と本番用キーなどがそろうと本番の Stripe に接続する。新規の決済の受付は、`STRIPE_NEW_CHECKOUT=on` と公開中（`SITE_STATUS=open`）、または開発モードで `STRIPE_LIVE_OPERATOR_TEST=on`（運営だけ）のときで、**実際に請求が発生する**。本番での決済の確認は未実施 |
 | `MOCK_WEBHOOK_SECRET` | 疑似決済の Webhook の HMAC 秘密鍵（自動テスト用） |
 | `PAYMENT_FEE_RATE_BPS` | 決済手数料率の推定値（Stripe の手数料が確定したら確定値に更新。手数料は運営の負担） |
 | `CRON_SECRET` | `/api/cron/maintenance` の Bearer トークン |
