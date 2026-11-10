@@ -19,14 +19,18 @@
 ## 0. 最初に1回だけ行う準備
 
 1. **Node.js 22** をパソコンに入れます（https://nodejs.org の「LTS」）。Windows では **Git for Windows**（https://git-scm.com）も入れます。
-2. このリポジトリを `backup-tools` ブランチで取得し、フォルダの中で次を実行します。
+2. このリポジトリを **`main` ブランチ**で取得し、フォルダの中で次を実行します。
    ```
    git clone https://github.com/fukashigi-app/uranai.git
    cd uranai
-   git switch backup-tools
+   git switch main
    npm ci
    ```
    - 非公開のリポジトリの場合、初回はブラウザで GitHub のログイン画面が開きます。
+   - **以前は `backup-tools` ブランチを使う案内でした。** `backup-tools` には、2026-11-08 のバックアップの改良（1時点の読み取りの記録・終了時刻の確認・件数の照合。§3）が**含まれていません**。バックアップの作成・確認・復元テストには、この改良を含む `main` を使ってください。
+   - すでに `backup-tools` で取得している場合は、同じフォルダで `git switch main`、`git pull`、`npm ci` の順に実行して `main` に切り替えます。
+   - 必要な改良は、GitHub の `main` にすでに入っています。手元にだけある変更（まだ GitHub に上げていない変更）を GitHub に上げる必要はありません。
+   - コマンドの名前（`check:env`・`backup:firestore`・`backup:verify`・`backup:restore-emulator`）は変わりません。
 3. **Vercel CLI** を入れてログインし、このプロジェクトに紐付けます。
    ```
    npm i -g vercel
@@ -177,26 +181,67 @@
 
 ## 5. 復元テスト（パソコンの中の練習用データベースにだけ戻す）
 
-本番には絶対に戻しません。ツールは、パソコンの中の Firestore Emulator の `demo-` で始まるプロジェクトにしか書き込めないようになっています。
+本番には絶対に戻しません。ツールは、パソコンの中の Firestore Emulator の `demo-` で始まるプロジェクトにしか書き込めないようになっています（次のどれかに当てはまると、1件も書き込まずに中止します：接続先がこのパソコン（`localhost`・`127.0.0.1`・`::1`）ではない／`FIRESTORE_EMULATOR_HOST` が無い・接続先と違う／プロジェクトIDが `demo-` で始まらない）。本番に戻す機能はありません。
 
-1. **Java 21** をパソコンに入れておきます（Emulator に必要）。
-2. ターミナルを2つ開きます。
-3. **1つ目のターミナル**で Emulator を起動し、そのままにしておきます。
+### 5.1 実行前のチェック
+
+すべてに当てはまることを確かめてから始めます。
+
+- [ ] **`main` ブランチ**のフォルダで実行している（`git branch --show-current` が `main`。§0）
+- [ ] **Node.js 22** と **Java 21** が使える（`node -v` が `v22.`、`java -version` が `21`。Java は Emulator に必要）
+- [ ] そのフォルダで `npm ci` が完了している
+- [ ] 2つ目のターミナルの `FIRESTORE_EMULATOR_HOST` が、このパソコンの Emulator（`127.0.0.1:8080`）を指している（`firebase.json` の Emulator の設定と同じ番号）
+- [ ] 復元先のプロジェクトID（`--project`）が **`demo-` で始まる**
+- [ ] 復元先は**新しい空のプロジェクトID**にする（例：`demo-restore-` の後に日付）。すでにデータがあるプロジェクトには、ツールが復元を中止します
+- [ ] `--allow-nonempty` は**使わない**（データがあるプロジェクトにも書き込んでしまう指定のため）
+- [ ] バックアップの `.ufbk` と、同じ名前の `.manifest.json` が**同じフォルダに揃っている**（`.manifest.json` が無いと、ファイル全体のハッシュの照合が省略されます）
+- [ ] 合言葉は、画面での入力（表示されません）で渡す。**コマンドの一部（引数や `BACKUP_PASSPHRASE=…` の前置き）に書かない・チャットに貼らない**（履歴に残るため）
+- [ ] 本番の Firebase の認証情報（`FIREBASE_` で始まる変数・`GOOGLE_APPLICATION_CREDENTIALS`）を、このターミナルに設定しない。値を表示せずに件数だけ確かめる例：
+  - Mac：`env | grep -c -E '^(FIREBASE_|GOOGLE_APPLICATION_CREDENTIALS)'` が `0`
+  - Windows（PowerShell）：`(Get-ChildItem Env: | Where-Object Name -match '^(FIREBASE_|GOOGLE_APPLICATION_CREDENTIALS)').Count` が `0`
+  - （復元のツール自体はこれらを使いませんが、取り違えを防ぐため）
+
+### 5.2 手順
+
+1. ターミナルを2つ開き、どちらも `main` のフォルダに移動します。
+2. **1つ目のターミナル**で Emulator を起動し、そのままにしておきます（`npm run emulator` と同じ内容です）。
    ```
    npx -y firebase-tools@15 emulators:start --only firestore --project demo-uranai
    ```
-4. **2つ目のターミナル**で復元テストを実行します（`--project` には `demo-` で始まる新しい名前を付けます）。
+3. **2つ目のターミナル**で復元テストを実行します（`--project` には `demo-` で始まる新しい名前を付けます）。
    - Mac：
      ```
-     FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 npm run backup:restore-emulator -- ~/uranai-backups/uranai-backup-XXXX.ufbk --project demo-restore-1021
+     FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 npm run backup:restore-emulator -- ~/uranai-backups/uranai-backup-XXXX.ufbk --project demo-restore-1111
      ```
    - Windows（PowerShell）：
      ```
      $env:FIRESTORE_EMULATOR_HOST="127.0.0.1:8080"
-     npm run backup:restore-emulator -- $HOME\uranai-backups\uranai-backup-XXXX.ufbk --project demo-restore-1021
+     npm run backup:restore-emulator -- $HOME\uranai-backups\uranai-backup-XXXX.ufbk --project demo-restore-1111
      ```
-5. 「✔ 復元先を読み直して、全ドキュメント（ID・型・値）がバックアップと一致することを確認しました」と出れば成功です。
-6. 1つ目のターミナルで `Ctrl + C` を押して Emulator を止めます（練習用のデータは消えます）。
+   - 合言葉を聞かれたら入力します（表示されません）。
+4. 1つ目のターミナルで `Ctrl + C` を押して Emulator を止めます。
+
+### 5.3 `singleProjectMode` についての注意（未検証）
+
+`firebase.json` では Emulator の `singleProjectMode` が `true` になっています。Emulator は `demo-uranai` で起動し、復元先は別の名前（`demo-restore-…`）なので、Emulator の画面に**プロジェクトIDが違うという警告が出る可能性があります**。この組み合わせで実際にどうなるかは、まだ確かめていません（自動テストでは別の名前のプロジェクトへの復元が成功していますが、お使いの環境での動作は未検証です）。
+
+- 警告が出た場合は、内容を読み、2つ目のターミナルの結果（5.4）で成功か失敗かを判断してください。
+- 警告を無視してよいかどうかは、まだ分かっていません。5.4 の成功の表示が出ていない場合は、成功として扱わないでください。
+
+### 5.4 成功・失敗の判定
+
+- 成功のときは、2つ目のターミナルに次の2行が出ます。
+  - `Emulator（<プロジェクトID>）に ○件を書き込みました（親だけのドキュメント ○件は、サブコレクションの復元で自動的に現れます）。`
+  - `✔ 復元先を読み直して、全ドキュメント（ID・型・値）がバックアップと一致することを確認しました。`
+- **成功と判断できるのは、2行目（全ドキュメントの ID・型・値の一致の確認）が出たときだけです。** 書き込みの行だけでは成功ではありません。
+- 失敗のときは `✘` で始まる行が出て、理由が表示されます。例：
+  - `復元を中止しました: …`（復元先が Emulator の `demo-` プロジェクトではない）
+  - `復号できません（合言葉が違うか、ファイルが改ざん・破損しています）。`
+  - `バックアップの確認に失敗したため、復元しません`（説明ファイルとのハッシュや記録の不一致、件数・内容のハッシュの確認の失敗）
+  - `バックアップファイルが見つかりません。`
+  - `復元先の Emulator プロジェクトにすでにデータがあります。空のプロジェクトIDを指定してください。`
+  - `復元結果がバックアップと一致しません`
+- Emulator は、この手順ではデータを保存しない設定で起動しています。**Emulator を止めると、復元したデータはすべて消えます**（本番のデータには影響しません）。途中で失敗して一部だけ書き込まれた場合も、止めれば消えます。
 
 **月1回程度**、この復元テストを行うと安心です。
 
