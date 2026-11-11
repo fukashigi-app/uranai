@@ -1,0 +1,12 @@
+# Netlify のビルド設定（必要最小限）。
+#  - Next.js のアダプターは Netlify の自動検出に任せる（[[plugins]] で固定しない。修正版が自動で入るように、版を固定しない）
+#  - 公開ディレクトリ（publish）はアダプターが決めるので指定しない
+#  - 秘密の値・Firestore・Stripe・本番と Sandbox の値は、ここに書かない（このファイルはリポジトリに残る。また、ここの変数は
+#    ビルドにだけ渡り、Functions の実行時には渡らない）。実行時の値は Netlify の管理画面で、デプロイの種類（Production・
+#    ブランチ）ごとに設定する
+#  - NODE_VERSION はビルドの Node.js の版。Functions の実行時の版も、通常はビルドの版に合わせられる
+[build]
+  command = "npm run build"
+
+[build.environment]
+  NODE_VERSION = "22"
