@@ -1,6 +1,8 @@
 import type { NextConfig } from "next";
+import { PHASE_PRODUCTION_BUILD } from "next/constants";
 import { readOperatorInfo } from "./src/config/operator";
 import { checkFirestoreTarget, FIRESTORE_TARGET_MESSAGE } from "./src/lib/firestore/target-guard";
+import { assertNetlifyBuildEnv } from "./src/lib/ops/netlify-build-guard";
 
 const isDev = process.env.NODE_ENV !== "production";
 
@@ -57,4 +59,11 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default nextConfig;
+/**
+ * 本番ビルドのときだけ、Netlify の本番と Sandbox の環境変数の取り違えを確認する（誤りがあれば例外でビルドを止める）。
+ * Netlify 以外（Vercel・Cloud Run・ローカル）では何もしない（lib/ops/netlify-build-guard.ts）。開発サーバー・実行時には呼ばない。
+ */
+export default function config(phase: string): NextConfig {
+  if (phase === PHASE_PRODUCTION_BUILD) assertNetlifyBuildEnv(process.env);
+  return nextConfig;
+}
