@@ -163,7 +163,7 @@ export type CronWebhookRecoveryResult =
  * 定期処理（/api/cron/maintenance）から呼ぶ自動の復旧。Stripe の接続（stripeRuntime）が使えない環境（今の Production は
  * テスト決済を拒否する）・Firestore ではない環境では何もしない。例外を投げない（定期処理のほかの結果を変えない）。
  */
-export async function runCronWebhookRecovery(signal?: AbortSignal): Promise<CronWebhookRecoveryResult> {
+export async function runCronWebhookRecovery(signal?: AbortSignal, opts: { deadlineMs?: number } = {}): Promise<CronWebhookRecoveryResult> {
   const { isFirestore } = await import("@/lib/data-provider");
   if (!isFirestore()) return { status: "skipped", reason: "not_firestore" };
   let rt: StripeRuntime;
@@ -172,7 +172,8 @@ export async function runCronWebhookRecovery(signal?: AbortSignal): Promise<Cron
   } catch {
     return { status: "skipped", reason: "stripe_unavailable" };
   }
-  const s = await runStripeWebhookRecovery(rt, { source: "cron", ...(signal ? { signal } : {}) });
+  // opts.deadlineMs … 段階ごとの短い実行（/api/cron/maintenance?phase=…）で、関数の実行時間の上限より短くする。省略時は従来どおり
+  const s = await runStripeWebhookRecovery(rt, { source: "cron", ...(signal ? { signal } : {}), ...(opts.deadlineMs ? { deadlineMs: opts.deadlineMs } : {}) });
   const failed = s.results.failed + s.results.stripe_error + s.results.event_unavailable + s.results.event_mismatch;
   return { status: s.status, scanned: s.scanned, attempted: s.attempted, deferred: s.deferred, truncated: s.truncated, recovered: s.results.recovered + s.results.ignored_other_env, failed };
 }

@@ -20,6 +20,7 @@ export const CRON_LOCK_TTL_MS = 330 * 1000;
 
 const lockRef = () => fsdb().collection(C.system).doc("cronLock");
 const runRef = () => fsdb().collection(C.system).doc("cronRun");
+const phaseRunsRef = () => fsdb().collection(C.system).doc("cronPhaseRuns");
 
 export type CronLockResult = { ok: true; ownerId: string; tookOverExpired: boolean } | { ok: false; heldUntil: Date | null };
 
@@ -135,4 +136,84 @@ export async function recordCronRun(ownerId: string, r: CronRunRecord): Promise<
     );
     return true;
   });
+}
+
+/**
+ * 段階ごとの実行（/api/cron/maintenance?phase=…。Netlify などの実行時間の短い環境用）の結果。
+ * system/cronPhaseRuns に段階の名前ごとに1件（最後の結果だけ）。通知の段階（phase=notify）が読み、1日分の結果としてまとめて通知・記録する。
+ * 保存するのは状態・時刻・件数・エラーの識別子だけ（秘密情報・個人情報・エラーの文面は保存しない）。
+ */
+export type CronPhaseRunEntry = {
+  status: CronPhaseRecord["status"];
+  reason: CronPhaseRecord["reason"];
+  errorCode: string | null;
+  startedAt: Date;
+  finishedAt: Date;
+  durationMs: number;
+  abortSettled: boolean | null;
+  /** 段階の要約（件数・状態だけ。webhookRecovery・recheckRecovery・paymentMonitor の結果） */
+  detail: Record<string, unknown> | null;
+};
+
+/** 日時を含む要約を、保存・読み込みで同じ形にする（Firestore の Timestamp を Date に戻す） */
+function normalizeDetail(v: unknown): Record<string, unknown> | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const out: Record<string, unknown> = {};
+  for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+    if (x === undefined) continue;
+    if (x === null || typeof x === "string" || typeof x === "number" || typeof x === "boolean") out[k] = typeof x === "string" ? x.slice(0, 80) : x;
+    else if (x instanceof Date) out[k] = x;
+    else if (typeof x === "object" && typeof (x as { toDate?: unknown }).toDate === "function") {
+      // Firestore の Timestamp だけを日時に戻す（配列・入れ子のオブジェクトは保存しない。文字列への変換で日時と誤認しない）
+      const d = (x as { toDate: () => unknown }).toDate();
+      if (d instanceof Date && !Number.isNaN(d.getTime())) out[k] = d;
+    }
+  }
+  return out;
+}
+
+/** 記録：同じ段階の、より新しい開始の記録がすでにあれば上書きしない（古い実行が新しい結果を消さない） */
+export async function recordCronPhaseRun(phase: string, entry: CronPhaseRunEntry): Promise<boolean> {
+  return fsdb().runTransaction(async (tx) => {
+    const cur = await tx.get(phaseRunsRef());
+    const prev = cur.exists ? (cur.get(phase) as Record<string, unknown> | undefined) : undefined;
+    const prevStart = prev ? toDate(prev.startedAt) : null;
+    if (prevStart && prevStart.getTime() > entry.startedAt.getTime()) return false;
+    const value = {
+      status: entry.status,
+      reason: entry.reason,
+      errorCode: entry.errorCode ? entry.errorCode.slice(0, 80) : null,
+      startedAt: entry.startedAt,
+      finishedAt: entry.finishedAt,
+      durationMs: entry.durationMs,
+      abortSettled: entry.abortSettled,
+      detail: normalizeDetail(entry.detail),
+    };
+    tx.set(phaseRunsRef(), { [phase]: value, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+    return true;
+  });
+}
+
+export async function readCronPhaseRuns(): Promise<Record<string, CronPhaseRunEntry>> {
+  const d = await phaseRunsRef().get();
+  if (!d.exists) return {};
+  const out: Record<string, CronPhaseRunEntry> = {};
+  for (const [name, raw] of Object.entries(d.data() ?? {})) {
+    if (!raw || typeof raw !== "object" || name === "updatedAt") continue;
+    const r = raw as Record<string, unknown>;
+    const startedAt = toDate(r.startedAt);
+    const finishedAt = toDate(r.finishedAt);
+    if (!startedAt || !finishedAt || typeof r.status !== "string") continue;
+    out[name] = {
+      status: r.status as CronPhaseRunEntry["status"],
+      reason: (typeof r.reason === "string" ? r.reason : null) as CronPhaseRunEntry["reason"],
+      errorCode: typeof r.errorCode === "string" ? r.errorCode : null,
+      startedAt,
+      finishedAt,
+      durationMs: typeof r.durationMs === "number" ? r.durationMs : 0,
+      abortSettled: typeof r.abortSettled === "boolean" ? r.abortSettled : null,
+      detail: normalizeDetail(r.detail),
+    };
+  }
+  return out;
 }

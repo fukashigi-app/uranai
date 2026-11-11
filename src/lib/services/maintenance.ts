@@ -6,8 +6,12 @@ import { db } from "@/lib/db";
 import { purgeOldRateLimits } from "@/lib/security/rate-limit";
 
 /** 定期メンテナンス（期限切れ処理・不要データの削除）。冪等。signal … 中止の合図（Firestore 版だけが確かめる） */
-export async function runMaintenance(signal?: AbortSignal) {
-  if (isFirestore()) return fsMisc.runMaintenance({}, Date.now, signal);
+/**
+ * opts.deadlineMs … メンテナンスの中の時間の区切り（Firestore 版。省略時は従来どおり MAINTENANCE_DEADLINE_MS）。
+ * 定期処理を段階ごとに短い関数で実行するとき（/api/cron/maintenance?phase=…）に、関数の実行時間の上限より短くするために渡す
+ */
+export async function runMaintenance(signal?: AbortSignal, opts: { deadlineMs?: number } = {}) {
+  if (isFirestore()) return fsMisc.runMaintenance(opts.deadlineMs ? { deadlineMs: opts.deadlineMs } : {}, Date.now, signal);
   const d = db();
   const expiredSessions = await d.execute(sql`
     WITH s AS (
