@@ -37,8 +37,16 @@ function hasLiveStripe(e: Env): boolean {
   return key.startsWith("sk_live_") || key.startsWith("rk_live_") || (e.STRIPE_LIVE_CHECKOUT ?? "").trim().toLowerCase() === "on";
 }
 
-/** 診断を有効にできる環境か（トークンの照合の前に判定する。データベースには接続しない） */
+/**
+ * 診断を有効にできる環境か（トークンの照合の前に判定する。データベースには接続しない）。
+ * Cloud Run の Sandbox（従来の条件）か、Netlify の診断用ブランチの設定（環境変数の条件。Host の一致は clientIpDiagnosticsAccess で確かめる）。
+ */
 export function clientIpDiagnosticsEnabled(e: Env = process.env): boolean {
+  return cloudRunDiagnosticsEnabled(e) || netlifyDiagnosticsConfigured(e);
+}
+
+/** Cloud Run の Sandbox の条件（従来のまま） */
+function cloudRunDiagnosticsEnabled(e: Env): boolean {
   if (e.CLIENT_IP_DIAGNOSTICS !== "on") return false;
   if (!e.K_SERVICE || e.VERCEL) return false;
   if (e.VERCEL_ENV !== "preview") return false;
@@ -46,6 +54,44 @@ export function clientIpDiagnosticsEnabled(e: Env = process.env): boolean {
   if (e.PRODUCTION_FIREBASE_PROJECT_ID !== PRODUCTION_FIREBASE_PROJECT_ID) return false;
   if (hasLiveStripe(e)) return false;
   return (e.CLIENT_IP_DIAGNOSTICS_TOKEN ?? "").trim().length >= CLIENT_IP_DIAGNOSTICS_TOKEN_MIN_LENGTH;
+}
+
+/**
+ * Netlify の診断用のブランチ・Deploy Preview の URL の形（ブランチ名・番号--サイト名.netlify.app）。
+ * 本番のサイトの URL（サイト名.netlify.app）・独自ドメインは当てはまらない。デプロイの固定 URL（デプロイ ID--サイト名）も同じ形になるため、
+ * Host の一致は補助の条件として扱う（本番のデプロイには診断の環境変数を設定しないことと、Sandbox の設定であることで守る）
+ */
+const NETLIFY_DIAGNOSTICS_HOST_RE = /^[a-z0-9](?:[a-z0-9-]{0,61})--[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.netlify\.app$/;
+
+/** 設定された診断用の Host（小文字に揃える）。形が正しくなければ null */
+export function netlifyDiagnosticsHost(e: Env = process.env): string | null {
+  const v = (e.CLIENT_IP_DIAGNOSTICS_HOST ?? "").trim().toLowerCase();
+  if (!v || v.length > 253 || v.split(".")[0].length > 63) return null;
+  return NETLIFY_DIAGNOSTICS_HOST_RE.test(v) ? v : null;
+}
+
+/**
+ * Netlify の診断用ブランチの設定（環境変数の条件）。環境変数だけでは Netlify の Preview であることを保証できないため、
+ * Sandbox の設定であること（Preview 用の Firebase・本番の Firestore ではない・Stripe の本番の設定が無い）と、
+ * リクエストの Host の完全一致（clientIpDiagnosticsAccess）、運営者のログイン・診断用のトークンを合わせて守る。
+ */
+function netlifyDiagnosticsConfigured(e: Env): boolean {
+  if (e.CLIENT_IP_DIAGNOSTICS !== "on") return false;
+  if (e.CLIENT_IP_DIAGNOSTICS_PLATFORM !== "netlify") return false;
+  if (e.K_SERVICE || e.VERCEL) return false; // Cloud Run・Vercel では使わない
+  if (!netlifyDiagnosticsHost(e)) return false;
+  if (e.VERCEL_ENV !== "preview") return false;
+  if (e.FIREBASE_PROJECT_ID === PRODUCTION_FIREBASE_PROJECT_ID || !previewFirebaseTargetOf(e.FIREBASE_PROJECT_ID)) return false;
+  if (e.PRODUCTION_FIREBASE_PROJECT_ID !== PRODUCTION_FIREBASE_PROJECT_ID) return false;
+  if (hasLiveStripe(e)) return false;
+  return (e.CLIENT_IP_DIAGNOSTICS_TOKEN ?? "").trim().length >= CLIENT_IP_DIAGNOSTICS_TOKEN_MIN_LENGTH;
+}
+
+/** リクエストの Host ヘッダー（X-Forwarded-Host は見ない）が、設定した診断用の Host と完全に一致するか（ポート付き・複数の値は一致しない） */
+function netlifyHostMatches(headers: Headers, e: Env): boolean {
+  const want = netlifyDiagnosticsHost(e);
+  const got = (headers.get("host") ?? "").trim().toLowerCase();
+  return want !== null && got === want;
 }
 
 /** 診断用のトークンの専用ヘッダー（Cloud Run の IAM・IAP が使う Authorization と衝突させないため） */
@@ -60,7 +106,9 @@ export const DIAGNOSTICS_TOKEN_HEADER = "x-client-ip-diagnostics-token";
  * 比較はハッシュしてから timingSafeEqual。トークンは返さない・記録しない。
  */
 export function clientIpDiagnosticsAccess(headers: Headers, e: Env = process.env): ClientIpDiagnosticsAccess {
-  if (!clientIpDiagnosticsEnabled(e)) return "disabled";
+  // Cloud Run は従来の条件。Netlify は環境変数の条件に加え、Host の完全一致（一致しなければ存在も示さない＝disabled）
+  const enabled = cloudRunDiagnosticsEnabled(e) || (netlifyDiagnosticsConfigured(e) && netlifyHostMatches(headers, e));
+  if (!enabled) return "disabled";
   const expected = (e.CLIENT_IP_DIAGNOSTICS_TOKEN ?? "").trim();
   const authorization = headers.get("authorization");
   const dedicated = headers.get(DIAGNOSTICS_TOKEN_HEADER);
@@ -122,7 +170,36 @@ export type ClientIpDiagnostics = {
   host: { present: boolean; matchesAppUrl: boolean | null };
   xForwardedHost: { present: boolean; entryCount: number; firstMatchesAppUrl: boolean | null };
   xForwardedProto: { present: boolean; entryCount: number; first: "https" | "http" | "other" | null };
+  /** Netlify の診断のときだけ（CLIENT_IP_DIAGNOSTICS_PLATFORM=netlify）。値は返さない */
+  netlify?: NetlifyIpDiagnostics;
 };
+
+/** 1つのヘッダーの構造（有無・形・文書用のアドレスか・申告した IP と一致するか）。複数の値が結合されたものは other になる */
+export type HeaderShape = { present: boolean; kind: EntryKind | null; documentationAddress: boolean; matchesExpected: boolean | null };
+
+export type NetlifyIpDiagnostics = {
+  xNfClientConnectionIp: HeaderShape;
+  clientIp: HeaderShape;
+  xNfRequestIdPresent: boolean;
+  /**
+   * Netlify の Context.ip。Next.js の Route Handler から安全に取得できることは確認できていないため、
+   * 見つかっても信頼の根拠にはしない（present_unverified）。見つからなければ unavailable
+   */
+  contextIp: { status: "unavailable" | "present_unverified"; matchesExpected: boolean | null };
+};
+
+/**
+ * Netlify の Context.ip を読めるか（新しい依存パッケージは使わない。Edge Function 用の Netlify のグローバルがあれば、その値と比べるだけ）。
+ * 公式には Edge Function の処理の中だけで使えるもので、Route Handler では読めない見込み。読めても値は返さず、信頼の根拠にもしない
+ */
+function readNetlifyContextIp(): string | null {
+  try {
+    const ip = (globalThis as { Netlify?: { context?: { ip?: unknown } | null } }).Netlify?.context?.ip;
+    return typeof ip === "string" ? ip : null;
+  } catch {
+    return null;
+  }
+}
 
 export function clientIpDiagnostics(headers: Headers, e: Env = process.env): ClientIpDiagnostics {
   const expected = normalizeIp((headers.get(EXPECTED_IP_HEADER) ?? "").trim());
@@ -164,5 +241,22 @@ export function clientIpDiagnostics(headers: Headers, e: Env = process.env): Cli
     host: { present: presence(headers.get("host")), matchesAppUrl: sameHost(headers.get("host"), e.APP_URL) },
     xForwardedHost: { present: presence(xfh), entryCount: xfh === null ? 0 : xfh.split(",").length, firstMatchesAppUrl: sameHost(xfh, e.APP_URL) },
     xForwardedProto: { present: presence(xfp), entryCount: xfp === null ? 0 : xfp.split(",").length, first: proto === null ? null : proto === "https" || proto === "http" ? proto : "other" },
+    ...(e.CLIENT_IP_DIAGNOSTICS_PLATFORM === "netlify" ? { netlify: netlifyDiagnostics(headers, expected, matches) } : {}),
+  };
+}
+
+function netlifyDiagnostics(headers: Headers, expected: string | null, matches: (v: string | null) => boolean | null): NetlifyIpDiagnostics {
+  const shape = (name: string): HeaderShape => {
+    const v = headers.get(name);
+    if (v === null) return { present: false, kind: null, documentationAddress: false, matchesExpected: null };
+    const t = v.trim();
+    return { present: true, kind: entryKind(t), documentationAddress: isDocumentationAddress(t), matchesExpected: matches(v) };
+  };
+  const ctx = readNetlifyContextIp();
+  return {
+    xNfClientConnectionIp: shape("x-nf-client-connection-ip"),
+    clientIp: shape("client-ip"),
+    xNfRequestIdPresent: headers.get("x-nf-request-id") !== null,
+    contextIp: ctx === null ? { status: "unavailable", matchesExpected: null } : { status: "present_unverified", matchesExpected: expected === null ? null : normalizeIp(ctx.trim()) === expected },
   };
 }
