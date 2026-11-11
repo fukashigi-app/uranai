@@ -56,7 +56,8 @@ export async function destroySession(): Promise<void> {
     if (isFirestore()) await fsUsers.deleteSession(sha256Hex(token));
     else await db().delete(authSessions).where(eq(authSessions.id, sha256Hex(token)));
   }
-  jar.delete(sessionCookieName());
+  // 設定時（createSession）と同じ Path=/・Secure で削除する。__Host- の Cookie は Secure の無い削除をブラウザが受け付けないため
+  jar.delete({ name: sessionCookieName(), path: "/", secure: secureCookiesEnabled() });
 }
 
 /** 同一リクエスト内でキャッシュ */
