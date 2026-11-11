@@ -191,8 +191,15 @@ export function testGenerateContext(s: TestSession): { now: Date; purchaseSeed: 
   return { now, purchaseSeed: purchaseSeedFor(`test:${s.id}`) };
 }
 
-/** リクエストが HTTPS か（Vercel は常に https） */
+/**
+ * リクエストが HTTPS か（無料の占いの Cookie の Secure 属性に使う）。
+ *  - 従来（Vercel。Vercel が X-Forwarded-Proto を設定する）：X-Forwarded-Proto の先頭 → 無ければリクエストの URL
+ *  - TRUSTED_ORIGIN_SOURCE=app-url（Cloud Run 用）：検証済みの APP_URL（https のオリジン）だけを根拠にする。
+ *    X-Forwarded-Proto・リクエストの URL は見ない。APP_URL が未設定・不正・http なら例外（http として扱わない）
+ */
 export function isSecureRequest(req: Request): boolean {
+  const trusted = trustedOriginMode();
+  if (trusted.kind === "app-url") return trusted.origin.startsWith("https://");
   const proto = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() ?? new URL(req.url).protocol.replace(":", "");
   return proto === "https";
 }
