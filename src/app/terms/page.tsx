@@ -6,7 +6,7 @@ import {
   CHECKOUT_MINUTES,
   FORTUNE_USE_HOURS,
   LEGAL_UPDATED,
-  operatorInfo,
+  publicOperatorInfo,
   PAYMENT_METHODS_LABEL,
   PAYMENT_PROCESSOR,
   paymentTimingText,
@@ -26,7 +26,7 @@ export const metadata = { title: "利用規約" };
 export const dynamic = "force-dynamic";
 
 export default function TermsPage() {
-  const op = operatorInfo();
+  const op = publicOperatorInfo();
   return (
     <LegalPage title="利用規約" updated={LEGAL_UPDATED.terms}>
       <p>

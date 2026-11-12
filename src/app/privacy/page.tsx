@@ -5,7 +5,7 @@ import {
   omittedOperatorItems,
   FORTUNE_USE_HOURS,
   LEGAL_UPDATED,
-  operatorInfo,
+  publicOperatorInfo,
   PAYMENT_METHODS_LABEL,
   PAYMENT_PROCESSOR,
   REPLY_NOTE,
@@ -26,7 +26,7 @@ export const dynamic = "force-dynamic";
  * 保存期間が決まっていない記録に、架空の期限を書かないこと。
  */
 export default function PrivacyPage() {
-  const op = operatorInfo();
+  const op = publicOperatorInfo();
   const cookies: [string, string, string][] = [
     ["qr_store", "読み込んだQRコードの店舗を識別するため", "6時間"],
     ["fx_access", `お支払いと占いの権利・結果をこのブラウザに結びつけるため（運営者のサーバーには、元に戻せない形に変換した値のみを保存します）`, "3日"],

@@ -70,10 +70,15 @@ describe("実行時の生成（ビルド時の値に固定しない）", () => {
     }
   });
 
-  it("特商法の表記：問い合わせ先・氏名・所在地・電話番号も実行時の値（架空の値で確認）", async () => {
+  it("特商法の表記：問い合わせ先は実行時の値。氏名・所在地・電話番号は実行時に設定されていても表示しない（架空の値で確認）", async () => {
     Object.assign(process.env, A, { OPERATOR_OWNER_NAME: "試験 太郎", OPERATOR_ADDRESS: "架空県テスト市1-2-3", OPERATOR_PHONE: "000-0000-0000" });
+    for (const [path, load] of PAGES) {
+      const html = await render(load);
+      for (const v of ["試験 太郎", "架空県テスト市1-2-3", "000-0000-0000"]) expect(html, `${path} ${v}`).not.toContain(v);
+    }
     const html = await render(PAGES[0][1]);
-    for (const v of [A.OPERATOR_EMAIL, "試験 太郎", "架空県テスト市1-2-3", "000-0000-0000"]) expect(html).toContain(v);
+    expect(html).toContain(A.OPERATOR_EMAIL);
+    expect(html).toContain("表示を省略しております");
   });
 });
 

@@ -9,7 +9,7 @@ import {
   FORTUNE_USE_HOURS,
   LEGAL_UPDATED,
   omittedOperatorItems,
-  operatorInfo,
+  publicOperatorInfo,
   PAYMENT_METHODS_LABEL,
   PAYMENT_PROCESSOR,
   paymentTimingText,
@@ -37,7 +37,7 @@ function mailTo(email: string, marker: "data-operator-email" | "data-disclosure-
 }
 
 export default function CommercialTransactionPage() {
-  const op = operatorInfo();
+  const op = publicOperatorInfo();
   const mail = mailTo(op.email, "data-operator-email");
   const omitted = omittedOperatorItems(op);
   // 表示している項目だけを行にする（省略している項目は、下の1か所の説明にまとめる。同じ説明をくり返さない）

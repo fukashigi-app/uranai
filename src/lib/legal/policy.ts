@@ -1,6 +1,6 @@
 import "server-only";
 import { CHECKOUT_TTL_MS, FORTUNE_SESSION_TTL_MS, PRICE_JPY, RESULT_VIEWABLE_MS } from "@/config/pricing";
-import { readOperatorInfo } from "@/config/operator";
+import { readOperatorInfo, type OperatorInfo } from "@/config/operator";
 
 /**
  * 特定商取引法に基づく表記・利用規約・プライバシーポリシー・購入画面で共通に使う運営方針。
@@ -68,7 +68,7 @@ export const REPLY_NOTE = `原則として${REPLY_BUSINESS_DAYS}営業日以内�
 
 /**
  * 販売事業者の氏名・住所・電話番号の請求時開示（特定商取引法第11条ただし書き）の説明。
- * 個人事業主のため、これらの値は画面・コードに埋め込まない（環境変数で設定したものだけを表示する）。
+ * 個人事業主のため、これらの値は画面・コードに埋め込まない（環境変数に設定されていても公開ページには表示しない。publicOperatorInfo）。
  * omitted … 表示を省略している項目（「氏名」「住所」「電話番号」の順）。説明は特定商取引法に基づく表記の1か所だけに出す
  * （この方式が法令上の条件を満たすかは、運営者が外部で確認する）。
  */
@@ -90,6 +90,14 @@ export function omittedOperatorItems(op: { ownerName: string | null; address: st
   return [op.ownerName ? null : "氏名", op.address ? null : "住所", op.phone ? null : "電話番号"].filter((v): v is string => v !== null);
 }
 
-export function operatorInfo() {
-  return readOperatorInfo().info;
+/**
+ * 一般公開ページ（特定商取引法に基づく表記・利用規約・プライバシーポリシー）に表示する運営者情報。
+ * 事業者の氏名・住所・電話番号は、環境変数（OPERATOR_OWNER_NAME・OPERATOR_ADDRESS・OPERATOR_PHONE）が設定されていても
+ * 常に表示しない（特定商取引法第11条ただし書きに基づく請求時開示。値は開示の請求に応じるために環境変数に保持するだけで、
+ * ページ・HTML には含めない）。屋号・問い合わせ先は今までどおり表示する。
+ * 環境変数の形式の確認（運営画面・/api/health の通知）は readOperatorInfo のまま。
+ */
+export function publicOperatorInfo(): OperatorInfo {
+  const { info } = readOperatorInfo();
+  return { ...info, ownerName: null, address: null, phone: null };
 }

@@ -75,17 +75,19 @@ describe("運営者情報の設定", () => {
     expect(issues.some((i) => i.level === "notice" && i.key === "NEXT_PUBLIC_OPERATOR_ADDRESS")).toBe(true);
   });
 
-  it("氏名・住所・電話番号がすべて設定されれば、その値を表示し請求時開示の通知は出ない", () => {
+  it("氏名・住所・電話番号がすべて設定されていても、公開ページには表示せず請求時開示の案内を出す（値は環境変数に保持するだけ）", () => {
     vi.stubEnv("OPERATOR_OWNER_NAME", "山田 太郎");
     vi.stubEnv("OPERATOR_ADDRESS", "東京都千代田区1-1-1");
     vi.stubEnv("OPERATOR_PHONE", "03-0000-0000");
-    expect(readOperatorInfo(process.env).issues).toEqual([]);
+    // 環境変数の読み込み・形式の確認は今までどおり（開示の請求に応じるための値として保持）
+    const { info, issues } = readOperatorInfo(process.env);
+    expect(issues).toEqual([]);
+    expect([info.ownerName, info.address, info.phone]).toEqual(["山田 太郎", "東京都千代田区1-1-1", "03-0000-0000"]);
     const t = page(CommercialTransactionPage);
-    expect(t).toContain("山田 太郎");
-    expect(t).toContain("東京都千代田区1-1-1");
-    expect(t).toContain("03-0000-0000");
-    expect(t).not.toContain("第11条ただし書き");
-    expect(t).not.toContain("表示を省略");
+    expect(t).not.toContain("山田 太郎");
+    expect(t).not.toContain("東京都千代田区1-1-1");
+    expect(t).not.toContain("03-0000-0000");
+    expect(t).toContain("特定商取引法第11条ただし書きに基づき、販売事業者の氏名、住所および電話番号の表示を省略しております。");
   });
 });
 
@@ -144,14 +146,15 @@ describe("事業者情報の開示請求（特定商取引法第11条ただし�
     expect(t).toContain("原則として3営業日以内");
   });
 
-  it("一部だけ表示しているときは、省略している項目だけを説明する", () => {
+  it("一部だけ設定されていても、氏名・住所・電話番号はそろって省略し、まとめて説明する", () => {
     vi.stubEnv("OPERATOR_OWNER_NAME", "山田 太郎");
     const t = page(CommercialTransactionPage);
-    expect(t).toContain("山田 太郎");
-    expect(t).toContain("販売事業者の住所および電話番号の表示を省略しております。これらの情報について");
-    expect(t).not.toContain("氏名、住所");
+    expect(t).not.toContain("山田 太郎");
+    expect(t).toContain("販売事業者の氏名、住所および電話番号の表示を省略しております。これらの情報について");
     vi.stubEnv("OPERATOR_ADDRESS", "東京都千代田区1-1-1");
-    expect(page(CommercialTransactionPage)).toContain("販売事業者の電話番号の表示を省略しております。この情報について");
+    const t2 = page(CommercialTransactionPage);
+    expect(t2).not.toContain("東京都千代田区1-1-1");
+    expect(t2).toContain("販売事業者の氏名、住所および電話番号の表示を省略しております。");
   });
 
   it("プライバシーポリシー：説明はくり返さず、特商法表記の請求方法へ案内する", () => {
@@ -177,12 +180,19 @@ describe("事業者情報の開示請求（特定商取引法第11条ただし�
     }
   });
 
-  it("氏名・住所・電話番号をすべて掲載した場合は、開示請求の案内を出さない", () => {
+  it("氏名・住所・電話番号がすべて設定されていても、どの公開ページの HTML にも値を含めず、開示請求の案内を出す", () => {
     vi.stubEnv("OPERATOR_OWNER_NAME", "山田 太郎");
     vi.stubEnv("OPERATOR_ADDRESS", "東京都千代田区1-1-1");
     vi.stubEnv("OPERATOR_PHONE", "03-0000-0000");
-    expect(html(CommercialTransactionPage)).not.toContain("data-disclosure-email");
-    expect(html(PrivacyPage)).not.toContain("data-disclosure-guide");
+    for (const Page of [CommercialTransactionPage, PrivacyPage, TermsPage]) {
+      const h = html(Page);
+      for (const v of ["山田 太郎", "山田", "東京都千代田区1-1-1", "千代田区", "03-0000-0000"]) expect(h, v).not.toContain(v);
+      // 屋号・問い合わせ先は今までどおり
+      expect(h).toContain("Hobby shop FUKASHIGI");
+      expect(h).toContain('href="mailto:koyomi100yen@gmail.com"');
+    }
+    expect(html(CommercialTransactionPage)).toContain("data-disclosure-email");
+    expect(html(PrivacyPage)).toContain("data-disclosure-guide");
   });
 });
 
